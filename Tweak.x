@@ -34,7 +34,7 @@
 // 全局变量与路径
 // ==========================================
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必替换真实 bundleID】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必替换为你真实的 bundleID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -48,6 +48,9 @@ static NSString * GetPrefsPlistPath() {
 static NSHashTable *g_allTendiesViews = nil;
 static NSString *g_tendiesPath = @"";
 static BOOL g_enabled = YES;
+
+// 【核心新增】全局状态共享器。保证锁屏和桌面的壁纸动画永远在同一帧！
+static NSString *g_currentGlobalState = @"Locked";
 
 static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -91,7 +94,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
         self.camlLayers = [NSMutableArray array];
         self.stateControllers = [NSMutableArray array];
         self.userInteractionEnabled = NO; 
-        self.backgroundColor = [UIColor blackColor]; 
+        self.backgroundColor = [UIColor blackColor]; // 用纯黑背景物理遮盖原壁纸，防走光
     }
     return self;
 }
@@ -103,7 +106,6 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
     [self.camlLayers removeAllObjects];
     [self.stateControllers removeAllObjects];
 
-    // 如果开关关闭或路径为空，直接隐藏并返回
     if (!g_enabled || path.length == 0) {
         self.hidden = YES;
         return;
@@ -132,14 +134,12 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 
                     CAStateController *sc = [[NSClassFromString(@"CAStateController") alloc] initWithLayer:layer];
                     [self.stateControllers addObject:sc];
-                    
-                    if (self.currentState) {
-                        [sc setState:self.currentState ofLayer:layer];
-                    }
                 }
             }
         }
     }
+    // 加载完成后立刻同步到全局状态
+    [self setState:g_currentGlobalState];
 }
 
 - (void)layoutSubviews {
@@ -163,7 +163,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 @end
 
 // ==========================================
-// 注入逻辑
+// 注入与驱动逻辑
 // ==========================================
 static void reloadPrefsAndInject() {
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:GetPrefsPlistPath()];
@@ -177,28 +177,20 @@ static void reloadPrefsAndInject() {
     }
 }
 
-// 核心重构：全局唯一静止挂载，彻底解决桌面黑屏与锁屏分离断层 Bug
-static void injectGlobalTendies(UIView *wallpaperView) {
-    if (!wallpaperView || !wallpaperView.window) return;
+// 【核心修复】直接向壁纸容器自身注入！无视 iOS 16/17 的多窗口、模糊层、渐变层
+static void injectTendiesIntoWallpaperView(UIView *wallpaperView) {
+    if (!wallpaperView) return;
     
-    UIWindow *win = wallpaperView.window;
-    NSString *winClass = NSStringFromClass([win class]);
-    
-    // 只认准系统最底层的壁纸 Window
-    if (![winClass containsString:@"WallpaperWindow"]) {
-        return;
-    }
-    
-    // 获取 Window 最底层的根视图进行安全挂载
-    UIView *hostView = win.rootViewController ? win.rootViewController.view : win;
-    
-    TendiesView *tView = objc_getAssociatedObject(win, "GlobalTendiesView");
+    TendiesView *tView = objc_getAssociatedObject(wallpaperView, "TendiesView");
     if (!tView) {
-        tView = [[TendiesView alloc] initWithFrame:hostView.bounds];
+        tView = [[TendiesView alloc] initWithFrame:wallpaperView.bounds];
         tView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         
-        [hostView addSubview:tView];
-        objc_setAssociatedObject(win, "GlobalTendiesView", tView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // 关键点：9999 zPosition 强行置顶，无视系统新增的海报遮挡层，但不影响桌面图标！
+        tView.layer.zPosition = 9999; 
+        
+        [wallpaperView addSubview:tView];
+        objc_setAssociatedObject(wallpaperView, "TendiesView", tView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         
         @synchronized(g_allTendiesViews) {
             if (!g_allTendiesViews) g_allTendiesViews = [NSHashTable weakObjectsHashTable];
@@ -208,9 +200,9 @@ static void injectGlobalTendies(UIView *wallpaperView) {
         [tView loadTendiesFromPath:g_tendiesPath];
     }
     
-    // 强制提升至最顶层，无视 iOS 16/17 PosterKit 的模糊遮挡与系统海报，且因为属于 WallpaperWindow，绝不遮挡桌面图标！
-    [hostView bringSubviewToFront:tView];
-    tView.frame = hostView.bounds;
+    // 每次 Layout 确保它在最前面
+    [wallpaperView bringSubviewToFront:tView];
+    tView.frame = wallpaperView.bounds;
 }
 
 // ==========================================
@@ -223,54 +215,58 @@ static void injectGlobalTendies(UIView *wallpaperView) {
 %hook SBFWallpaperView
 - (void)didMoveToWindow {
     %orig;
-    injectGlobalTendies(self);
+    injectTendiesIntoWallpaperView(self);
 }
 - (void)layoutSubviews {
     %orig;
-    injectGlobalTendies(self);
+    injectTendiesIntoWallpaperView(self);
 }
 %end
 
-// --- 交互手势驱动区 (核心控制器，绝不注入视图) ---
-// 只负责向底层静止的 TendiesView 传递解锁状态，让 CAML 自己播放丝滑的飞出动画！
+// --- 交互手势驱动区 ---
+// 这里不再注入 View！纯粹作为向后台发出动画信号的触发器
 %hook CSCoverSheetViewController
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    g_currentGlobalState = @"Locked";
     @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
+        for (TendiesView *v in g_allTendiesViews) [v setState:g_currentGlobalState];
     }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
+    g_currentGlobalState = @"Unlock";
     @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
+        for (TendiesView *v in g_allTendiesViews) [v setState:g_currentGlobalState];
     }
 }
 
-// 截取上滑手势，瞬间触发互动 (解决拖动透明图片没有动画感的核心)
+// 截取上滑手势，瞬间触发壁纸的马里奥飞出/互动动画
 - (void)_scrollPanGestureBegan:(id)arg {
     %orig;
     if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
         UIPanGestureRecognizer *gesture = (UIPanGestureRecognizer *)arg;
         CGPoint velocity = [gesture velocityInView:gesture.view];
         if (velocity.y < 0) { // 监测到上滑
+            g_currentGlobalState = @"Unlock";
             @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
+                for (TendiesView *v in g_allTendiesViews) [v setState:g_currentGlobalState];
             }
         }
     }
 }
 
-// 防止手势取消卡在半空，如果未成功解锁，则回退状态
+// 防止手势取消（滑到一半松手），状态恢复
 - (void)_scrollPanGestureEnded:(id)arg {
     %orig;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (weakSelf && weakSelf.view.window && !weakSelf.isTransitioning) {
+            g_currentGlobalState = @"Locked";
             @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
+                for (TendiesView *v in g_allTendiesViews) [v setState:g_currentGlobalState];
             }
         }
     });
@@ -278,9 +274,9 @@ static void injectGlobalTendies(UIView *wallpaperView) {
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    NSString *newState = mode ? @"Sleep" : @"Locked";
+    g_currentGlobalState = mode ? @"Sleep" : @"Locked";
     @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:newState];
+        for (TendiesView *v in g_allTendiesViews) [v setState:g_currentGlobalState];
     }
 }
 %end
@@ -288,7 +284,7 @@ static void injectGlobalTendies(UIView *wallpaperView) {
 
 
 // --------------------------------------------------
-// iOS 16+ 桌面特有注入
+// iOS 16-17 桌面特有注入 (PosterKit 时代)
 // --------------------------------------------------
 %group iOS16Up
 
@@ -296,11 +292,11 @@ static void injectGlobalTendies(UIView *wallpaperView) {
 %hook PBUIWallpaperView
 - (void)didMoveToWindow {
     %orig;
-    injectGlobalTendies(self);
+    injectTendiesIntoWallpaperView(self);
 }
 - (void)layoutSubviews {
     %orig;
-    injectGlobalTendies(self);
+    injectTendiesIntoWallpaperView(self);
 }
 %end
 
