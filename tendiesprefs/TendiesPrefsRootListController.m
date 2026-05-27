@@ -13,13 +13,25 @@
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
-#else
-#define jbroot(path) path
 #endif
 
-// 保存到无沙盒阻碍的目录
+// ==========================================
+// 统一的路径获取辅助函数（解决 Rootless 下读写脱节）
+// ==========================================
 static NSString * GetTendiesStorageDir() {
     NSString *base = @"/var/mobile/Documents/TendiesEnabler";
+#if __has_include(<roothide.h>)
+    return jbroot(base);
+#else
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
+        return [@"/var/jb" stringByAppendingPathComponent:base];
+    }
+    return base;
+#endif
+}
+
+static NSString * GetPrefsPlistPath() {
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必替换为您真实的 bundleID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -66,7 +78,6 @@ static NSString * GetTendiesStorageDir() {
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
     NSString *subpath;
     
-    // 501 通常是 iOS 中 mobile 用户的 UID 和 GID
     chown(path.UTF8String, 501, 501);
     chmod(path.UTF8String, 0777);
     
@@ -149,23 +160,20 @@ static NSString * GetTendiesStorageDir() {
             
             if (processSuccess) {
                 NSLog(@"[TendiesPrefs] 文件部署成功，开始转移权限并写入 Plist...");
-                // 1. 强制权限属于 Mobile，让 SpringBoard 可见
+                
                 [self forceOwnershipToMobile:unzipDir];
                 
-                // 2. 写入配置到真实物理路径，防止沙盒 CFPreferences 缓存不更新
+                // 核心修改：统一使用 GetPrefsPlistPath() 来写入路径，确保 SpringBoard 获取到的是同一个物理文件
                 NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
                 prefs[@"Enabled"] = @YES;
                 prefs[@"TendiesPath"] = unzipDir;
                 
-                NSString *plistPath = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 注意替换 bundleID
-#if __has_include(<roothide.h>)
-                plistPath = jbroot(plistPath);
-#endif
+                NSString *plistPath = GetPrefsPlistPath();
                 [prefs writeToFile:plistPath atomically:YES];
-                [self forceOwnershipToMobile:plistPath]; // Plist 也给权限
+                [self forceOwnershipToMobile:plistPath]; 
                 
-                // 3. 瞬间通知 SpringBoard 热重载
                 NSLog(@"[TendiesPrefs] 发送重载广播通知 (Darwin Notification)");
+                // 【注意：此处广播名称需与 .x 一致】
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -205,10 +213,7 @@ static NSString * GetTendiesStorageDir() {
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
     if ([specifier.identifier isEqualToString:@"Enabled"]) {
-        NSString *plistPath = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 替换
-#if __has_include(<roothide.h>)
-        plistPath = jbroot(plistPath);
-#endif
+        NSString *plistPath = GetPrefsPlistPath();
         NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
         prefs[@"Enabled"] = value;
         [prefs writeToFile:plistPath atomically:YES];
