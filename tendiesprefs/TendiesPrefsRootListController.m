@@ -57,7 +57,6 @@ static NSString * GetTendiesStorageDir() {
     });
 }
 
-// 递归赋予权限
 - (void)setPermissionsRecursive:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm setAttributes:@{NSFilePosixPermissions: @0777, NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:path error:nil];
@@ -69,7 +68,6 @@ static NSString * GetTendiesStorageDir() {
     }
 }
 
-// 【iOS 16+ 核心】：寻找 PosterBoard 沙盒存储路径
 - (NSString *)getPosterBoardDataStorePath {
     Class LSAppProxy = NSClassFromString(@"LSApplicationProxy");
     if (LSAppProxy) {
@@ -87,7 +85,7 @@ static NSString * GetTendiesStorageDir() {
     return nil;
 }
 
-// 【深度修复】：使用 NSPropertyListSerialization 确保文件以 Binary Plist 格式写回
+// 【修复】：以二进制 Plist 格式保存，避免系统检验报错
 - (void)randomizeDescriptorIDAtPath:(NSString *)descriptorPath {
     int randID = arc4random_uniform(90000) + 10000;
     NSString *randStr = [NSString stringWithFormat:@"%d", randID];
@@ -97,8 +95,6 @@ static NSString * GetTendiesStorageDir() {
     NSString *file;
     while((file = [enumerator nextObject])) {
         NSString *full = [descriptorPath stringByAppendingPathComponent:file];
-        
-        // 针对 Plist 和没有后缀的 userInfo 文件
         if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.contents.userInfo"] || [file.lastPathComponent isEqualToString:@"Wallpaper.plist"]) {
             
             NSData *plistData = [NSData dataWithContentsOfFile:full];
@@ -110,19 +106,13 @@ static NSString * GetTendiesStorageDir() {
                     } else {
                         plist[@"wallpaperRepresentingIdentifier"] = @(randID);
                     }
-                    
-                    // 【关键】：强制以 NSPropertyListBinaryFormat_v1_0 格式写回，满足系统检验！
+                    // 强制 Binary 写回
                     NSData *outData = [NSPropertyListSerialization dataWithPropertyList:plist format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
-                    if (outData) {
-                        [outData writeToFile:full atomically:YES];
-                    }
+                    if (outData) [outData writeToFile:full atomically:YES];
                 }
             }
-        } 
-        // 针对普通的 Identifier 文件
-        else if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
-            NSData *strData = [randStr dataUsingEncoding:NSUTF8StringEncoding];
-            [strData writeToFile:full atomically:YES];
+        } else if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
+            [[randStr dataUsingEncoding:NSUTF8StringEncoding] writeToFile:full atomically:YES];
         }
     }
 }
@@ -144,6 +134,7 @@ static NSString * GetTendiesStorageDir() {
     [topVC presentViewController:loadingAlert animated:YES completion:^{
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             
+            NSLog(@"[TendiesPrefs] 开始解压任务...");
             BOOL isAccessing = [sourceURL startAccessingSecurityScopedResource];
             NSFileManager *fm = [NSFileManager defaultManager];
             
@@ -169,7 +160,6 @@ static NSString * GetTendiesStorageDir() {
                     if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
                 }
             } else {
-                // 【修复】：适配 Rootless 的 unzip
                 NSString *unzipBin = @"/usr/bin/unzip";
 #if __has_include(<roothide.h>)
                 unzipBin = jbroot(unzipBin);
@@ -185,15 +175,26 @@ static NSString * GetTendiesStorageDir() {
                         [task launch];
                         [task waitUntilExit];
                         processSuccess = ([task terminationStatus] == 0);
-                    } @catch (NSException *e) { processSuccess = NO; }
+                        NSLog(@"[TendiesPrefs] Unzip 状态码: %d", [task terminationStatus]);
+                    } @catch (NSException *e) { 
+                        NSLog(@"[TendiesPrefs] Unzip 抛出异常: %@", e);
+                        processSuccess = NO; 
+                    }
                 }
             }
             if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             
             if (processSuccess) {
+                NSLog(@"[TendiesPrefs] 解压成功，开始注入路径...");
                 [self setPermissionsRecursive:unzipDir];
                 
-                // === iOS 16-17 原生文件植入流 ===
+                // === 通用 Hook 触发流（核心） ===
+                CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
+                CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
+                CFPreferencesAppSynchronize(appID);
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
+                
+                // === iOS 16-17 原生文件植入流（后备方案，修复文件夹嵌套） ===
                 if (@available(iOS 16.0, *)) {
                     NSString *pbDataStore = [self getPosterBoardDataStorePath];
                     if (pbDataStore) {
@@ -201,23 +202,20 @@ static NSString * GetTendiesStorageDir() {
                             [fm createDirectoryAtPath:pbDataStore withIntermediateDirectories:YES attributes:nil error:nil];
                         }
                         
-                        // 【修复】：动态寻址，防止解压包裹了一层文件夹导致找不到 descriptors
                         NSString *sourceDescriptors = [unzipDir stringByAppendingPathComponent:@"descriptors"];
                         if (![fm fileExistsAtPath:sourceDescriptors]) {
                             NSArray *contents = [fm contentsOfDirectoryAtPath:unzipDir error:nil];
                             for (NSString *sub in contents) {
                                 NSString *potential = [[unzipDir stringByAppendingPathComponent:sub] stringByAppendingPathComponent:@"descriptors"];
-                                if ([fm fileExistsAtPath:potential]) {
-                                    sourceDescriptors = potential;
-                                    break;
-                                }
+                                if ([fm fileExistsAtPath:potential]) { sourceDescriptors = potential; break; }
                             }
                         }
                         
                         if ([fm fileExistsAtPath:sourceDescriptors]) {
+                            NSLog(@"[TendiesPrefs] 定位到 descriptors: %@", sourceDescriptors);
                             NSArray *items = [fm contentsOfDirectoryAtPath:sourceDescriptors error:nil];
                             for (NSString *item in items) {
-                                if ([item hasPrefix:@"."]) continue; // 过滤隐藏文件
+                                if ([item hasPrefix:@"."]) continue;
                                 NSString *srcPath = [sourceDescriptors stringByAppendingPathComponent:item];
                                 NSString *destPath = [pbDataStore stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
                                 
@@ -226,14 +224,11 @@ static NSString * GetTendiesStorageDir() {
                                 [self setPermissionsRecursive:destPath];
                             }
                             
-                            // 【修复】：适配 Rootless 与 Rootful 的 killall 路径，强制斩杀系统服务刷新数据库
                             NSString *killallBin = @"/usr/bin/killall";
 #if __has_include(<roothide.h>)
                             killallBin = jbroot(killallBin);
 #else
-                            if ([fm fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
-                                killallBin = @"/var/jb/usr/bin/killall";
-                            }
+                            if ([fm fileExistsAtPath:@"/var/jb/usr/bin/killall"]) killallBin = @"/var/jb/usr/bin/killall";
 #endif
                             Class NSTaskClass = NSClassFromString(@"NSTask");
                             if (NSTaskClass && [fm fileExistsAtPath:killallBin]) {
@@ -242,38 +237,25 @@ static NSString * GetTendiesStorageDir() {
                                     [task setLaunchPath:killallBin];
                                     [task setArguments:@[@"-9", @"PosterBoard"]];
                                     [task launch];
+                                    NSLog(@"[TendiesPrefs] 成功重启 PosterBoard 进程");
                                 } @catch (NSException *e) {}
                             }
-                            
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:@"壁纸已植入系统！\n\n请在锁屏界面长按，向右划到最后点击“+新增” -> “收藏”，即可找到该壁纸！" preferredStyle:UIAlertControllerStyleAlert];
-                                    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                                    [topVC presentViewController:alert animated:YES completion:nil];
-                                }];
-                            });
-                            return; // 结束 iOS 16-17 的独占流程
                         }
                     }
                 }
                 
-                // === iOS 14-15 图层替换流 ===
-                CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
-                CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
-                CFPreferencesAppSynchronize(appID);
-                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
-                
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:@"壁纸已成功挂载！关闭控制面板即可在锁屏看到秒切效果。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载完成 🚀" message:@"若 Hook 生效：锁屏壁纸将自动转变。\n\n若在 iOS 16+ 想应用原版 Poster：长按锁屏 -> 新增 -> 收藏 即可找到。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
                 });
             } else {
+                NSLog(@"[TendiesPrefs] 解压进程彻底失败。");
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"解压失败" message:@"无效的壁纸文件，或者环境缺少 unzip 依赖。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"解压失败" message:@"无效的壁纸文件，或缺少 unzip 环境权限。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
