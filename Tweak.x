@@ -25,11 +25,21 @@
 - (void)setInScreenOffMode:(BOOL)mode;
 @end
 
+// 补全继承关系声明，以防万一
+@interface CSBackgroundContentViewController : UIViewController
+@end
+
+@interface SBFWallpaperView : UIView
+@end
+
+@interface PBUIWallpaperView : UIView
+@end
+
 // ==========================================
 // 全局变量
 // ==========================================
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【替换为你真实的 bundleID】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必替换为你真实的 bundleID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -182,7 +192,7 @@ static void injectTendiesIntoWallpaperView(UIView *container) {
         tView.frame = container.bounds;
     }
     
-    // 【核心修复】强制隐藏系统自带的图像/模糊/海报图层，彻底解决滑动露出底裤的问题
+    // 强制隐藏系统自带的图像/模糊/海报图层
     for (UIView *sub in container.subviews) {
         if (sub != tView && !sub.hidden) {
             sub.hidden = YES;
@@ -203,7 +213,8 @@ static void injectTendiesIntoWallpaperView(UIView *container) {
 %hook SBFWallpaperView
 - (void)layoutSubviews {
     %orig;
-    injectTendiesIntoWallpaperView(self);
+    // 显式转为 UIView * 以安抚严格的编译器
+    injectTendiesIntoWallpaperView((UIView *)self);
 }
 %end
 
@@ -228,11 +239,11 @@ static void injectTendiesIntoWallpaperView(UIView *container) {
     }
 }
 
-// 【核心修复】精准截获手指接触屏幕并开始滑动的瞬间
+// 截获手指接触屏幕并开始滑动的瞬间
 - (void)_scrollPanGestureBegan:(UIPanGestureRecognizer *)gesture {
     %orig;
     CGPoint velocity = [gesture velocityInView:gesture.view];
-    // 如果手指是往上滑（解锁手势），立刻触发弹簧动画跟手！
+    // 如果手指是往上滑（解锁手势），立刻触发弹簧动画跟手
     if (velocity.y < 0) { 
         @synchronized(g_allTendiesViews) {
             for (TendiesView *tView in g_allTendiesViews) [tView setState:@"Unlock"];
@@ -266,7 +277,7 @@ static void injectTendiesIntoWallpaperView(UIView *container) {
 %end // UniversalWallpaper
 
 // --------------------------------------------------
-// 3. iOS 16-17 专有海报引擎拦截 (彻底封杀新系统底层)
+// 3. iOS 16-17 专有海报引擎拦截
 // --------------------------------------------------
 %group iOS16Up
 
@@ -274,7 +285,8 @@ static void injectTendiesIntoWallpaperView(UIView *container) {
 %hook PBUIWallpaperView
 - (void)layoutSubviews {
     %orig;
-    injectTendiesIntoWallpaperView(self);
+    // 显式转为 UIView * 以安抚严格的编译器
+    injectTendiesIntoWallpaperView((UIView *)self);
 }
 %end
 
@@ -282,7 +294,8 @@ static void injectTendiesIntoWallpaperView(UIView *container) {
 %hook CSBackgroundContentViewController
 - (void)viewDidLayoutSubviews {
     %orig;
-    injectTendiesIntoWallpaperView(self.view);
+    // 显式转为 UIViewController * 并获取 view，避开编译器对未声明属性的检查
+    injectTendiesIntoWallpaperView(((UIViewController *)self).view);
 }
 %end
 
