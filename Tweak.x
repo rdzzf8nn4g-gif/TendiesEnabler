@@ -8,7 +8,7 @@
 #endif
 
 // ==========================================
-// 接口与继承声明
+// 接口与继承声明 (解决编译指针报错)
 // ==========================================
 @interface CAPackage : NSObject
 + (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)outError;
@@ -24,6 +24,23 @@
 @property (nonatomic, readonly) BOOL isTransitioning;
 - (void)setInScreenOffMode:(BOOL)mode;
 @end
+
+// --- 新增：修复 PBUIWallpaperViewController 编译报错 ---
+// 必须继承自 UIViewController，编译器才会知道它有 .view 属性
+@interface PBUIWallpaperViewController : UIViewController
+@property (nonatomic, strong) UIView *homescreenWallpaperView;
+@property (nonatomic, strong) UIView *lockscreenWallpaperView;
+@property (nonatomic, strong) UIView *sharedWallpaperView;
+@end
+
+// --- 新增：修复 SBWallpaperController 编译报错 ---
+// 必须继承自 NSObject，编译器才会允许调用 valueForKey:
+@interface SBWallpaperController : NSObject
+@end
+
+// ==========================================
+// 全局变量与路径
+// ==========================================
 
 // ==========================================
 // 全局变量与路径
