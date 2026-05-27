@@ -1,1 +1,35 @@
-
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>items</key>
+    <array>
+        <dict>
+            <key>cell</key> <string>PSGroupCell</string>
+            <key>label</key> <string>Global Settings</string>
+        </dict>
+        <dict>
+            <key>cell</key> <string>PSSwitchCell</string>
+            <key>default</key> <true/>
+            <key>defaults</key> <string>com.yourname.tendiesprefs</string>
+            <key>key</key> <string>Enabled</string>
+            <key>label</key> <string>Enable Tendies</string>
+        </dict>
+        
+        <dict>
+            <key>cell</key> <string>PSGroupCell</string>
+            <key>label</key> <string>Wallpaper Configuration</string>
+            <key>footerText</key> <string>Enter the full path to your unzipped .tendies folder (e.g. /var/mobile/Documents/Mario.tendies)</string>
+        </dict>
+        <dict>
+            <key>cell</key> <string>PSEditTextCell</string>
+            <key>default</key> <string></string>
+            <key>defaults</key> <string>com.yourname.tendiesprefs</string>
+            <key>key</key> <string>TendiesPath</string>
+            <key>placeholder</key> <string>/var/mobile/.../YourWallpaper.tendies</string>
+        </dict>
+    </array>
+    <key>title</key>
+    <string>TendiesEnabler</string>
+</dict>
+</plist>
