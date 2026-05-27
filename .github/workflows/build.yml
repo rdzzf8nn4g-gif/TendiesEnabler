@@ -1,43 +1,45 @@
-name: Build iOS Tweak
+name: Build TendiesEnabler
 
 on:
-  
+  push:
+ 
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    name: Build iOS Tweak
+    runs-on: macos-latest 
+    env:
+      THEOS: ${{ github.workspace }}/theos 
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
+      - name: 📥 检出代码 (Checkout Repository)
+        uses: actions/checkout@v4
 
-      - name: Setup Theos
-        uses: actions/checkout@v3
-        with:
-          repository: theos/theos
-          ref: master
-          path: theos
-          submodules: true
-
-      - name: Setup iOS SDK
-        uses: actions/checkout@v3
-        with:
-          repository: theos/sdks
-          ref: master
-          path: theos/sdks
-
-      - name: Build Rootless (无根)
+      - name: ⚙️ 安装依赖 (Install Dependencies)
         run: |
-          export THEOS=${{ github.workspace }}/theos
-          make package THEOS_PACKAGE_SCHEME=rootless
+          brew install ldid dpkg
 
-      - name: Build Rootful (有根)
+      - name: 🛠️ 配置 Theos 环境 (Setup Roothide Theos)
         run: |
-          export THEOS=${{ github.workspace }}/theos
-          make package
+          echo "Cloning Roothide Theos fork..."
+          # 直接使用 Roothide 官方分支的 Theos，自带头文件且支持有根/无根/隐根编译！
+          git clone --recursive https://github.com/roothide/theos.git $THEOS
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v3
+      - name: 📦 下载 iOS SDK (Setup iOS SDKs)
+        run: |
+          echo "Cloning iOS SDKs..."
+          rm -rf $THEOS/sdks
+          git clone https://github.com/theos/sdks.git $THEOS/sdks
+
+      - name: 🚀 运行编译脚本 (Run build.sh)
+        run: |
+          chmod +x build.sh
+          # 使用 sudo -E 提权执行
+          sudo -E ./build.sh
+
+      - name: 📤 上传编译产物 (Upload Artifacts)
+        uses: actions/upload-artifact@v4
         with:
           name: TendiesEnabler-Packages
           path: packages/*.deb
