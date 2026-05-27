@@ -8,7 +8,7 @@
 #endif
 
 // ==========================================
-// 接口与继承声明 (解决编译指针报错)
+// 接口与继承声明
 // ==========================================
 @interface CAPackage : NSObject
 + (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)outError;
@@ -25,9 +25,6 @@
 - (void)setInScreenOffMode:(BOOL)mode;
 @end
 
-// 明确继承关系，让编译器闭嘴
-@interface CSCoverSheetView : UIView
-@end
 @interface SBFWallpaperView : UIView
 @end
 @interface PBUIWallpaperView : UIView
@@ -37,7 +34,7 @@
 // 全局变量与路径
 // ==========================================
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【替换真实 bundleID】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必替换真实 bundleID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -78,7 +75,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 }
 
 // ==========================================
-// 核心视图类 (彻底修复动画罢工)
+// 核心视图类 (彻底重构：支持手势搓碟与接管)
 // ==========================================
 @interface TendiesView : UIView
 @property (nonatomic, strong) NSMutableArray *camlLayers;
@@ -86,6 +83,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 @property (nonatomic, strong) NSString *currentState;
 - (void)loadTendiesFromPath:(NSString *)path;
 - (void)setState:(NSString *)state;
+- (void)setAnimationProgress:(CGFloat)progress; // 新增：跟手进度
 @end
 
 @implementation TendiesView
@@ -94,7 +92,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
         self.camlLayers = [NSMutableArray array];
         self.stateControllers = [NSMutableArray array];
         self.userInteractionEnabled = NO; // 不阻挡底层触摸
-        self.backgroundColor = [UIColor blackColor]; // 加黑底，防止系统壁纸透底
+        self.backgroundColor = [UIColor blackColor]; // 防透底
     }
     return self;
 }
@@ -122,7 +120,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
                     layer.masksToBounds = YES;
                     layer.allowsEdgeAntialiasing = YES;
                     
-                    // 【核心修复1】防止系统省电机制休眠动画引擎
+                    // 默认开启引擎
                     layer.speed = 1.0; 
                     
                     [self.layer addSublayer:layer];
@@ -142,11 +140,9 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    // 【核心修复2】每次布局刷新时，强制唤醒动画层
-    self.layer.speed = 1.0; 
+    // 修复：不要在这里强制设置 layer.speed = 1.0，否则会打断手势滑动时的 Scrubbing！
     for (CALayer *layer in self.camlLayers) {
         layer.frame = self.bounds;
-        layer.speed = 1.0; 
     }
 }
 
@@ -157,6 +153,19 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
         CAStateController *sc = self.stateControllers[i];
         CALayer *layer = self.camlLayers[i];
         [sc setState:state ofLayer:layer];
+    }
+}
+
+// 核心修复：手势驱动动画进度 (Scrubbing)
+- (void)setAnimationProgress:(CGFloat)progress {
+    progress = MAX(0.0, MIN(1.0, progress));
+    for (CALayer *layer in self.camlLayers) {
+        // 暂停自动播放，完全交由代码控制进度
+        layer.speed = 0.0;
+        
+        // 大多数 Tendies 的 Unlock 动画时长为 0.8s，这里映射时间线
+        CGFloat totalDuration = 0.8; 
+        layer.timeOffset = progress * totalDuration;
     }
 }
 @end
@@ -173,16 +182,21 @@ static void reloadPrefsAndInject() {
     }
 }
 
-// 智能挂载器：区分桌面与锁屏，隔离后台卡片
+// ==========================================
+// 智能挂载器：仅挂载桌面，隔离并清理毛玻璃
+// ==========================================
 static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
     if (!container || !container.window) return;
     
-    // 【核心修复3】白名单隔离：彻底干掉多任务后台卡片出现壁纸的 Bug
+    // 【核心修复 1】彻底废弃锁屏注入！避免两层壁纸重叠与滑动分离
+    // 只允许原生壁纸层 (SBFWallpaperView/PBUIWallpaperView) 的注入
+    if (isLockscreen) return;
+    
+    // 白名单隔离：干掉后台卡片出现壁纸的 Bug
     NSString *winClass = NSStringFromClass([container.window class]);
     if (![winClass containsString:@"WallpaperWindow"] && 
-        ![winClass containsString:@"CoverSheet"] && 
         ![winClass containsString:@"SecureWindow"]) {
-        return; // 凡是后台卡片、文件夹背景的渲染，直接拒绝注入！
+        return; 
     }
     
     TendiesView *tView = objc_getAssociatedObject(container, "TendiesView");
@@ -190,13 +204,8 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
         tView = [[TendiesView alloc] initWithFrame:container.bounds];
         tView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         
-        if (isLockscreen) {
-            // 锁屏：垫在 CoverSheet 最底层，绝不能 hide 系统子视图（否则没时间/通知）
-            [container insertSubview:tView atIndex:0];
-        } else {
-            // 桌面：直接铺满
-            [container addSubview:tView];
-        }
+        // 桌面：直接铺在最底层
+        [container insertSubview:tView atIndex:0];
         
         objc_setAssociatedObject(container, "TendiesView", tView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         
@@ -208,19 +217,21 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
         [tView loadTendiesFromPath:g_tendiesPath];
     } else {
         tView.frame = container.bounds;
-        if (isLockscreen) {
-            [container sendSubviewToBack:tView];
-        } else {
-            [container bringSubviewToFront:tView];
-        }
+        [container sendSubviewToBack:tView];
     }
     
-    // 【核心修复4】温和隐藏：仅对桌面执行隐藏操作，完美避开 iOS 16/17 触摸失效崩溃
-    if (!isLockscreen) {
-        for (UIView *sub in container.subviews) {
-            if (sub != tView && !sub.hidden) {
-                sub.hidden = YES;
-            }
+    // 【核心修复 2】暴力干掉 iOS 16/17 桌面原生的纯色背景、模糊层或原生壁纸层
+    // 让 TendiesView 得以透过遮罩显现
+    for (UIView *sub in container.subviews) {
+        if (sub == tView) continue;
+        
+        NSString *subClassName = NSStringFromClass([sub class]);
+        if ([subClassName containsString:@"Effect"] || 
+            [subClassName containsString:@"Blur"] ||
+            [subClassName containsString:@"Poster"] ||
+            [subClassName containsString:@"Legibility"]) {
+            sub.hidden = YES;
+            sub.alpha = 0.0;
         }
     }
 }
@@ -231,79 +242,107 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
 
 %group UniversalWallpaper
 
-// --- 桌面壁纸注入 (iOS 14-15 全局) ---
+// --- 桌面壁纸注入 (iOS 14-15) ---
 %hook SBFWallpaperView
 - (void)didMoveToWindow {
     %orig;
-    injectTendiesSmart((UIView *)self, NO);
+    injectTendiesSmart(self, NO);
 }
 - (void)layoutSubviews {
     %orig;
-    injectTendiesSmart((UIView *)self, NO);
+    injectTendiesSmart(self, NO);
 }
 %end
 
-// --- 锁屏壁纸注入 (iOS 14-17 通杀) ---
-// 这招直接覆盖在原生锁屏海报系统上面，一劳永逸
-%hook CSCoverSheetView
-- (void)didMoveToWindow {
-    %orig;
-    injectTendiesSmart((UIView *)self, YES);
-}
-- (void)layoutSubviews {
-    %orig;
-    injectTendiesSmart((UIView *)self, YES);
-}
-%end
-
-// --- 交互手势驱动区 ---
+// === 交互手势驱动核心 ===
+// 这里控制的直接是底层唯一挂载的 TendiesView，视觉绝对不会脱节
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
+        for (TendiesView *v in g_allTendiesViews) {
+            for (CALayer *layer in v.camlLayers) layer.speed = 1.0;
+            [v setState:@"Locked"];
+        }
     }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
+        for (TendiesView *v in g_allTendiesViews) {
+            for (CALayer *layer in v.camlLayers) layer.speed = 1.0;
+            [v setState:@"Unlock"];
+        }
     }
 }
 
-// 截取上滑手势，瞬间触发互动
+// 拦截上滑手势开始：重置状态准备 Scrubbing
 - (void)_scrollPanGestureBegan:(id)arg {
+    %orig;
+    @synchronized(g_allTendiesViews) {
+        for (TendiesView *v in g_allTendiesViews) {
+            // 强行挂上 Unlock 状态准备控制进度
+            [v setState:@"Unlock"];
+            for (CALayer *layer in v.camlLayers) layer.speed = 0.0;
+        }
+    }
+}
+
+// 【核心修复 3】拦截上滑手势变动：实时推算手势进度进行跟手动画
+- (void)_scrollPanGestureChanged:(id)arg {
+    %orig;
+    if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
+        UIPanGestureRecognizer *gesture = (UIPanGestureRecognizer *)arg;
+        
+        CGPoint translation = [gesture translationInView:gesture.view];
+        CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+        
+        // 越往上滑（y负得越多），进度越接近 1.0
+        CGFloat progress = MAX(0.0, MIN(1.0, fabs(translation.y) / screenHeight));
+        
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) {
+                [v setState:@"Unlock"];
+                [v setAnimationProgress:progress];
+            }
+        }
+    }
+}
+
+// 手势结束：根据滑动动量与最终位置决定回弹还是继续播完
+- (void)_scrollPanGestureEnded:(id)arg {
     %orig;
     if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
         UIPanGestureRecognizer *gesture = (UIPanGestureRecognizer *)arg;
         CGPoint velocity = [gesture velocityInView:gesture.view];
-        if (velocity.y < 0) { 
-            @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
+        
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) {
+                // 恢复原生时间流逝
+                for (CALayer *layer in v.camlLayers) layer.speed = 1.0;
+                
+                // 判断：如果滑动速度够快，或者已经滑过了屏幕 40%，则继续解开
+                CGFloat currentOffset = v.camlLayers.firstObject.timeOffset;
+                if (velocity.y < -500 || currentOffset > 0.4) {
+                    [v setState:@"Unlock"];
+                } else {
+                    // 否则回弹至锁定状态
+                    [v setState:@"Locked"];
+                }
             }
         }
     }
-}
-
-// 防止手势取消卡在半空
-- (void)_scrollPanGestureEnded:(id)arg {
-    %orig;
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (weakSelf && weakSelf.view.window && !weakSelf.isTransitioning) {
-            @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
-            }
-        }
-    });
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     NSString *newState = mode ? @"Sleep" : @"Locked";
     @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:newState];
+        for (TendiesView *v in g_allTendiesViews) {
+            for (CALayer *layer in v.camlLayers) layer.speed = 1.0;
+            [v setState:newState];
+        }
     }
 }
 %end
@@ -318,11 +357,11 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
 %hook PBUIWallpaperView
 - (void)didMoveToWindow {
     %orig;
-    injectTendiesSmart((UIView *)self, NO);
+    injectTendiesSmart(self, NO);
 }
 - (void)layoutSubviews {
     %orig;
-    injectTendiesSmart((UIView *)self, NO);
+    injectTendiesSmart(self, NO);
 }
 %end
 
