@@ -1,5 +1,5 @@
 #!/bin/bash
-# 记得在终端或工作流中赋予权限: chmod +x build.sh
+# 记得在终端执行: chmod +x build.sh
 echo ">>> 清理旧文件..."
 make clean
 
@@ -8,5 +8,8 @@ make package
 
 echo ">>> 正在编译 Rootless (无根) 版本..."
 make package THEOS_PACKAGE_SCHEME=rootless
+
+echo ">>> 正在编译 Roothide (隐根) 版本..."
+make package THEOS_PACKAGE_SCHEME=roothide
 
 echo ">>> 编译完成！"
