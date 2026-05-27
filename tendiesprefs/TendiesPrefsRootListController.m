@@ -1,6 +1,7 @@
 #import "TendiesPrefsRootListController.h"
 #import <Preferences/PSSpecifier.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <sys/stat.h>
 
 @interface NSTask : NSObject
 @property (copy) NSString *launchPath;
@@ -16,8 +17,9 @@
 #define jbroot(path) path
 #endif
 
+// 保存到无沙盒阻碍的目录
 static NSString * GetTendiesStorageDir() {
-    NSString *base = @"/var/mobile/Library/Preferences/TendiesEnabler";
+    NSString *base = @"/var/mobile/Documents/TendiesEnabler";
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -57,22 +59,20 @@ static NSString * GetTendiesStorageDir() {
     });
 }
 
-// 【关键修复】：赋予 mobile 完全读取权限，否则 SpringBoard 无法读取解压出来的文件
-- (void)setPermissionsAndOwnershipRecursive:(NSString *)path {
+// 强制 C 语言层级的权限转移，保证 SpringBoard 100% 能够读取
+- (void)forceOwnershipToMobile:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSDictionary *attributes = @{
-        NSFilePosixPermissions: @0777,
-        NSFileOwnerAccountName: @"mobile",
-        NSFileGroupOwnerAccountName: @"mobile"
-    };
-    
-    [fm setAttributes:attributes ofItemAtPath:path error:nil];
-    
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
     NSString *subpath;
+    
+    // 501 通常是 iOS 中 mobile 用户的 UID 和 GID
+    chown(path.UTF8String, 501, 501);
+    chmod(path.UTF8String, 0777);
+    
     while ((subpath = [enumerator nextObject])) {
         NSString *fullPath = [path stringByAppendingPathComponent:subpath];
-        [fm setAttributes:attributes ofItemAtPath:fullPath error:nil];
+        chown(fullPath.UTF8String, 501, 501);
+        chmod(fullPath.UTF8String, 0777);
     }
 }
 
@@ -80,7 +80,7 @@ static NSString * GetTendiesStorageDir() {
     NSURL *sourceURL = urls.firstObject;
     if (!sourceURL) return;
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在解析与挂载...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在解析中...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
     spinner.center = CGPointMake(135.0, 65.5);
     [spinner startAnimating];
@@ -109,6 +109,7 @@ static NSString * GetTendiesStorageDir() {
             BOOL isDirectory = NO;
             [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
             
+            // 无论是文件夹还是压缩包，无脑执行拷贝/解压
             if (isDirectory) {
                 NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
                 processSuccess = YES;
@@ -141,28 +142,35 @@ static NSString * GetTendiesStorageDir() {
             if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             
             if (processSuccess) {
-                // 1. 设置极强权限，避免沙盒拦截
-                [self setPermissionsAndOwnershipRecursive:unzipDir];
+                // 1. 强制权限属于 Mobile，让 SpringBoard 可见
+                [self forceOwnershipToMobile:unzipDir];
                 
-                // 2. 写入配置记录路径
-                CFStringRef appID = CFSTR("com.yourname.tendiesprefs"); // 记得替换为你的 bundleID
-                CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
-                CFPreferencesAppSynchronize(appID);
+                // 2. 写入配置到真实物理路径，防止沙盒 CFPreferences 缓存不更新
+                NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
+                prefs[@"Enabled"] = @YES;
+                prefs[@"TendiesPath"] = unzipDir;
+                
+                NSString *plistPath = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 注意替换 bundleID
+#if __has_include(<roothide.h>)
+                plistPath = jbroot(plistPath);
+#endif
+                [prefs writeToFile:plistPath atomically:YES];
+                [self forceOwnershipToMobile:plistPath]; // Plist 也给权限
                 
                 // 3. 瞬间通知 SpringBoard 热重载
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载完成 🚀" message:@"壁纸已经实时应用到当前桌面与锁屏！" preferredStyle:UIAlertControllerStyleAlert];
-                        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载完成 🚀" message:@"已完美实时应用！请退回桌面/锁屏查看效果。" preferredStyle:UIAlertControllerStyleAlert];
+                        [alert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
                 });
             } else {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"解压失败" message:@"无效的壁纸文件，或缺少 unzip 环境权限。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"解压失败" message:@"无效的壁纸文件，或设备缺少 unzip 解压环境。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -189,8 +197,14 @@ static NSString * GetTendiesStorageDir() {
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
     if ([specifier.identifier isEqualToString:@"Enabled"]) {
-        CFStringRef appID = CFSTR("com.yourname.tendiesprefs"); // 记得替换为你的 bundleID
-        CFPreferencesAppSynchronize(appID);
+        NSString *plistPath = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 替换
+#if __has_include(<roothide.h>)
+        plistPath = jbroot(plistPath);
+#endif
+        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+        prefs[@"Enabled"] = value;
+        [prefs writeToFile:plistPath atomically:YES];
+        
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
     }
 }
