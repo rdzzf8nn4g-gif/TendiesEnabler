@@ -3,7 +3,7 @@ Name: TendiesEnabler
 Depends: mobilesubstrate, preferenceloader
 Version: 1.0.0
 Architecture: iphoneos-arm
-Description: Bring iOS 16/17 interactive .tendies wallpapers to iOS 14-17.
+Description: Interactive .tendies wallpapers for iOS 14-17.
 Maintainer: YourName
 Author: YourName
 Section: Tweaks
