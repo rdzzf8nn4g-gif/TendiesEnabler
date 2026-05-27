@@ -66,22 +66,20 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @end
 
 // ==========================================
-// 【深度递归搜索引擎】：解决嵌套过深导致不生效的问题
+// 【深度递归搜索引擎】：无视多少层嵌套，直接找出所有 main.caml
 // ==========================================
 static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     NSMutableArray *camlURLs = [NSMutableArray array];
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    // 使用深度枚举器，遍历解压后的文件夹内所有文件
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:tendiesBasePath];
     NSString *filePath;
     
     while ((filePath = [enumerator nextObject])) {
-        // 只要遇到 main.caml 就抓取它，无论嵌套多少层
+        // iOS 壁纸的 CoreAnimation 引擎入口通常命名为 main.caml
         if ([filePath hasSuffix:@"main.caml"]) {
             NSString *fullPath = [tendiesBasePath stringByAppendingPathComponent:filePath];
             [camlURLs addObject:[NSURL fileURLWithPath:fullPath]];
-            NSLog(@"[TendiesEnabler] 成功抓取到动画文件: %@", fullPath);
         }
     }
     return camlURLs;
@@ -99,11 +97,14 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
     SBFWallpaperView *orig = %orig;
     if (orig && g_enabled) {
         if (g_tendiesPath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:g_tendiesPath]) {
+            
+            // 自动递归搜索刚才解压好的文件夹中的 main.caml
             NSArray<NSURL *> *camlURLs = findCAMLFiles(g_tendiesPath);
             NSMutableArray *layersArray = [NSMutableArray array];
             NSMutableArray *controllersArray = [NSMutableArray array];
             
             for (NSURL *camlURL in camlURLs) {
+                // 将上一级目录作为素材根目录
                 NSURL *baseURL = [camlURL URLByDeletingLastPathComponent];
                 
                 CAMLParser *parser = [[%c(CAMLParser) alloc] init];
@@ -144,6 +145,7 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
         for (NSUInteger i = 0; i < controllers.count; i++) {
             CAStateController *ctrl = controllers[i];
             CALayer *lyr = layers[i];
+            // 发送 Locked / Unlock 状态驱动底层动画
             [ctrl setState:state ofLayer:lyr]; 
         }
     }
@@ -189,12 +191,7 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 %hook PRPosterDescriptor
 
 - (id)_initWithPath:(id)path {
-    if (g_enabled && g_tendiesPath.length > 0) {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if ([fm fileExistsAtPath:g_tendiesPath]) {
-            // 保留该入口用于拦截 iOS 16/17 原生 Descriptor，在此处后续处理自定义 URL
-        }
-    }
+    // 留空拦截占位，保障 iOS16+ PosterKit Hook 的接入点
     return %orig(path);
 }
 
