@@ -87,7 +87,7 @@ static NSString * GetTendiesStorageDir() {
     return nil;
 }
 
-// 【iOS 16+ 核心】：将描述符的 Identifier 随机化，骗过系统数据库校验
+// 【深度修复】：使用 NSPropertyListSerialization 确保文件以 Binary Plist 格式写回
 - (void)randomizeDescriptorIDAtPath:(NSString *)descriptorPath {
     int randID = arc4random_uniform(90000) + 10000;
     NSString *randStr = [NSString stringWithFormat:@"%d", randID];
@@ -97,18 +97,32 @@ static NSString * GetTendiesStorageDir() {
     NSString *file;
     while((file = [enumerator nextObject])) {
         NSString *full = [descriptorPath stringByAppendingPathComponent:file];
+        
+        // 针对 Plist 和没有后缀的 userInfo 文件
         if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.contents.userInfo"] || [file.lastPathComponent isEqualToString:@"Wallpaper.plist"]) {
-            NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:full];
-            if (plist) {
-                if ([file.lastPathComponent isEqualToString:@"Wallpaper.plist"]) {
-                    plist[@"identifier"] = @(randID);
-                } else {
-                    plist[@"wallpaperRepresentingIdentifier"] = @(randID);
+            
+            NSData *plistData = [NSData dataWithContentsOfFile:full];
+            if (plistData) {
+                NSMutableDictionary *plist = [NSPropertyListSerialization propertyListWithData:plistData options:NSPropertyListMutableContainersAndLeaves format:nil error:nil];
+                if (plist) {
+                    if ([file.lastPathComponent isEqualToString:@"Wallpaper.plist"]) {
+                        plist[@"identifier"] = @(randID);
+                    } else {
+                        plist[@"wallpaperRepresentingIdentifier"] = @(randID);
+                    }
+                    
+                    // 【关键】：强制以 NSPropertyListBinaryFormat_v1_0 格式写回，满足系统检验！
+                    NSData *outData = [NSPropertyListSerialization dataWithPropertyList:plist format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+                    if (outData) {
+                        [outData writeToFile:full atomically:YES];
+                    }
                 }
-                [plist writeToFile:full atomically:YES];
             }
-        } else if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
-            [randStr writeToFile:full atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } 
+        // 针对普通的 Identifier 文件
+        else if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
+            NSData *strData = [randStr dataUsingEncoding:NSUTF8StringEncoding];
+            [strData writeToFile:full atomically:YES];
         }
     }
 }
@@ -155,6 +169,7 @@ static NSString * GetTendiesStorageDir() {
                     if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
                 }
             } else {
+                // 【修复】：适配 Rootless 的 unzip
                 NSString *unzipBin = @"/usr/bin/unzip";
 #if __has_include(<roothide.h>)
                 unzipBin = jbroot(unzipBin);
@@ -186,7 +201,19 @@ static NSString * GetTendiesStorageDir() {
                             [fm createDirectoryAtPath:pbDataStore withIntermediateDirectories:YES attributes:nil error:nil];
                         }
                         
+                        // 【修复】：动态寻址，防止解压包裹了一层文件夹导致找不到 descriptors
                         NSString *sourceDescriptors = [unzipDir stringByAppendingPathComponent:@"descriptors"];
+                        if (![fm fileExistsAtPath:sourceDescriptors]) {
+                            NSArray *contents = [fm contentsOfDirectoryAtPath:unzipDir error:nil];
+                            for (NSString *sub in contents) {
+                                NSString *potential = [[unzipDir stringByAppendingPathComponent:sub] stringByAppendingPathComponent:@"descriptors"];
+                                if ([fm fileExistsAtPath:potential]) {
+                                    sourceDescriptors = potential;
+                                    break;
+                                }
+                            }
+                        }
+                        
                         if ([fm fileExistsAtPath:sourceDescriptors]) {
                             NSArray *items = [fm contentsOfDirectoryAtPath:sourceDescriptors error:nil];
                             for (NSString *item in items) {
@@ -199,12 +226,20 @@ static NSString * GetTendiesStorageDir() {
                                 [self setPermissionsRecursive:destPath];
                             }
                             
-                            // 利用 killall 命令直接结束 PosterBoard，让系统自动重启并加载新壁纸
+                            // 【修复】：适配 Rootless 与 Rootful 的 killall 路径，强制斩杀系统服务刷新数据库
+                            NSString *killallBin = @"/usr/bin/killall";
+#if __has_include(<roothide.h>)
+                            killallBin = jbroot(killallBin);
+#else
+                            if ([fm fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
+                                killallBin = @"/var/jb/usr/bin/killall";
+                            }
+#endif
                             Class NSTaskClass = NSClassFromString(@"NSTask");
-                            if (NSTaskClass) {
+                            if (NSTaskClass && [fm fileExistsAtPath:killallBin]) {
                                 @try {
                                     id task = [[NSTaskClass alloc] init];
-                                    [task setLaunchPath:@"/usr/bin/killall"];
+                                    [task setLaunchPath:killallBin];
                                     [task setArguments:@[@"-9", @"PosterBoard"]];
                                     [task launch];
                                 } @catch (NSException *e) {}
@@ -217,7 +252,7 @@ static NSString * GetTendiesStorageDir() {
                                     [topVC presentViewController:alert animated:YES completion:nil];
                                 }];
                             });
-                            return; // 结束流程
+                            return; // 结束 iOS 16-17 的独占流程
                         }
                     }
                 }
