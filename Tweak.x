@@ -28,10 +28,9 @@
 @interface CSCoverSheetViewController : UIViewController
 @end
 
-// 声明基类，防患于未然
-@interface SBFWallpaperView : UIView
-@end
-@interface PBUIWallpaperView : UIView
+@interface SBWallpaperController : NSObject
+- (UIWindow *)_window;
+// 隐藏的实例变量，iOS 16+ 用于包裹壁纸的容器
 @end
 
 // ==========================================
@@ -41,21 +40,25 @@ static BOOL g_enabled = YES;
 static NSString *g_tendiesPath = @"";
 static NSHashTable *g_wallpaperViews = nil;
 
-// 强制刷新 Preferences，无视磁盘延迟
+// 【修复】：从内存直读，无视磁盘 I/O 延迟
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
     CFPreferencesAppSynchronize(appID);
     
-    // 从内存中读取最新状态
     Boolean validEnabled = NO;
     Boolean enabledVal = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &validEnabled);
     g_enabled = validEnabled ? enabledVal : YES;
 
     CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("TendiesPath"), appID);
-    g_tendiesPath = pathRef ? (NSString *)CFBridgingRelease(pathRef) : @"";
+    if (pathRef) {
+        g_tendiesPath = (NSString *)CFBridgingRelease(pathRef);
+    } else {
+        g_tendiesPath = @"";
+    }
+    NSLog(@"[TendiesTweak] 已重新加载配置: Enabled=%d, Path=%@", g_enabled, g_tendiesPath);
 }
 
-// 深度递归遍历，暴力提取所有 .ca/main.caml
+// 深度递归遍历
 static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
@@ -71,13 +74,11 @@ static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
         }
     }
 
-    // 强制排序：Background(底) -> Floating(中) -> Foreground(顶)
     [camlURLs sortUsingComparator:^NSComparisonResult(NSURL *u1, NSURL *u2) {
         int w1 = [u1.path.lowercaseString containsString:@"background"] ? 0 : ([u1.path.lowercaseString containsString:@"floating"] ? 1 : 2);
         int w2 = [u2.path.lowercaseString containsString:@"background"] ? 0 : ([u2.path.lowercaseString containsString:@"floating"] ? 1 : 2);
         return (w1 < w2) ? NSOrderedAscending : ((w1 > w2) ? NSOrderedDescending : NSOrderedSame);
     }];
-
     return camlURLs;
 }
 
@@ -85,42 +86,45 @@ static const void *kCustomCAMLLayersKey = &kCustomCAMLLayersKey;
 static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 
 // ==========================================
-// 降维挂载逻辑：强行在原生壁纸顶层插入交互图层
+// 降维挂载逻辑
 // ==========================================
 static void ApplyTendiesToView(UIView *wallpaperView) {
-    if (!wallpaperView) return;
+    if (!wallpaperView) {
+        NSLog(@"[TendiesTweak] 错误：传入的 wallpaperView 为空");
+        return;
+    }
     
-    // 1. 获取或创建安全容器
+    NSLog(@"[TendiesTweak] 开始向视图注入 CAML 图层: %@", wallpaperView);
+    
     UIView *containerView = objc_getAssociatedObject(wallpaperView, @"TendiesContainerView");
     if (!containerView) {
         containerView = [[UIView alloc] initWithFrame:wallpaperView.bounds];
         containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        containerView.userInteractionEnabled = NO; // 触摸穿透
+        containerView.userInteractionEnabled = NO;
         [wallpaperView addSubview:containerView];
         objc_setAssociatedObject(wallpaperView, @"TendiesContainerView", containerView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSLog(@"[TendiesTweak] 创建了全新的壁纸安全容器");
     }
     
-    // 强制置顶
     [wallpaperView bringSubviewToFront:containerView];
     
-    // 2. 清理旧图层
     NSArray *oldLayers = objc_getAssociatedObject(wallpaperView, kCustomCAMLLayersKey);
-    for (CALayer *layer in oldLayers) {
-        [layer removeFromSuperlayer];
-    }
+    for (CALayer *layer in oldLayers) [layer removeFromSuperlayer];
     objc_setAssociatedObject(wallpaperView, kCustomCAMLLayersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(wallpaperView, kCustomStateControllersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // 3. 判断是否启用
-    if (!g_enabled || g_tendiesPath.length == 0) return;
+    if (!g_enabled || g_tendiesPath.length == 0) {
+        NSLog(@"[TendiesTweak] 插件已禁用或路径为空，清理完成");
+        return;
+    }
 
     NSArray<NSURL *> *camlURLs = FindCAMLURLsInTendies(g_tendiesPath);
+    NSLog(@"[TendiesTweak] 找到 %lu 个 CAML 动画文件", (unsigned long)camlURLs.count);
     if (camlURLs.count == 0) return;
 
     NSMutableArray *layersArray = [NSMutableArray array];
     NSMutableArray *controllersArray = [NSMutableArray array];
 
-    // 4. 解析并渲染 CAML
     for (NSURL *camlURL in camlURLs) {
         CAMLParser *parser = [[%c(CAMLParser) alloc] init];
         [parser setBaseURL:[camlURL URLByDeletingLastPathComponent]];
@@ -134,7 +138,10 @@ static void ApplyTendiesToView(UIView *wallpaperView) {
                 CAStateController *sc = [[%c(CAStateController) alloc] initWithLayer:camlLayer];
                 [layersArray addObject:camlLayer];
                 [controllersArray addObject:sc];
+                NSLog(@"[TendiesTweak] 成功注入图层: %@", camlURL.lastPathComponent);
             }
+        } else {
+            NSLog(@"[TendiesTweak] CAML 解析失败: %@", camlURL);
         }
     }
 
@@ -151,6 +158,7 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
         for (NSUInteger i = 0; i < controllers.count; i++) {
             [controllers[i] setState:state ofLayer:layers[i]]; 
         }
+        NSLog(@"[TendiesTweak] 状态已更新为: %@", state);
     }
 }
 
@@ -159,30 +167,26 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 // ==========================================
 %group UniversalWallpaper
 
-%hook SBFWallpaperView
-- (void)didMoveToWindow {
+// 【修复】：横跨 iOS 14-17，直接拦截壁纸控制器获取总容器
+%hook SBWallpaperController
+- (void)_applicationDidFinishLaunching:(id)arg1 {
     %orig;
-    if (!g_wallpaperViews) g_wallpaperViews = [NSHashTable weakObjectsHashTable];
+    NSLog(@"[TendiesTweak] SBWallpaperController _applicationDidFinishLaunching 触发");
     
-    if (((UIView *)self).window) {
-        [g_wallpaperViews addObject:(UIView *)self];
-        ApplyTendiesToView((UIView *)self);
-    } else {
-        [g_wallpaperViews removeObject:(UIView *)self];
+    // 优先拿 iOS 16-17 的 _wallpaperContainerView
+    UIView *container = MSHookIvar<UIView *>(self, "_wallpaperContainerView");
+    if (!container) {
+        // 退而求其次拿 UIWindow
+        container = [self _window];
     }
-}
-
-- (void)layoutSubviews {
-    %orig;
-    UIView *containerView = objc_getAssociatedObject(self, @"TendiesContainerView");
-    if (containerView) {
-        [(UIView *)self bringSubviewToFront:containerView];
-        containerView.frame = ((UIView *)self).bounds;
-        
-        NSArray *layers = objc_getAssociatedObject(self, kCustomCAMLLayersKey);
-        for (CALayer *lyr in layers) {
-            lyr.frame = containerView.bounds;
-        }
+    
+    if (container) {
+        if (!g_wallpaperViews) g_wallpaperViews = [NSHashTable weakObjectsHashTable];
+        [g_wallpaperViews addObject:container];
+        ApplyTendiesToView(container);
+        NSLog(@"[TendiesTweak] 已成功捕捉并挂载壁纸根容器");
+    } else {
+        NSLog(@"[TendiesTweak] 严重错误：未能找到壁纸根容器！");
     }
 }
 %end
@@ -190,23 +194,20 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    for (UIView *view in g_wallpaperViews.allObjects) {
-        UpdateTendiesState(view, @"Locked");
-    }
+    NSLog(@"[TendiesTweak] 锁屏显示 (Locked)");
+    for (UIView *view in g_wallpaperViews.allObjects) UpdateTendiesState(view, @"Locked");
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    for (UIView *view in g_wallpaperViews.allObjects) {
-        UpdateTendiesState(view, @"Unlock");
-    }
+    NSLog(@"[TendiesTweak] 锁屏消失 (Unlock)");
+    for (UIView *view in g_wallpaperViews.allObjects) UpdateTendiesState(view, @"Unlock");
 }
 %end
 %end // UniversalWallpaper
 
-// ==========================================
-// 全局热重载监听器
-// ==========================================
+// 热重载监听器
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    NSLog(@"[TendiesTweak] 收到 Preferences 更新通知，开始热重载");
     reloadPrefs();
     dispatch_async(dispatch_get_main_queue(), ^{
         for (UIView *view in g_wallpaperViews.allObjects) {
@@ -215,17 +216,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     });
 }
 
-// ==========================================
-// 构造函数
-// ==========================================
 %ctor {
     reloadPrefs();
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+        NSLog(@"[TendiesTweak] 插件注入 SpringBoard 成功");
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
-        
-        Class targetWallpaperClass = NSClassFromString(@"PBUIWallpaperView") ?: NSClassFromString(@"SBFWallpaperView");
-        if (targetWallpaperClass) {
-            %init(UniversalWallpaper, SBFWallpaperView = targetWallpaperClass);
-        }
+        %init(UniversalWallpaper);
     }
 }
