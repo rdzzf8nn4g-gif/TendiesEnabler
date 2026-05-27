@@ -30,11 +30,16 @@
 @interface PBUIWallpaperView : UIView
 @end
 
+// 补充声明系统壁纸控制器，解决 sharedInstance 报错
+@interface SBWallpaperController : NSObject
++ (id)sharedInstance;
+@end
+
 // ==========================================
 // 全局变量与路径
 // ==========================================
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【替换真实 bundleID】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必替换真实 bundleID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -75,7 +80,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 }
 
 // ==========================================
-// 核心视图类 (彻底重构：支持手势搓碟与接管)
+// 核心视图类
 // ==========================================
 @interface TendiesView : UIView
 @property (nonatomic, strong) NSMutableArray<CALayer *> *camlLayers;
@@ -179,12 +184,11 @@ static void reloadPrefsAndInject() {
 }
 
 // ==========================================
-// 智能挂载器：仅挂载桌面，隔离并清理毛玻璃
+// 智能挂载器
 // ==========================================
 static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
     if (!container || !container.window) return;
     
-    // 【核心修复 1】彻底废弃锁屏注入！避免两层壁纸重叠与滑动分离
     // 我们只要唯一的一份底层桌面壁纸
     if (isLockscreen) return; 
     
@@ -199,7 +203,7 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
         tView = [[TendiesView alloc] initWithFrame:container.bounds];
         tView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         
-        // 【核心修复 2】放在 PBUIWallpaperView 的最顶层，盖住原生海报！
+        // 放在 PBUIWallpaperView 的最顶层，盖住原生海报！
         [container addSubview:tView];
         
         objc_setAssociatedObject(container, "TendiesView", tView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -215,7 +219,7 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
         [container bringSubviewToFront:tView];
     }
     
-    // 【核心修复 3】暴力干掉 iOS 16/17 桌面原生的纯色背景、模糊层、海报系统环境
+    // 暴力干掉 iOS 16/17 桌面原生的纯色背景、模糊层、海报系统环境
     for (UIView *sub in container.subviews) {
         if (sub == tView) continue;
         
@@ -255,7 +259,7 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     
-    // 【核心修复 4】将 iOS 16+ 的锁屏海报彻底变透明，直接透视出桌面的 TendiesView！
+    // 将 iOS 16+ 的锁屏海报彻底变透明，直接透视出桌面的 TendiesView！
     if ([self respondsToSelector:@selector(backgroundContentViewController)]) {
         UIViewController *bgVC = [self valueForKey:@"backgroundContentViewController"];
         if (bgVC) {
@@ -265,14 +269,16 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
     }
     self.view.backgroundColor = [UIColor clearColor];
 
-    // 确保桌面壁纸层在锁屏下处于激活可见状态
+    // 修复 C++ 模板报错：改用原生的 KVC 方法读取 _wallpaperWindow
     Class sbwcClass = NSClassFromString(@"SBWallpaperController");
     if (sbwcClass && [sbwcClass respondsToSelector:@selector(sharedInstance)]) {
         id sharedWC = [sbwcClass sharedInstance];
-        UIWindow *wallpaperWindow = MSHookIvar<UIWindow *>(sharedWC, "_wallpaperWindow");
-        if (wallpaperWindow) {
-            wallpaperWindow.hidden = NO;
-            wallpaperWindow.alpha = 1.0;
+        if (sharedWC) {
+            UIWindow *wallpaperWindow = [sharedWC valueForKey:@"_wallpaperWindow"];
+            if (wallpaperWindow) {
+                wallpaperWindow.hidden = NO;
+                wallpaperWindow.alpha = 1.0;
+            }
         }
     }
 
@@ -338,14 +344,13 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
                 // 恢复原生时间流逝，让 CASpringAnimation 自动走完
                 for (CALayer *layer in v.camlLayers) layer.speed = 1.0;
                 
-                // 【已修复编译错误】: 显式声明强转类型
                 CGFloat currentOffset = 0.0;
                 CALayer *firstLayer = (CALayer *)v.camlLayers.firstObject;
                 if (firstLayer) {
                     currentOffset = firstLayer.timeOffset;
                 }
                 
-                // 速度够快，或者滑动行程超过 40%，继续解开
+                // 速度够快，或者滑动行程超过 35%，继续解开
                 if (velocity.y < -500 || currentOffset > 0.35) {
                     [v setState:@"Unlock"];
                 } else {
