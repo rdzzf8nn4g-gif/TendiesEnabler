@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
+    <string>zh_CN</string>
     <key>CFBundleExecutable</key>
     <string>TendiesPrefs</string>
     <key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
     <key>CFBundleShortVersionString</key>
     <string>1.0.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>1.0</string>
     <key>NSPrincipalClass</key>
     <string>TendiesPrefsRootListController</string>
 </dict>
