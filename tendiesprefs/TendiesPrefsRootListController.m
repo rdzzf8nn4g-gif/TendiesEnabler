@@ -16,7 +16,7 @@
 #endif
 
 // ==========================================
-// 统一的路径获取辅助函数（解决 Rootless 下读写脱节）
+// 统一路径辅助函数
 // ==========================================
 static NSString * GetTendiesStorageDir() {
     NSString *base = @"/var/mobile/Documents/TendiesEnabler";
@@ -31,7 +31,7 @@ static NSString * GetTendiesStorageDir() {
 }
 
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必替换为您真实的 bundleID】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【替换为你真实的 bundleID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -71,9 +71,7 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 强制 C 语言层级的权限转移，保证 SpringBoard 100% 能够读取
 - (void)forceOwnershipToMobile:(NSString *)path {
-    NSLog(@"[TendiesPrefs] 强制转移文件权限 (mobile:mobile): %@", path);
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
     NSString *subpath;
@@ -91,7 +89,6 @@ static NSString * GetPrefsPlistPath() {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *sourceURL = urls.firstObject;
     if (!sourceURL) return;
-    NSLog(@"[TendiesPrefs] 用户选择了文件: %@", sourceURL.path);
 
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在解析中...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
@@ -122,7 +119,6 @@ static NSString * GetPrefsPlistPath() {
             BOOL isDirectory = NO;
             [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
             
-            NSLog(@"[TendiesPrefs] 开始解压/拷贝进程，目标目录: %@", unzipDir);
             if (isDirectory) {
                 NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
                 processSuccess = YES;
@@ -147,23 +143,16 @@ static NSString * GetPrefsPlistPath() {
                         [task launch];
                         [task waitUntilExit];
                         processSuccess = ([task terminationStatus] == 0);
-                        NSLog(@"[TendiesPrefs] Unzip 任务结束，状态码: %d", [task terminationStatus]);
                     } @catch (NSException *e) { 
-                        NSLog(@"[TendiesPrefs] Unzip 发生异常: %@", e);
                         processSuccess = NO; 
                     }
-                } else {
-                    NSLog(@"[TendiesPrefs] 找不到 unzip 二进制文件!");
                 }
             }
             if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             
             if (processSuccess) {
-                NSLog(@"[TendiesPrefs] 文件部署成功，开始转移权限并写入 Plist...");
-                
                 [self forceOwnershipToMobile:unzipDir];
                 
-                // 核心修改：统一使用 GetPrefsPlistPath() 来写入路径，确保 SpringBoard 获取到的是同一个物理文件
                 NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
                 prefs[@"Enabled"] = @YES;
                 prefs[@"TendiesPath"] = unzipDir;
@@ -172,8 +161,6 @@ static NSString * GetPrefsPlistPath() {
                 [prefs writeToFile:plistPath atomically:YES];
                 [self forceOwnershipToMobile:plistPath]; 
                 
-                NSLog(@"[TendiesPrefs] 发送重载广播通知 (Darwin Notification)");
-                // 【注意：此处广播名称需与 .x 一致】
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -218,7 +205,6 @@ static NSString * GetPrefsPlistPath() {
         prefs[@"Enabled"] = value;
         [prefs writeToFile:plistPath atomically:YES];
         
-        NSLog(@"[TendiesPrefs] 用户切换了开关状态，发送重载广播...");
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
     }
 }
