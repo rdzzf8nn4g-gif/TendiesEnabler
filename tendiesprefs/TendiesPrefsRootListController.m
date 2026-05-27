@@ -61,6 +61,7 @@ static NSString * GetTendiesStorageDir() {
 
 // 强制 C 语言层级的权限转移，保证 SpringBoard 100% 能够读取
 - (void)forceOwnershipToMobile:(NSString *)path {
+    NSLog(@"[TendiesPrefs] 强制转移文件权限 (mobile:mobile): %@", path);
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
     NSString *subpath;
@@ -79,6 +80,7 @@ static NSString * GetTendiesStorageDir() {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *sourceURL = urls.firstObject;
     if (!sourceURL) return;
+    NSLog(@"[TendiesPrefs] 用户选择了文件: %@", sourceURL.path);
 
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在解析中...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
@@ -109,7 +111,7 @@ static NSString * GetTendiesStorageDir() {
             BOOL isDirectory = NO;
             [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
             
-            // 无论是文件夹还是压缩包，无脑执行拷贝/解压
+            NSLog(@"[TendiesPrefs] 开始解压/拷贝进程，目标目录: %@", unzipDir);
             if (isDirectory) {
                 NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
                 processSuccess = YES;
@@ -134,14 +136,19 @@ static NSString * GetTendiesStorageDir() {
                         [task launch];
                         [task waitUntilExit];
                         processSuccess = ([task terminationStatus] == 0);
+                        NSLog(@"[TendiesPrefs] Unzip 任务结束，状态码: %d", [task terminationStatus]);
                     } @catch (NSException *e) { 
+                        NSLog(@"[TendiesPrefs] Unzip 发生异常: %@", e);
                         processSuccess = NO; 
                     }
+                } else {
+                    NSLog(@"[TendiesPrefs] 找不到 unzip 二进制文件!");
                 }
             }
             if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             
             if (processSuccess) {
+                NSLog(@"[TendiesPrefs] 文件部署成功，开始转移权限并写入 Plist...");
                 // 1. 强制权限属于 Mobile，让 SpringBoard 可见
                 [self forceOwnershipToMobile:unzipDir];
                 
@@ -158,6 +165,7 @@ static NSString * GetTendiesStorageDir() {
                 [self forceOwnershipToMobile:plistPath]; // Plist 也给权限
                 
                 // 3. 瞬间通知 SpringBoard 热重载
+                NSLog(@"[TendiesPrefs] 发送重载广播通知 (Darwin Notification)");
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -205,6 +213,7 @@ static NSString * GetTendiesStorageDir() {
         prefs[@"Enabled"] = value;
         [prefs writeToFile:plistPath atomically:YES];
         
+        NSLog(@"[TendiesPrefs] 用户切换了开关状态，发送重载广播...");
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
     }
 }
