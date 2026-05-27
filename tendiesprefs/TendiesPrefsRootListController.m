@@ -2,7 +2,6 @@
 #import <Preferences/PSSpecifier.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-// 声明 NSTask (规避私有 API 警告，用于调用 unzip 命令)
 @interface NSTask : NSObject
 @property (copy) NSString *launchPath;
 @property (copy) NSArray *arguments;
@@ -11,7 +10,12 @@
 - (int)terminationStatus;
 @end
 
-// 终极环境适配
+// 声明私有 API 用于获取 App 沙盒路径 (iOS 16+ 核心所在)
+@interface LSApplicationProxy : NSObject
++ (id)applicationProxyForIdentifier:(NSString *)bundleIdentifier;
+@property (nonatomic, readonly) NSURL *dataContainerURL;
+@end
+
 #if __has_include(<roothide.h>)
 #import <roothide.h>
 #else
@@ -39,7 +43,6 @@ static NSString * GetTendiesStorageDir() {
     return _specifiers;
 }
 
-// 唤起文件选择器
 - (void)importTendies:(PSSpecifier *)spec {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (@available(iOS 14.0, *)) {
@@ -60,14 +63,108 @@ static NSString * GetTendiesStorageDir() {
     });
 }
 
+// 递归赋予 0777 权限
+- (void)setPermissionsRecursive:(NSString *)path {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm setAttributes:@{NSFilePosixPermissions: @0777, NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:path error:nil];
+    
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
+    NSString *subpath;
+    while ((subpath = [enumerator nextObject])) {
+        NSString *fullPath = [path stringByAppendingPathComponent:subpath];
+        [fm setAttributes:@{NSFilePosixPermissions: @0777, NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:fullPath error:nil];
+    }
+}
+
 // ==========================================
-// 【大厂级解压引擎】：暴力解压，无视扩展名
+// 【iOS 16+ 原生 PosterBoard 注入引擎】
 // ==========================================
+- (void)injectIntoPosterBoard:(NSString *)unzipDir {
+    Class LSAppProxy = NSClassFromString(@"LSApplicationProxy");
+    if (!LSAppProxy) return;
+    
+    id proxy = [LSAppProxy performSelector:@selector(applicationProxyForIdentifier:) withObject:@"com.apple.PosterBoard"];
+    NSURL *containerURL = [proxy performSelector:@selector(dataContainerURL)];
+    if (!containerURL) return;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *baseStore = [containerURL.path stringByAppendingPathComponent:@"Library/Application Support/PRBPosterExtensionDataStore"];
+
+    // 获取最高版本的扩展文件夹 (例如 iOS 16 是 59/60，iOS 17 是 61)
+    NSArray *versions = [fm contentsOfDirectoryAtPath:baseStore error:nil];
+    int maxVer = 0;
+    for (NSString *v in versions) {
+        if (v.intValue > maxVer) maxVer = v.intValue;
+    }
+    if (maxVer == 0) return; 
+
+    NSString *destPath = [NSString stringWithFormat:@"%@/%d/Extensions/com.apple.WallpaperKit.CollectionsPoster/descriptors", baseStore, maxVer];
+    if (![fm fileExistsAtPath:destPath]) {
+        [fm createDirectoryAtPath:destPath withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+
+    // 定位解压包中的 descriptors 文件夹
+    NSString *srcDescriptors = [unzipDir stringByAppendingPathComponent:@"descriptors"];
+    if (![fm fileExistsAtPath:srcDescriptors]) {
+        if ([fm fileExistsAtPath:[unzipDir stringByAppendingPathComponent:@"descriptor"]]) {
+            srcDescriptors = [unzipDir stringByAppendingPathComponent:@"descriptor"];
+        } else {
+            srcDescriptors = unzipDir; // Fallback
+        }
+    }
+
+    NSArray *descFolders = [fm contentsOfDirectoryAtPath:srcDescriptors error:nil];
+    for (NSString *descName in descFolders) {
+        if ([descName isEqualToString:@"__MACOSX"]) continue;
+        
+        NSString *fullDescPath = [srcDescriptors stringByAppendingPathComponent:descName];
+        BOOL isDir;
+        if ([fm fileExistsAtPath:fullDescPath isDirectory:&isDir] && isDir) {
+            
+            // 核心步骤：随机化 Identifier 避免系统冲突
+            NSNumber *randomIDNum = @(arc4random_uniform(90000) + 10000);
+            NSString *randomStr = [randomIDNum stringValue];
+            
+            // 遍历并修改配置
+            NSDirectoryEnumerator *enumFiles = [fm enumeratorAtPath:fullDescPath];
+            NSString *file;
+            while ((file = [enumFiles nextObject])) {
+                NSString *modPath = [fullDescPath stringByAppendingPathComponent:file];
+                NSString *name = file.lastPathComponent;
+
+                if ([name isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
+                    [randomStr writeToFile:modPath atomically:YES encoding:NSUTF8String error:nil];
+                } else if ([name isEqualToString:@"com.apple.posterkit.provider.contents.userInfo"]) {
+                    NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:modPath];
+                    if (plist) {
+                        plist[@"wallpaperRepresentingIdentifier"] = randomIDNum;
+                        [plist writeToFile:modPath atomically:YES];
+                    }
+                } else if ([name isEqualToString:@"Wallpaper.plist"]) {
+                    NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:modPath];
+                    if (plist) {
+                        plist[@"identifier"] = randomIDNum;
+                        [plist writeToFile:modPath atomically:YES];
+                    }
+                }
+            }
+
+            // 移动到系统 PosterBoard 目录
+            NSString *finalTarget = [destPath stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
+            [fm moveItemAtPath:fullDescPath toPath:finalTarget error:nil];
+        }
+    }
+
+    // 杀掉 PosterBoard，强制系统重新加载我们的原生壁纸
+    system("killall -9 PosterBoard");
+}
+
+// 大厂级解压引擎
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *sourceURL = urls.firstObject;
     if (!sourceURL) return;
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在暴力解压...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在解析与挂载...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
     spinner.center = CGPointMake(135.0, 65.5);
     [spinner startAnimating];
@@ -89,8 +186,6 @@ static NSString * GetTendiesStorageDir() {
             if (![fm fileExistsAtPath:targetDir]) {
                 [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
             }
-            
-            // 清空旧壁纸
             [fm removeItemAtPath:unzipDir error:nil];
             [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
             
@@ -99,32 +194,25 @@ static NSString * GetTendiesStorageDir() {
             [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
             
             if (isDirectory) {
-                // 情况 1：系统已自动解压（识别为文件夹）
                 NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
                 processSuccess = YES;
                 for (NSString *item in contents) {
                     NSString *srcPath = [sourceURL.path stringByAppendingPathComponent:item];
                     NSString *destPath = [unzipDir stringByAppendingPathComponent:item];
-                    if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) {
-                        processSuccess = NO;
-                    }
+                    if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
                 }
             } else {
-                // 情况 2：这是一个压缩包，调用 /usr/bin/unzip 强制解压
                 NSString *unzipBin = @"/usr/bin/unzip";
 #if __has_include(<roothide.h>)
                 unzipBin = jbroot(unzipBin);
 #else
-                if ([fm fileExistsAtPath:@"/var/jb/usr/bin/unzip"]) {
-                    unzipBin = @"/var/jb/usr/bin/unzip";
-                }
+                if ([fm fileExistsAtPath:@"/var/jb/usr/bin/unzip"]) unzipBin = @"/var/jb/usr/bin/unzip";
 #endif
                 Class NSTaskClass = NSClassFromString(@"NSTask");
                 if (NSTaskClass && [fm fileExistsAtPath:unzipBin]) {
                     @try {
                         id task = [[NSTaskClass alloc] init];
                         [task setLaunchPath:unzipBin];
-                        // -o 覆盖, -d 目标目录
                         [task setArguments:@[@"-o", sourceURL.path, @"-d", unzipDir]];
                         [task launch];
                         [task waitUntilExit];
@@ -134,23 +222,29 @@ static NSString * GetTendiesStorageDir() {
                     }
                 }
             }
-            
-            if (isAccessing) {
-                [sourceURL stopAccessingSecurityScopedResource];
-            }
+            if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             
             if (processSuccess) {
-                // 赋予越狱最高权限，确保 SpringBoard 有权读取
                 [self setPermissionsRecursive:unzipDir];
                 
-                CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
-                CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
-                CFPreferencesAppSynchronize(appID);
-                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
-                
+                // 【核心分发逻辑】
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入并解压成功" message:@"壁纸已解压完毕并挂载！请锁屏查看交互动画。" preferredStyle:UIAlertControllerStyleAlert];
+                        NSString *successMsg;
+                        if (@available(iOS 16.0, *)) {
+                            // iOS 16+：原生注入系统
+                            [self injectIntoPosterBoard:unzipDir];
+                            successMsg = @"壁纸已原生注入 iOS 16/17 系统！请锁屏并长按，在海报库中向右滑动找到并应用它。";
+                        } else {
+                            // iOS 14-15：写入配置文件由 .x 挂载
+                            CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
+                            CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
+                            CFPreferencesAppSynchronize(appID);
+                            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
+                            successMsg = @"壁纸已挂载！请回到锁屏查看交互动画。";
+                        }
+                        
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:successMsg preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -166,19 +260,6 @@ static NSString * GetTendiesStorageDir() {
             }
         });
     }];
-}
-
-// 递归赋予 0777 权限
-- (void)setPermissionsRecursive:(NSString *)path {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm setAttributes:@{NSFilePosixPermissions: @0777, NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:path error:nil];
-    
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
-    NSString *subpath;
-    while ((subpath = [enumerator nextObject])) {
-        NSString *fullPath = [path stringByAppendingPathComponent:subpath];
-        [fm setAttributes:@{NSFilePosixPermissions: @0777, NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:fullPath error:nil];
-    }
 }
 
 - (void)openFilzaPath:(PSSpecifier *)spec {
