@@ -1,7 +1,6 @@
 name: Build TendiesEnabler
 
 on:
-  push:
  
   workflow_dispatch:
 
