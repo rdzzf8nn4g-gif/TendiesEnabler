@@ -45,7 +45,7 @@
 // ==========================================
 static BOOL g_enabled = YES;
 static NSString *g_tendiesPath = @"";
-static NSHashTable *g_wallpaperViews = nil; // 追踪 iOS 14/15 视图用于热重载
+static NSHashTable *g_wallpaperViews = nil;
 
 static NSString * GetPrefPath() {
     NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist";
@@ -72,21 +72,63 @@ static void reloadPrefs() {
     }
 }
 
-// 在 Tendies 文件夹中寻找 iOS 16/17 标准的 contents 资源目录
-static NSURL *FindContentsURLInTendies(NSString *basePath) {
+// 精准寻找 PosterKit 的描述符根目录 (包含 versions 和 .identifier 的层级)
+static NSURL *FindDescriptorRootInTendies(NSString *basePath) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
-    NSString *file;
-    while ((file = [enumerator nextObject])) {
-        if ([file.lastPathComponent.lowercaseString isEqualToString:@"contents"]) {
+    
+    // 1. 优先按照标准结构寻找 descriptors 文件夹内的唯一目录
+    NSString *descriptorsDir = [basePath stringByAppendingPathComponent:@"descriptors"];
+    if ([fm fileExistsAtPath:descriptorsDir]) {
+        NSArray *items = [fm contentsOfDirectoryAtPath:descriptorsDir error:nil];
+        for (NSString *item in items) {
+            if ([item hasPrefix:@"."]) continue; // 过滤隐藏文件如 .DS_Store
+            NSString *fullPath = [descriptorsDir stringByAppendingPathComponent:item];
             BOOL isDir = NO;
-            NSString *fullPath = [basePath stringByAppendingPathComponent:file];
             if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-                return [NSURL fileURLWithPath:fullPath];
+                return [NSURL fileURLWithPath:fullPath]; // 找到描述符根目录
             }
         }
     }
+    
+    // 2. 备用方案：递归寻找特征文件
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
+    NSString *file;
+    while ((file = [enumerator nextObject])) {
+        if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
+            NSString *parentDir = [[basePath stringByAppendingPathComponent:file] stringByDeletingLastPathComponent];
+            return [NSURL fileURLWithPath:parentDir];
+        }
+    }
     return nil;
+}
+
+// 针对 iOS 14/15：递归穿透 .wallpaper 等文件夹，提取所有 CAML URL
+static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
+    NSURL *descriptorRoot = FindDescriptorRootInTendies(basePath);
+    if (!descriptorRoot) return @[];
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:descriptorRoot.path];
+    NSString *file;
+    NSMutableArray *camlURLs = [NSMutableArray array];
+
+    while ((file = [enumerator nextObject])) {
+        if ([file hasSuffix:@".ca"]) {
+            NSString *camlPath = [[descriptorRoot.path stringByAppendingPathComponent:file] stringByAppendingPathComponent:@"main.caml"];
+            if ([fm fileExistsAtPath:camlPath]) {
+                [camlURLs addObject:[NSURL fileURLWithPath:camlPath]];
+            }
+        }
+    }
+
+    // 强制排序：Background(底) -> Floating(中) -> Foreground(顶)
+    [camlURLs sortUsingComparator:^NSComparisonResult(NSURL *u1, NSURL *u2) {
+        int w1 = [u1.path.lowercaseString containsString:@"background"] ? 0 : ([u1.path.lowercaseString containsString:@"floating"] ? 1 : 2);
+        int w2 = [u2.path.lowercaseString containsString:@"background"] ? 0 : ([u2.path.lowercaseString containsString:@"floating"] ? 1 : 2);
+        return (w1 < w2) ? NSOrderedAscending : ((w1 > w2) ? NSOrderedDescending : NSOrderedSame);
+    }];
+
+    return camlURLs;
 }
 
 static const void *kCustomCAMLLayersKey = &kCustomCAMLLayersKey;
@@ -108,28 +150,8 @@ static void ApplyTendiesToView(UIView *view) {
 
     if (!g_enabled || g_tendiesPath.length == 0) return;
 
-    NSURL *contentsURL = FindContentsURLInTendies(g_tendiesPath);
-    if (!contentsURL) return;
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *subItems = [fm contentsOfDirectoryAtPath:contentsURL.path error:nil];
-    
-    NSMutableArray *camlURLs = [NSMutableArray array];
-    for (NSString *item in subItems) {
-        if ([item hasSuffix:@".ca"]) {
-            NSString *camlPath = [[contentsURL.path stringByAppendingPathComponent:item] stringByAppendingPathComponent:@"main.caml"];
-            if ([fm fileExistsAtPath:camlPath]) {
-                [camlURLs addObject:[NSURL fileURLWithPath:camlPath]];
-            }
-        }
-    }
-
-    // 强制排序：Background(底) -> Floating(中) -> Foreground(顶)
-    [camlURLs sortUsingComparator:^NSComparisonResult(NSURL *u1, NSURL *u2) {
-        int w1 = [u1.path.lowercaseString containsString:@"background"] ? 0 : ([u1.path.lowercaseString containsString:@"floating"] ? 1 : 2);
-        int w2 = [u2.path.lowercaseString containsString:@"background"] ? 0 : ([u2.path.lowercaseString containsString:@"floating"] ? 1 : 2);
-        return (w1 < w2) ? NSOrderedAscending : ((w1 > w2) ? NSOrderedDescending : NSOrderedSame);
-    }];
+    NSArray<NSURL *> *camlURLs = FindCAMLURLsInTendies(g_tendiesPath);
+    if (camlURLs.count == 0) return;
 
     NSMutableArray *layersArray = [NSMutableArray array];
     NSMutableArray *controllersArray = [NSMutableArray array];
@@ -198,14 +220,15 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 %end // iOS14_15_Support
 
 // ==========================================
-// iOS 16-17: PosterBoard 资源劫持 (无需改沙盒，直接替换渲染流)
+// iOS 16-17: PosterBoard 资源劫持
 // ==========================================
 %group iOS16_17_PosterBoard
 %hook PRPosterDescriptor
 - (NSURL *)assetDirectory {
     if (g_enabled && g_tendiesPath.length > 0) {
-        NSURL *customURL = FindContentsURLInTendies(g_tendiesPath);
-        if (customURL) return customURL; // 强行将壁纸资源重定向为我们导入的目录
+        // 重定向为我们的描述符根目录
+        NSURL *customURL = FindDescriptorRootInTendies(g_tendiesPath);
+        if (customURL) return customURL; 
     }
     return %orig;
 }
@@ -218,20 +241,18 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
     dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
         double version = kCFCoreFoundationVersionNumber;
+        
         if (version < 1953.1) {
             // iOS 14-15：立刻重新渲染 CAML
             for (UIView *view in g_wallpaperViews) {
                 ApplyTendiesToView(view);
             }
         } else {
-            // iOS 16-17：命令 SpringBoard 瞬间刷新壁纸缓存
-            Class SBWC = NSClassFromString(@"SBWallpaperController");
-            if (SBWC && [SBWC respondsToSelector:@selector(sharedInstance)]) {
-                id wc = [SBWC sharedInstance];
-                if ([wc respondsToSelector:@selector(_reloadWallpaperAndFlushCaches:completionHandler:)]) {
-                    [wc _reloadWallpaperAndFlushCaches:YES completionHandler:nil];
-                }
+            // iOS 16-17：如果是 PosterBoard 进程，直接退出让系统重启它以刷新所有缓存
+            if ([bundleId isEqualToString:@"com.apple.PosterBoard"]) {
+                exit(0);
             }
         }
     });
