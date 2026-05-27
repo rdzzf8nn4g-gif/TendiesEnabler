@@ -57,7 +57,7 @@ static NSString * GetTendiesStorageDir() {
     });
 }
 
-// 递归赋予 0777 权限
+// 递归赋予权限
 - (void)setPermissionsRecursive:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm setAttributes:@{NSFilePosixPermissions: @0777, NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:path error:nil];
@@ -66,6 +66,50 @@ static NSString * GetTendiesStorageDir() {
     while ((subpath = [enumerator nextObject])) {
         NSString *fullPath = [path stringByAppendingPathComponent:subpath];
         [fm setAttributes:@{NSFilePosixPermissions: @0777, NSFileProtectionKey: NSFileProtectionNone} ofItemAtPath:fullPath error:nil];
+    }
+}
+
+// 【iOS 16+ 核心】：寻找 PosterBoard 沙盒存储路径
+- (NSString *)getPosterBoardDataStorePath {
+    Class LSAppProxy = NSClassFromString(@"LSApplicationProxy");
+    if (LSAppProxy) {
+        id proxy = [LSAppProxy performSelector:@selector(applicationProxyForIdentifier:) withObject:@"com.apple.PosterBoard"];
+        if (proxy) {
+            NSURL *dataURL = [proxy performSelector:@selector(dataContainerURL)];
+            if (dataURL) {
+                NSString *version = @"59";
+                if (@available(iOS 17.0, *)) { version = @"61"; }
+                NSString *targetPath = [dataURL.path stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Application Support/PRBPosterExtensionDataStore/%@/Extensions/com.apple.WallpaperKit.CollectionsPoster/descriptors", version]];
+                return targetPath;
+            }
+        }
+    }
+    return nil;
+}
+
+// 【iOS 16+ 核心】：将描述符的 Identifier 随机化，骗过系统数据库校验
+- (void)randomizeDescriptorIDAtPath:(NSString *)descriptorPath {
+    int randID = arc4random_uniform(90000) + 10000;
+    NSString *randStr = [NSString stringWithFormat:@"%d", randID];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:descriptorPath];
+    NSString *file;
+    while((file = [enumerator nextObject])) {
+        NSString *full = [descriptorPath stringByAppendingPathComponent:file];
+        if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.contents.userInfo"] || [file.lastPathComponent isEqualToString:@"Wallpaper.plist"]) {
+            NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:full];
+            if (plist) {
+                if ([file.lastPathComponent isEqualToString:@"Wallpaper.plist"]) {
+                    plist[@"identifier"] = @(randID);
+                } else {
+                    plist[@"wallpaperRepresentingIdentifier"] = @(randID);
+                }
+                [plist writeToFile:full atomically:YES];
+            }
+        } else if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
+            [randStr writeToFile:full atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
     }
 }
 
@@ -95,7 +139,6 @@ static NSString * GetTendiesStorageDir() {
             if (![fm fileExistsAtPath:targetDir]) {
                 [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
             }
-            // 清理旧缓存
             [fm removeItemAtPath:unzipDir error:nil];
             [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
             
@@ -127,9 +170,7 @@ static NSString * GetTendiesStorageDir() {
                         [task launch];
                         [task waitUntilExit];
                         processSuccess = ([task terminationStatus] == 0);
-                    } @catch (NSException *e) {
-                        processSuccess = NO;
-                    }
+                    } @catch (NSException *e) { processSuccess = NO; }
                 }
             }
             if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
@@ -137,7 +178,51 @@ static NSString * GetTendiesStorageDir() {
             if (processSuccess) {
                 [self setPermissionsRecursive:unzipDir];
                 
-                // 【核心指令】：写入路径并发出全局 Darwin 通知
+                // === iOS 16-17 原生文件植入流 ===
+                if (@available(iOS 16.0, *)) {
+                    NSString *pbDataStore = [self getPosterBoardDataStorePath];
+                    if (pbDataStore) {
+                        if (![fm fileExistsAtPath:pbDataStore]) {
+                            [fm createDirectoryAtPath:pbDataStore withIntermediateDirectories:YES attributes:nil error:nil];
+                        }
+                        
+                        NSString *sourceDescriptors = [unzipDir stringByAppendingPathComponent:@"descriptors"];
+                        if ([fm fileExistsAtPath:sourceDescriptors]) {
+                            NSArray *items = [fm contentsOfDirectoryAtPath:sourceDescriptors error:nil];
+                            for (NSString *item in items) {
+                                if ([item hasPrefix:@"."]) continue; // 过滤隐藏文件
+                                NSString *srcPath = [sourceDescriptors stringByAppendingPathComponent:item];
+                                NSString *destPath = [pbDataStore stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+                                
+                                [fm copyItemAtPath:srcPath toPath:destPath error:nil];
+                                [self randomizeDescriptorIDAtPath:destPath];
+                                [self setPermissionsRecursive:destPath];
+                            }
+                            
+                            // 利用 killall 命令直接结束 PosterBoard，让系统自动重启并加载新壁纸
+                            Class NSTaskClass = NSClassFromString(@"NSTask");
+                            if (NSTaskClass) {
+                                @try {
+                                    id task = [[NSTaskClass alloc] init];
+                                    [task setLaunchPath:@"/usr/bin/killall"];
+                                    [task setArguments:@[@"-9", @"PosterBoard"]];
+                                    [task launch];
+                                } @catch (NSException *e) {}
+                            }
+                            
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                [loadingAlert dismissViewControllerAnimated:YES completion:^{
+                                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:@"壁纸已植入系统！\n\n请在锁屏界面长按，向右划到最后点击“+新增” -> “收藏”，即可找到该壁纸！" preferredStyle:UIAlertControllerStyleAlert];
+                                    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                                    [topVC presentViewController:alert animated:YES completion:nil];
+                                }];
+                            });
+                            return; // 结束流程
+                        }
+                    }
+                }
+                
+                // === iOS 14-15 图层替换流 ===
                 CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
                 CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
                 CFPreferencesAppSynchronize(appID);
@@ -145,7 +230,7 @@ static NSString * GetTendiesStorageDir() {
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:@"壁纸已成功挂载！关闭控制面板即可看到秒切效果。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:@"壁纸已成功挂载！关闭控制面板即可在锁屏看到秒切效果。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -185,5 +270,4 @@ static NSString * GetTendiesStorageDir() {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
     }
 }
-
 @end
