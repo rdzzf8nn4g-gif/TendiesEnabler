@@ -25,9 +25,6 @@
 - (void)setState:(id)state ofLayer:(id)layer;
 @end
 
-@interface SBFWallpaperView : UIView
-@end
-
 @interface CSCoverSheetViewController : UIViewController
 @end
 
@@ -63,7 +60,7 @@ static void reloadPrefs() {
     }
 }
 
-// 【核心修复】：深度递归遍历，穿透 .wallpaper 文件夹寻找所有 .ca/main.caml 资源
+// 【核心修复】：深度递归遍历，无视任何包装层级，暴力提取所有 .ca/main.caml
 static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
@@ -93,38 +90,34 @@ static const void *kCustomCAMLLayersKey = &kCustomCAMLLayersKey;
 static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 
 // ==========================================
-// iOS 14-15: 动态图层挂载与热重载
+// 万能降维挂载逻辑：强行在原生壁纸顶层插入交互图层
 // ==========================================
-static void ApplyTendiesToView(UIView *view) {
-    if (!view) return;
+static void ApplyTendiesToView(UIView *wallpaperView) {
+    if (!wallpaperView) return;
     
-    NSString *appliedPath = objc_getAssociatedObject(view, @"AppliedTendiesPath");
-
-    // 如果未启用或路径为空，清理所有自定义图层
-    if (!g_enabled || g_tendiesPath.length == 0) {
-        NSArray *oldLayers = objc_getAssociatedObject(view, kCustomCAMLLayersKey);
-        for (CALayer *layer in oldLayers) [layer removeFromSuperlayer];
-        objc_setAssociatedObject(view, kCustomCAMLLayersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(view, kCustomStateControllersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(view, @"AppliedTendiesPath", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        
-        if ([view respondsToSelector:@selector(contentView)]) {
-            UIView *contentView = [view performSelector:@selector(contentView)];
-            contentView.hidden = NO; // 恢复原生壁纸
-        }
-        return;
+    // 1. 获取或创建我们的专属安全容器 (隔离 Apple 原生的 subviews)
+    UIView *containerView = objc_getAssociatedObject(wallpaperView, @"TendiesContainerView");
+    if (!containerView) {
+        containerView = [[UIView alloc] initWithFrame:wallpaperView.bounds];
+        containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        containerView.userInteractionEnabled = NO; // 让触摸事件穿透
+        [wallpaperView addSubview:containerView];
+        objc_setAssociatedObject(wallpaperView, @"TendiesContainerView", containerView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-
-    // 如果已经渲染过了，直接更新尺寸即可
-    if ([appliedPath isEqualToString:g_tendiesPath] && objc_getAssociatedObject(view, kCustomCAMLLayersKey)) {
-        NSArray *layers = objc_getAssociatedObject(view, kCustomCAMLLayersKey);
-        for (CALayer *lyr in layers) lyr.frame = view.bounds;
-        return;
+    
+    // 强制把我们的容器放到最前面，遮盖原生的任何壁纸画面
+    [wallpaperView bringSubviewToFront:containerView];
+    
+    // 2. 清理旧图层
+    NSArray *oldLayers = objc_getAssociatedObject(wallpaperView, kCustomCAMLLayersKey);
+    for (CALayer *layer in oldLayers) {
+        [layer removeFromSuperlayer];
     }
+    objc_setAssociatedObject(wallpaperView, kCustomCAMLLayersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(wallpaperView, kCustomStateControllersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // 移除旧图层
-    NSArray *oldLayers = objc_getAssociatedObject(view, kCustomCAMLLayersKey);
-    for (CALayer *layer in oldLayers) [layer removeFromSuperlayer];
+    // 3. 判断是否启用
+    if (!g_enabled || g_tendiesPath.length == 0) return;
 
     NSArray<NSURL *> *camlURLs = FindCAMLURLsInTendies(g_tendiesPath);
     if (camlURLs.count == 0) return;
@@ -132,15 +125,16 @@ static void ApplyTendiesToView(UIView *view) {
     NSMutableArray *layersArray = [NSMutableArray array];
     NSMutableArray *controllersArray = [NSMutableArray array];
 
+    // 4. 解析并渲染 CAML
     for (NSURL *camlURL in camlURLs) {
         CAMLParser *parser = [[%c(CAMLParser) alloc] init];
         [parser setBaseURL:[camlURL URLByDeletingLastPathComponent]];
         if ([parser parseContentsOfURL:camlURL]) {
             CALayer *camlLayer = parser.result;
             if (camlLayer && [camlLayer isKindOfClass:[CALayer class]]) {
-                camlLayer.frame = view.bounds;
+                camlLayer.frame = containerView.bounds;
                 camlLayer.masksToBounds = YES;
-                [view.layer addSublayer:camlLayer];
+                [containerView.layer addSublayer:camlLayer];
                 
                 CAStateController *sc = [[%c(CAStateController) alloc] initWithLayer:camlLayer];
                 [layersArray addObject:camlLayer];
@@ -150,15 +144,8 @@ static void ApplyTendiesToView(UIView *view) {
     }
 
     if (layersArray.count > 0) {
-        objc_setAssociatedObject(view, kCustomCAMLLayersKey, layersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(view, kCustomStateControllersKey, controllersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(view, @"AppliedTendiesPath", g_tendiesPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        
-        // 隐藏底部的原生壁纸容器，防止相互干扰
-        if ([view respondsToSelector:@selector(contentView)]) {
-            UIView *contentView = [view performSelector:@selector(contentView)];
-            contentView.hidden = YES;
-        }
+        objc_setAssociatedObject(wallpaperView, kCustomCAMLLayersKey, layersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(wallpaperView, kCustomStateControllersKey, controllersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 
@@ -172,58 +159,80 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
     }
 }
 
-%group iOS14_15_Support
+// ==========================================
+// 动态 Hook 注入区
+// ==========================================
+%group UniversalWallpaper
+
+// 这里的 SBFWallpaperView 在注入时会根据系统版本，动态映射为 PBUIWallpaperView (iOS 16+)
 %hook SBFWallpaperView
-- (id)initWithFrame:(CGRect)frame configuration:(id)configuration variant:(long long)variant cacheGroup:(id)group delegate:(id)delegate options:(unsigned long long)options {
-    id orig = %orig;
-    if (orig) {
-        if (!g_wallpaperViews) g_wallpaperViews = [NSHashTable weakObjectsHashTable];
-        [g_wallpaperViews addObject:orig];
-        ApplyTendiesToView(orig);
+- (void)didMoveToWindow {
+    %orig;
+    if (!g_wallpaperViews) g_wallpaperViews = [NSHashTable weakObjectsHashTable];
+    if (self.window) {
+        [g_wallpaperViews addObject:self];
+        ApplyTendiesToView(self);
+    } else {
+        [g_wallpaperViews removeObject:self];
     }
-    return orig;
 }
+
 - (void)layoutSubviews {
     %orig;
-    ApplyTendiesToView(self);
+    UIView *containerView = objc_getAssociatedObject(self, @"TendiesContainerView");
+    if (containerView) {
+        [self bringSubviewToFront:containerView];
+        containerView.frame = self.bounds;
+        
+        NSArray *layers = objc_getAssociatedObject(self, kCustomCAMLLayersKey);
+        for (CALayer *lyr in layers) {
+            lyr.frame = containerView.bounds;
+        }
+    }
 }
 %end
 
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    for (UIView *view in g_wallpaperViews) UpdateTendiesState(view, @"Locked");
+    for (UIView *view in g_wallpaperViews.allObjects) {
+        UpdateTendiesState(view, @"Locked");
+    }
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    for (UIView *view in g_wallpaperViews) UpdateTendiesState(view, @"Unlock");
+    for (UIView *view in g_wallpaperViews.allObjects) {
+        UpdateTendiesState(view, @"Unlock");
+    }
 }
 %end
-%end // iOS14_15_Support
+%end // UniversalWallpaper
 
-// 全局热重载监听器 (接收偏好设置改动)
+// ==========================================
+// 全局热重载监听器 (实现导入即刻生效)
+// ==========================================
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
     dispatch_async(dispatch_get_main_queue(), ^{
-        double version = kCFCoreFoundationVersionNumber;
-        if (version < 1953.1) {
-            for (UIView *view in g_wallpaperViews) {
-                ApplyTendiesToView(view);
-            }
+        for (UIView *view in g_wallpaperViews.allObjects) {
+            ApplyTendiesToView(view);
         }
     });
 }
 
+// ==========================================
+// 构造函数
+// ==========================================
 %ctor {
     reloadPrefs();
-    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
-    double version = kCFCoreFoundationVersionNumber;
-    
-    // 我们只需要 Hook SpringBoard (iOS 14-15)。iOS 16+ 将由 Prefs 独立注入
-    if ([bundleId isEqualToString:@"com.apple.springboard"]) {
+    if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
-        if (version < 1953.1) {
-            %init(iOS14_15_Support);
+        
+        // 关键：iOS 16 及以上，壁纸视图基类变为了 PBUIWallpaperView
+        if (NSClassFromString(@"PBUIWallpaperView")) {
+            %init(UniversalWallpaper, SBFWallpaperView = NSClassFromString(@"PBUIWallpaperView"));
+        } else {
+            %init(UniversalWallpaper); // iOS 14-15 默认使用 SBFWallpaperView
         }
     }
 }
