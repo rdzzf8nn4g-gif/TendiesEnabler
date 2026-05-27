@@ -28,7 +28,7 @@
 @interface CSCoverSheetViewController : UIViewController
 @end
 
-// 【核心修复】：声明 SBFWallpaperView 继承自 UIView，让编译器识别 window 和 bounds 属性
+// 声明基类，防患于未然
 @interface SBFWallpaperView : UIView
 @end
 
@@ -64,7 +64,7 @@ static void reloadPrefs() {
     }
 }
 
-// 深度递归遍历，无视任何包装层级，暴力提取所有 .ca/main.caml
+// 深度递归遍历，暴力提取所有 .ca/main.caml
 static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
@@ -94,22 +94,22 @@ static const void *kCustomCAMLLayersKey = &kCustomCAMLLayersKey;
 static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 
 // ==========================================
-// 万能降维挂载逻辑：强行在原生壁纸顶层插入交互图层
+// 降维挂载逻辑：强行在原生壁纸顶层插入交互图层
 // ==========================================
 static void ApplyTendiesToView(UIView *wallpaperView) {
     if (!wallpaperView) return;
     
-    // 1. 获取或创建我们的专属安全容器 (隔离 Apple 原生的 subviews)
+    // 1. 获取或创建安全容器
     UIView *containerView = objc_getAssociatedObject(wallpaperView, @"TendiesContainerView");
     if (!containerView) {
         containerView = [[UIView alloc] initWithFrame:wallpaperView.bounds];
         containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        containerView.userInteractionEnabled = NO; // 让触摸事件穿透
+        containerView.userInteractionEnabled = NO; // 触摸穿透
         [wallpaperView addSubview:containerView];
         objc_setAssociatedObject(wallpaperView, @"TendiesContainerView", containerView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     
-    // 强制把我们的容器放到最前面，遮盖原生的任何壁纸画面
+    // 强制置顶
     [wallpaperView bringSubviewToFront:containerView];
     
     // 2. 清理旧图层
@@ -168,14 +168,15 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 // ==========================================
 %group UniversalWallpaper
 
-// 这里的 SBFWallpaperView 在注入时会根据系统版本，动态映射为 PBUIWallpaperView (iOS 16+)
 %hook SBFWallpaperView
 - (void)didMoveToWindow {
     %orig;
     if (!g_wallpaperViews) g_wallpaperViews = [NSHashTable weakObjectsHashTable];
-    if (self.window) {
+    
+    // 【核心修复】：强制类型转换 (UIView *)self 解决编译器不认 id 点语法的问题
+    if (((UIView *)self).window) {
         [g_wallpaperViews addObject:self];
-        ApplyTendiesToView(self);
+        ApplyTendiesToView((UIView *)self);
     } else {
         [g_wallpaperViews removeObject:self];
     }
@@ -185,8 +186,9 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
     %orig;
     UIView *containerView = objc_getAssociatedObject(self, @"TendiesContainerView");
     if (containerView) {
-        [self bringSubviewToFront:containerView];
-        containerView.frame = self.bounds;
+        // 同理，这里也强转一下避免警告
+        [(UIView *)self bringSubviewToFront:containerView];
+        containerView.frame = ((UIView *)self).bounds;
         
         NSArray *layers = objc_getAssociatedObject(self, kCustomCAMLLayersKey);
         for (CALayer *lyr in layers) {
@@ -213,7 +215,7 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 %end // UniversalWallpaper
 
 // ==========================================
-// 全局热重载监听器 (实现导入即刻生效)
+// 全局热重载监听器
 // ==========================================
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
@@ -232,7 +234,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
         
-        // 关键修复：将动态类提取为变量，保证只调用一次 %init
         Class targetWallpaperClass = NSClassFromString(@"PBUIWallpaperView") ?: NSClassFromString(@"SBFWallpaperView");
         if (targetWallpaperClass) {
             %init(UniversalWallpaper, SBFWallpaperView = targetWallpaperClass);
