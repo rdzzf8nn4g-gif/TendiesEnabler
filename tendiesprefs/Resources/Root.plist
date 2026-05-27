@@ -19,16 +19,13 @@
         
         <dict>
             <key>cell</key> <string>PSGroupCell</string>
-            <key>label</key> <string>壁纸路径配置</string>
-            <key>footerText</key> <string>请填入解压后的 .tendies 绝对路径（建议放于 /var/mobile/Documents/ 内）。支持多层 .ca 动画渲染。</string>
+            <key>label</key> <string>壁纸导入</string>
+            <key>footerText</key> <string>点击按钮直接从“文件”App选择 .tendies 文件，插件会自动拷贝并配置路径。</string>
         </dict>
         <dict>
-            <key>cell</key> <string>PSEditTextCell</string>
-            <key>default</key> <string>/var/mobile/Documents/Mario.tendies</string>
-            <key>defaults</key> <string>com.yourname.tendiesprefs</string>
-            <key>key</key> <string>TendiesPath</string>
-            <key>placeholder</key> <string>输入 .tendies 绝对路径</string>
-            <key>PostNotification</key> <string>com.yourname.tendiesprefs/ReloadPrefs</string>
+            <key>cell</key> <string>PSButtonCell</string>
+            <key>label</key> <string>📥 导入 .tendies 壁纸</string>
+            <key>action</key> <string>importTendies:</string>
         </dict>
 
         <dict>
@@ -36,7 +33,7 @@
         </dict>
         <dict>
             <key>cell</key> <string>PSButtonCell</string>
-            <key>label</key> <string>在 Filza 打开路径</string>
+            <key>label</key> <string>📂 在 Filza 查看当前壁纸</string>
             <key>action</key> <string>openFilzaPath:</string>
         </dict>
     </array>
