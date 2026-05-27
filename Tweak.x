@@ -11,12 +11,10 @@
 // 完整接口声明（解决 forward declaration 报错）
 // ==========================================
 
-// 1. 声明 CAPackage 的私有 API，完美解析原生壁纸包
 @interface CAPackage : NSObject
 + (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)outError;
 @end
 
-// 2. 原有的其他声明
 @interface CAStateController : NSObject
 @property (readonly) CALayer *layer;
 - (id)initWithLayer:(id)layer;
@@ -25,6 +23,10 @@
 
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode;
+@end
+
+// iOS 16+ 专有的锁屏海报背景控制器
+@interface CSBackgroundContentViewController : UIViewController
 @end
 
 @interface SBWallpaperController : NSObject
@@ -52,7 +54,6 @@ static NSString *g_tendiesPath = @"";
 static BOOL g_enabled = YES;
 
 static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
-    NSLog(@"[TendiesTweak] 正在目录中寻找 .ca 动画包: %@", basePath);
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
     NSString *file;
@@ -176,7 +177,7 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
     if (!tView) {
         tView = [[TendiesView alloc] initWithFrame:container.bounds];
         tView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [container addSubview:tView]; // 挂载到容器中，完美被多任务模糊层覆盖
+        [container addSubview:tView];
         objc_setAssociatedObject(container, "TendiesView", tView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         
         @synchronized(g_allTendiesViews) {
@@ -186,6 +187,7 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
         
         [tView loadTendiesFromPath:g_tendiesPath];
     } else {
+        // 确保我们的交互层永远在系统原始壁纸前面覆盖它
         [container bringSubviewToFront:tView];
         tView.frame = container.bounds;
     }
@@ -196,7 +198,9 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
 // ==========================================
 %group UniversalWallpaper
 
-// 完美适配 iOS 14-17：直接注入 SpringBoard 全局最底层的壁纸容器
+// --------------------------------------------------
+// 1. 桌面底层注入 (主要适配 iOS 14-15及桌面)
+// --------------------------------------------------
 %hook SBWallpaperController
 - (void)_applicationDidFinishLaunching:(id)launching {
     %orig;
@@ -223,7 +227,28 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
 }
 %end
 
-// 监听锁屏状态切换，实时派发精准交互状态
+// --------------------------------------------------
+// 2. 锁屏海报层注入 (解决 iOS 16-17 下拉/滑动时露出原壁纸)
+// --------------------------------------------------
+%hook CSBackgroundContentViewController
+- (void)viewDidLoad {
+    %orig;
+    injectTendiesIntoWallpaperContainer(self.view);
+}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    TendiesView *tView = objc_getAssociatedObject(self.view, "TendiesView");
+    if (tView) {
+        // 强势覆盖 iOS 16/17 自带海报
+        [self.view bringSubviewToFront:tView];
+        tView.frame = self.view.bounds;
+    }
+}
+%end
+
+// --------------------------------------------------
+// 3. 锁屏交互生命周期 (解决缺少动画/无响应交互的问题)
+// --------------------------------------------------
 %hook CSCoverSheetViewController
 
 // 下拉锁屏显示时 -> 锁定状态
@@ -234,7 +259,15 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
     }
 }
 
-// 开始上滑解锁的那一刻 -> 触发解锁动画 (解决互动延迟)
+// 核心修复：监听用户手指拖拽锁屏的第一时刻，立刻触发交互动画！
+- (void)_scrollPanGestureBegan:(id)gesture {
+    %orig;
+    @synchronized(g_allTendiesViews) {
+        for (TendiesView *tView in g_allTendiesViews) [tView setState:@"Unlock"];
+    }
+}
+
+// 双保险：物理按键解锁或完成拖拽进入桌面的收尾动作
 - (void)viewWillDisappear:(BOOL)animated {
     %orig;
     @synchronized(g_allTendiesViews) {
