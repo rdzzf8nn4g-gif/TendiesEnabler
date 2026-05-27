@@ -2,13 +2,14 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <Foundation/Foundation.h>
+#include <dlfcn.h> // 用于动态加载 iOS 16 框架
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
 #endif
 
 // ==========================================
-// 极简接口声明 (完全依靠原生 UIView，零编译错误)
+// 接口声明区 (继承自 UIView，100% 消除属性报错)
 // ==========================================
 @interface CAPackage : NSObject
 + (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)outError;
@@ -25,7 +26,7 @@
 - (void)setInScreenOffMode:(BOOL)mode;
 @end
 
-// 消除警告
+// 必须继承 UIView，让编译器知道它们具备 frame/bounds/window 属性
 @interface SBFWallpaperView : UIView
 @end
 @interface PBUIWallpaperView : UIView
@@ -76,7 +77,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 }
 
 // ==========================================
-// 核心视图类
+// 核心视图类 (加入原生 Scrubbing 物理搓动机制)
 // ==========================================
 @interface TendiesView : UIView
 @property (nonatomic, strong) NSMutableArray *camlLayers;
@@ -84,6 +85,11 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 @property (nonatomic, strong) NSString *currentState;
 - (void)loadTendiesFromPath:(NSString *)path;
 - (void)setState:(NSString *)state;
+
+// 新增物理搓动接口
+- (void)beginScrubbingUnlock;
+- (void)updateScrubbingProgress:(CGFloat)progress;
+- (void)endScrubbingWithVelocityY:(CGFloat)velocityY;
 @end
 
 @implementation TendiesView
@@ -91,8 +97,8 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
     if (self = [super initWithFrame:frame]) {
         self.camlLayers = [NSMutableArray array];
         self.stateControllers = [NSMutableArray array];
-        self.userInteractionEnabled = NO; // 不阻挡底层触摸
-        self.backgroundColor = [UIColor blackColor]; // 【关键】黑底遮挡原生壁纸
+        self.userInteractionEnabled = NO; 
+        self.backgroundColor = [UIColor blackColor]; // 用黑底彻底物理盖死原生壁纸
     }
     return self;
 }
@@ -138,43 +144,70 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    self.layer.speed = 1.0; 
     for (CALayer *layer in self.camlLayers) {
         layer.frame = self.bounds;
-        layer.speed = 1.0; 
     }
 }
 
 - (void)setState:(NSString *)state {
     if (!state || [self.currentState isEqualToString:state]) return;
     self.currentState = state;
+    
+    // 恢复正常播放速度
+    self.layer.speed = 1.0;
+    
     for (int i = 0; i < self.camlLayers.count; i++) {
         CAStateController *sc = self.stateControllers[i];
         CALayer *layer = self.camlLayers[i];
         [sc setState:state ofLayer:layer];
     }
 }
+
+// --- 物理级搓动核心逻辑 ---
+- (void)beginScrubbingUnlock {
+    // 冻结时间轴
+    self.layer.speed = 0.0;
+    self.layer.timeOffset = 0.0;
+    self.layer.beginTime = 0.0;
+    // 触发解锁状态，此时动画停在第 0 帧
+    [self setState:@"Unlock"];
+    self.layer.speed = 0.0; // 再次强制冻结
+}
+
+- (void)updateScrubbingProgress:(CGFloat)progress {
+    // CAML中的解锁动画通常为 0.8 秒，所以将进度映射到 0.0 ~ 0.8
+    self.layer.timeOffset = progress * 0.8;
+}
+
+- (void)endScrubbingWithVelocityY:(CGFloat)velocityY {
+    // 松手时，恢复时间轴让其继续播放完成
+    CFTimeInterval pausedTime = self.layer.timeOffset;
+    self.layer.speed = 1.0;
+    self.layer.timeOffset = 0.0;
+    self.layer.beginTime = 0.0;
+    CFTimeInterval timeSincePause = [self.layer convertTime:CACurrentMediaTime() fromLayer:nil] - pausedTime;
+    self.layer.beginTime = timeSincePause;
+    
+    // 如果是向下滑动(反悔操作)，让其弹回 Locked
+    if (velocityY > 0) {
+        [self setState:@"Locked"];
+    }
+}
 @end
 
 // ==========================================
-// 注入逻辑：暴力压盖，坚决不隐藏子视图
+// 注入逻辑：按容器分别挂载，拒绝撕裂
 // ==========================================
 static void injectTendiesSmart(UIView *container) {
     if (!container || !container.window) return;
-    
-    NSString *winClass = NSStringFromClass([container.window class]);
-    if (![winClass containsString:@"WallpaperWindow"] && 
-        ![winClass containsString:@"SecureWindow"]) {
-        return; 
-    }
     
     TendiesView *tView = objc_getAssociatedObject(container, "TendiesView");
     if (!tView) {
         tView = [[TendiesView alloc] initWithFrame:container.bounds];
         tView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         
-        // 永远加在最顶层，直接用黑底盖死 iOS 的海报，坚决不能用 sub.hidden = YES!
         [container addSubview:tView];
+        [container bringSubviewToFront:tView]; // 永远在原生背景前
         
         objc_setAssociatedObject(container, "TendiesView", tView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         
@@ -186,7 +219,6 @@ static void injectTendiesSmart(UIView *container) {
         [tView loadTendiesFromPath:g_tendiesPath];
     } else {
         tView.frame = container.bounds;
-        // 随时保持在最前端遮盖
         [container bringSubviewToFront:tView];
     }
 }
@@ -206,10 +238,9 @@ static void reloadPrefsAndInject() {
 // ==========================================
 // 动态 Hook 注入区
 // ==========================================
-
 %group UniversalWallpaper
 
-// --- iOS 14-15 全局静态底图注入 ---
+// --- iOS 14-15 底图挂载 ---
 %hook SBFWallpaperView
 - (void)didMoveToWindow {
     %orig;
@@ -221,8 +252,9 @@ static void reloadPrefsAndInject() {
 }
 %end
 
-// --- 交互手势驱动区 (重制版，恢复极致跟手体验) ---
+// --- 锁屏互动追踪 (完美跟手) ---
 %hook CSCoverSheetViewController
+
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     @synchronized(g_allTendiesViews) {
@@ -237,48 +269,41 @@ static void reloadPrefsAndInject() {
     }
 }
 
-// 恢复你最经典的瞬间触发逻辑，碰屏幕立即激发弹性动画
-- (void)_scrollPanGestureBegan:(id)arg {
+// 拦截手势：手指刚放上去，冻结时间准备搓动
+- (void)_scrollPanGestureBegan:(UIPanGestureRecognizer *)arg {
     %orig;
     if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
-        UIPanGestureRecognizer *gesture = (UIPanGestureRecognizer *)arg;
-        CGPoint velocity = [gesture velocityInView:gesture.view];
-        if (velocity.y < 0) { 
-            @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
-            }
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) [v beginScrubbingUnlock];
         }
     }
 }
 
-// 新增滑动过程中实时感应机制：一旦手指向下滑（反悔），立马拉回动画，跟手感翻倍
-- (void)_scrollPanGestureChanged:(id)arg {
+// 拦截手势：手指正在滑，实时映射物理进度
+- (void)_scrollPanGestureChanged:(UIPanGestureRecognizer *)arg {
     %orig;
     if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
-        UIPanGestureRecognizer *gesture = (UIPanGestureRecognizer *)arg;
-        CGPoint translation = [gesture translationInView:gesture.view];
-        if (translation.y > 0) {
-            @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
-            }
-        } else {
-            @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
-            }
+        CGFloat translationY = [arg translationInView:arg.view].y;
+        CGFloat viewHeight = arg.view.bounds.size.height ?: 844.0;
+        
+        // 向上滑动 translationY 为负数。将其映射为 0.0 ~ 1.0 的百分比进度
+        CGFloat progress = MAX(0.0, MIN(1.0, -translationY / viewHeight));
+        
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) [v updateScrubbingProgress:progress];
         }
     }
 }
 
-- (void)_scrollPanGestureEnded:(id)arg {
+// 拦截手势：手指松开，恢复自然播放或弹回
+- (void)_scrollPanGestureEnded:(UIPanGestureRecognizer *)arg {
     %orig;
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (weakSelf && weakSelf.view.window && !weakSelf.isTransitioning) {
-            @synchronized(g_allTendiesViews) {
-                for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
-            }
+    if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
+        CGFloat velocityY = [arg velocityInView:arg.view].y;
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) [v endScrubbingWithVelocityY:velocityY];
         }
-    });
+    }
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
@@ -292,7 +317,7 @@ static void reloadPrefsAndInject() {
 %end // UniversalWallpaper
 
 
-// --- iOS 16-17 全局静态底图注入 ---
+// --- iOS 16-17 底图挂载 ---
 %group iOS16Up
 %hook PBUIWallpaperView
 - (void)didMoveToWindow {
@@ -307,7 +332,7 @@ static void reloadPrefsAndInject() {
 %end // iOS16Up
 
 // ==========================================
-// 热重载通知中枢
+// 初始化与热重载
 // ==========================================
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -317,8 +342,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 %ctor {
     reloadPrefsAndInject();
+    
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+        
+        // 【关键】iOS 16+ PaperBoardUI 是懒加载的，必须手动 dlopen 唤醒才能成功 Hook！
+        dlopen("/System/Library/PrivateFrameworks/PaperBoardUI.framework/PaperBoardUI", RTLD_NOW);
         
         %init(UniversalWallpaper);
         
