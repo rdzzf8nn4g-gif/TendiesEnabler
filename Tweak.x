@@ -2,14 +2,14 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <Foundation/Foundation.h>
-#include <dlfcn.h> // 用于动态加载 iOS 16 框架
+#include <dlfcn.h> 
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
 #endif
 
 // ==========================================
-// 辅助宏：确保 UI 强制在主线程刷新，防止后台线程崩溃
+// 辅助宏：强制主线程执行，防止底层动画队列崩溃 (SIGABRT)
 // ==========================================
 #define EXEC_ON_MAIN(block) \
     if ([NSThread isMainThread]) { \
@@ -33,6 +33,7 @@
 
 @interface CSCoverSheetViewController : UIViewController
 @property (nonatomic, readonly) BOOL isTransitioning;
+@property (retain, nonatomic) UIViewController *backgroundContentViewController; // iOS 16+ 原生海报容器
 - (void)setInScreenOffMode:(BOOL)mode;
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source;
 @end
@@ -199,6 +200,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
     if (!self.isScrubbing) return;
     self.isScrubbing = NO;
     
+    // 松手时，让系统原生的 CoreAnimation 接管剩余的动画，完美自然！
     CFTimeInterval pausedTime = self.layer.timeOffset;
     self.layer.speed = 1.0;
     self.layer.timeOffset = 0.0;
@@ -213,11 +215,11 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 @end
 
 // ==========================================
-// 注入逻辑：防重入锁与清场
+// 注入逻辑：按容器智能挂载与防重入
 // ==========================================
 static BOOL isInjecting = NO;
 
-static void injectTendiesSmart(UIView *container) {
+static void injectTendiesSmart(UIView *container, BOOL isLockScreen) {
     if (!container || !container.window) return;
     if (isInjecting) return; 
     
@@ -245,13 +247,19 @@ static void injectTendiesSmart(UIView *container) {
     if (tView.superview != container) {
         [container addSubview:tView];
     }
-    [container bringSubviewToFront:tView]; 
     
-    if ([container isKindOfClass:NSClassFromString(@"PBUIWallpaperView")]) {
-        for (UIView *subview in container.subviews) {
-            if (subview != tView && ![subview isKindOfClass:[TendiesView class]]) {
-                subview.hidden = YES;
-                subview.userInteractionEnabled = NO;
+    if (isLockScreen) {
+        // 如果是锁屏控制器，插入到最底层，充当背景
+        [container insertSubview:tView atIndex:0];
+    } else {
+        // 如果是桌面 (PBUIWallpaperView)，提到最高层并遮挡原生
+        [container bringSubviewToFront:tView]; 
+        if ([container isKindOfClass:NSClassFromString(@"PBUIWallpaperView")]) {
+            for (UIView *subview in container.subviews) {
+                if (subview != tView && ![subview isKindOfClass:[TendiesView class]]) {
+                    subview.hidden = YES;
+                    subview.userInteractionEnabled = NO;
+                }
             }
         }
     }
@@ -283,19 +291,20 @@ static void reloadPrefsAndInject() {
 - (void)didMoveToWindow {
     %orig;
     if ([self respondsToSelector:@selector(variant)] && self.variant == 0) {
-        injectTendiesSmart(self);
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self, NO); });
     }
 }
 - (void)layoutSubviews {
     %orig;
     if ([self respondsToSelector:@selector(variant)] && self.variant == 0) {
-        injectTendiesSmart(self);
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self, NO); });
     }
 }
 %end
 
-// --- 锁屏状态追踪 ---
+// --- 锁屏状态追踪 (全版本通用) ---
 %hook CSCoverSheetViewController
+
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     EXEC_ON_MAIN(^{
@@ -314,6 +323,23 @@ static void reloadPrefsAndInject() {
     });
 }
 
+// 解决“平时看不见”：iOS 16+ 隐藏原生海报背景，露出底层 Tendies
+- (void)viewDidLayoutSubviews {
+    %orig;
+    EXEC_ON_MAIN(^{
+        if ([self respondsToSelector:@selector(backgroundContentViewController)]) {
+            UIViewController *bgVC = [self valueForKey:@"backgroundContentViewController"];
+            if (bgVC && bgVC.view) {
+                bgVC.view.hidden = YES;
+                bgVC.view.alpha = 0.0;
+            }
+        }
+        // 直接在锁屏主视图挂载，充当完美背景层
+        injectTendiesSmart(self.view, YES);
+    });
+}
+
+// [仅限 iOS 14-15] 拦截手势
 - (void)_scrollPanGestureBegan:(UIPanGestureRecognizer *)arg {
     %orig;
     if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
@@ -351,6 +377,7 @@ static void reloadPrefsAndInject() {
     }
 }
 
+// 息屏/亮屏触发器
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     NSString *newState = mode ? @"Sleep" : @"Locked";
@@ -377,79 +404,61 @@ static void reloadPrefsAndInject() {
 // --- iOS 16-17 核心逻辑 ---
 %group iOS16Up
 
-// 挂载视图并镇压系统海报
+// 桌面背景 (Variant 1) 处理
 %hook PBUIWallpaperView
 - (void)didMoveToWindow {
     %orig;
-    if (self.variant == 0) {
-        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
+    // 只有桌面底图才需要处理
+    if (self.variant == 1) {
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self, NO); });
     }
 }
 - (void)layoutSubviews {
     %orig;
-    if (self.variant == 0) {
-        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
-    }
-}
-
-- (void)addSubview:(UIView *)view {
-    %orig;
-    if (self.variant == 0 && ![view isKindOfClass:[TendiesView class]]) {
-        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
-    }
-}
-
-- (void)insertSubview:(UIView *)view atIndex:(NSInteger)index {
-    %orig;
-    if (self.variant == 0 && ![view isKindOfClass:[TendiesView class]]) {
-        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
+    if (self.variant == 1) {
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self, NO); });
     }
 }
 %end
 
-// 拦截底层物理引擎 (这些方法在 iOS 16/17 被派发在后台高优队列执行，必须强切回主线程！)
+// 解决“交互残缺/冻结”：拦截真正的原生理引擎手势进行映射
 %hook SBCoverSheetSlidingViewController
 
-- (CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
-    CGRect rect = %orig;
-    EXEC_ON_MAIN(^{
-        @synchronized(g_allTendiesViews) {
-            for (TendiesView *v in g_allTendiesViews) {
-                [v beginScrubbingUnlock];
-                [v updateScrubbingProgress:progress];
-            }
-        }
-    });
-    return rect;
-}
-
-- (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
-    CGRect rect = %orig;
-    EXEC_ON_MAIN(^{
-        @synchronized(g_allTendiesViews) {
-            for (TendiesView *v in g_allTendiesViews) {
-                [v beginScrubbingUnlock];
-                [v updateScrubbingProgress:progress];
-            }
-        }
-    });
-    return rect;
-}
-
-- (void)_finishTransitionToPresented:(BOOL)presented animated:(BOOL)animated withCompletion:(id)completion {
+- (void)_dismissGestureBeganWithGestureRecognizer:(UIPanGestureRecognizer *)recognizer {
     %orig;
     EXEC_ON_MAIN(^{
         @synchronized(g_allTendiesViews) {
-            for (TendiesView *v in g_allTendiesViews) {
-                [v endScrubbingWithVelocityY:0]; 
-                if (presented) {
-                    [v setState:@"Locked"];
-                } else {
-                    [v setState:@"Unlock"];
-                }
-            }
+            for (TendiesView *v in g_allTendiesViews) [v beginScrubbingUnlock];
         }
     });
+}
+
+- (void)_dismissGestureChangedWithGestureRecognizer:(UIPanGestureRecognizer *)recognizer {
+    %orig;
+    if ([recognizer isKindOfClass:[UIPanGestureRecognizer class]]) {
+        CGFloat translationY = [recognizer translationInView:recognizer.view].y;
+        CGFloat viewHeight = recognizer.view.bounds.size.height ?: 844.0;
+        // iOS 16+ 向上滑动 translationY 为负
+        CGFloat progress = MAX(0.0, MIN(1.0, -translationY / viewHeight));
+        EXEC_ON_MAIN(^{
+            @synchronized(g_allTendiesViews) {
+                for (TendiesView *v in g_allTendiesViews) [v updateScrubbingProgress:progress];
+            }
+        });
+    }
+}
+
+// 统一的松手结束回调：让动画引擎恢复 1.0 速度走完后续回弹
+- (void)_presentOrDismissGestureEndedWithGestureRecognizer:(UIPanGestureRecognizer *)recognizer {
+    %orig;
+    if ([recognizer isKindOfClass:[UIPanGestureRecognizer class]]) {
+        CGFloat velocityY = [recognizer velocityInView:recognizer.view].y;
+        EXEC_ON_MAIN(^{
+            @synchronized(g_allTendiesViews) {
+                for (TendiesView *v in g_allTendiesViews) [v endScrubbingWithVelocityY:velocityY];
+            }
+        });
+    }
 }
 
 %end
