@@ -8,8 +8,16 @@
 #endif
 
 // ==========================================
-// 完整接口声明
+// 完整接口声明（解决 forward declaration 报错）
 // ==========================================
+
+// 1. 声明 CAPackage 的私有 API，解决编译错误
+@interface CAPackage : NSObject
++ (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)outError;
+- (CALayer *)rootLayer; // 顺便声明一下 rootLayer，虽然你可以用 valueForKey:
+@end
+
+// 2. 原有的其他声明
 @interface CAStateController : NSObject
 @property (readonly) CALayer *layer;
 - (id)initWithLayer:(id)layer;
