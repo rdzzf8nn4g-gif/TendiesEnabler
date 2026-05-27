@@ -133,7 +133,8 @@ static NSString * GetTendiesStorageDir() {
                 NSString *name = file.lastPathComponent;
 
                 if ([name isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
-                    [randomStr writeToFile:modPath atomically:YES encoding:NSUTF8String error:nil];
+                    // 修复 1：修改 NSUTF8String 为 NSUTF8StringEncoding
+                    [randomStr writeToFile:modPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 } else if ([name isEqualToString:@"com.apple.posterkit.provider.contents.userInfo"]) {
                     NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:modPath];
                     if (plist) {
@@ -155,8 +156,27 @@ static NSString * GetTendiesStorageDir() {
         }
     }
 
-    // 杀掉 PosterBoard，强制系统重新加载我们的原生壁纸
-    system("killall -9 PosterBoard");
+    // 修复 2：使用 NSTask 绕过 system() 的编译限制，兼容各越狱环境
+    NSString *killallBin = @"/usr/bin/killall";
+#if __has_include(<roothide.h>)
+    killallBin = jbroot(killallBin);
+#else
+    if ([fm fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
+        killallBin = @"/var/jb/usr/bin/killall";
+    }
+#endif
+    
+    Class NSTaskClass = NSClassFromString(@"NSTask");
+    if (NSTaskClass && [fm fileExistsAtPath:killallBin]) {
+        @try {
+            id task = [[NSTaskClass alloc] init];
+            [task setLaunchPath:killallBin];
+            [task setArguments:@[@"-9", @"PosterBoard"]];
+            [task launch];
+        } @catch (NSException *e) {
+            // 静默失败，保障稳定性
+        }
+    }
 }
 
 // 大厂级解压引擎
