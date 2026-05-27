@@ -1,0 +1,46 @@
+name: Build iOS Tweak
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Theos
+        uses: actions/checkout@v3
+        with:
+          repository: theos/theos
+          ref: master
+          path: theos
+          submodules: true
+
+      - name: Setup iOS SDK
+        uses: actions/checkout@v3
+        with:
+          repository: theos/sdks
+          ref: master
+          path: theos/sdks
+
+      - name: Build Rootless (无根)
+        run: |
+          export THEOS=${{ github.workspace }}/theos
+          make package THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Build Rootful (有根)
+        run: |
+          export THEOS=${{ github.workspace }}/theos
+          make package
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: TendiesEnabler-Packages
+          path: packages/*.deb
