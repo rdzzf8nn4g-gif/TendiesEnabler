@@ -322,8 +322,14 @@ static void injectTendiesSmart(UIView *container, BOOL isLockscreen) {
                 // 恢复原生时间流逝
                 for (CALayer *layer in v.camlLayers) layer.speed = 1.0;
                 
+                // 【修复点】：显式转换为 CALayer，防止编译错误
+                CGFloat currentOffset = 0.0;
+                CALayer *firstLayer = (CALayer *)v.camlLayers.firstObject;
+                if (firstLayer) {
+                    currentOffset = firstLayer.timeOffset;
+                }
+                
                 // 判断：如果滑动速度够快，或者已经滑过了屏幕 40%，则继续解开
-                CGFloat currentOffset = v.camlLayers.firstObject.timeOffset;
                 if (velocity.y < -500 || currentOffset > 0.4) {
                     [v setState:@"Unlock"];
                 } else {
