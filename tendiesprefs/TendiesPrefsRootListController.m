@@ -95,6 +95,7 @@ static NSString * GetTendiesStorageDir() {
             if (![fm fileExistsAtPath:targetDir]) {
                 [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
             }
+            // 清理旧缓存
             [fm removeItemAtPath:unzipDir error:nil];
             [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0777} error:nil];
             
@@ -136,7 +137,7 @@ static NSString * GetTendiesStorageDir() {
             if (processSuccess) {
                 [self setPermissionsRecursive:unzipDir];
                 
-                // 写入路径并广播热重载通知 (触发 Tweak.x 中的秒切逻辑)
+                // 【核心指令】：写入路径并发出全局 Darwin 通知
                 CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
                 CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
                 CFPreferencesAppSynchronize(appID);
@@ -144,7 +145,7 @@ static NSString * GetTendiesStorageDir() {
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:@"壁纸已挂载，锁屏已秒切！请退出设置查看效果。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功 🚀" message:@"壁纸已成功挂载！关闭控制面板即可看到秒切效果。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
