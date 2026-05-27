@@ -31,15 +31,6 @@
 @interface CSCoverSheetViewController : UIViewController
 @end
 
-@interface SBWallpaperController : NSObject
-+ (id)sharedInstance;
-- (void)_reloadWallpaperAndFlushCaches:(BOOL)caches completionHandler:(void(^)(void))handler;
-@end
-
-@interface PRPosterDescriptor : NSObject
-@property (readonly, copy, nonatomic) NSURL *assetDirectory;
-@end
-
 // ==========================================
 // 全局变量与工具函数
 // ==========================================
@@ -72,49 +63,16 @@ static void reloadPrefs() {
     }
 }
 
-// 精准寻找 PosterKit 的描述符根目录 (包含 versions 和 .identifier 的层级)
-static NSURL *FindDescriptorRootInTendies(NSString *basePath) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    
-    // 1. 优先按照标准结构寻找 descriptors 文件夹内的唯一目录
-    NSString *descriptorsDir = [basePath stringByAppendingPathComponent:@"descriptors"];
-    if ([fm fileExistsAtPath:descriptorsDir]) {
-        NSArray *items = [fm contentsOfDirectoryAtPath:descriptorsDir error:nil];
-        for (NSString *item in items) {
-            if ([item hasPrefix:@"."]) continue; // 过滤隐藏文件如 .DS_Store
-            NSString *fullPath = [descriptorsDir stringByAppendingPathComponent:item];
-            BOOL isDir = NO;
-            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-                return [NSURL fileURLWithPath:fullPath]; // 找到描述符根目录
-            }
-        }
-    }
-    
-    // 2. 备用方案：递归寻找特征文件
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
-    NSString *file;
-    while ((file = [enumerator nextObject])) {
-        if ([file.lastPathComponent isEqualToString:@"com.apple.posterkit.provider.descriptor.identifier"]) {
-            NSString *parentDir = [[basePath stringByAppendingPathComponent:file] stringByDeletingLastPathComponent];
-            return [NSURL fileURLWithPath:parentDir];
-        }
-    }
-    return nil;
-}
-
-// 针对 iOS 14/15：递归穿透 .wallpaper 等文件夹，提取所有 CAML URL
+// 【核心修复】：深度递归遍历，穿透 .wallpaper 文件夹寻找所有 .ca/main.caml 资源
 static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
-    NSURL *descriptorRoot = FindDescriptorRootInTendies(basePath);
-    if (!descriptorRoot) return @[];
-    
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:descriptorRoot.path];
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
     NSString *file;
     NSMutableArray *camlURLs = [NSMutableArray array];
 
     while ((file = [enumerator nextObject])) {
         if ([file hasSuffix:@".ca"]) {
-            NSString *camlPath = [[descriptorRoot.path stringByAppendingPathComponent:file] stringByAppendingPathComponent:@"main.caml"];
+            NSString *camlPath = [[basePath stringByAppendingPathComponent:file] stringByAppendingPathComponent:@"main.caml"];
             if ([fm fileExistsAtPath:camlPath]) {
                 [camlURLs addObject:[NSURL fileURLWithPath:camlPath]];
             }
@@ -140,15 +98,33 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 static void ApplyTendiesToView(UIView *view) {
     if (!view) return;
     
-    // 清理旧图层，实现秒切无缝替换
-    NSArray *oldLayers = objc_getAssociatedObject(view, kCustomCAMLLayersKey);
-    for (CALayer *layer in oldLayers) {
-        [layer removeFromSuperlayer];
-    }
-    objc_setAssociatedObject(view, kCustomCAMLLayersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(view, kCustomStateControllersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSString *appliedPath = objc_getAssociatedObject(view, @"AppliedTendiesPath");
 
-    if (!g_enabled || g_tendiesPath.length == 0) return;
+    // 如果未启用或路径为空，清理所有自定义图层
+    if (!g_enabled || g_tendiesPath.length == 0) {
+        NSArray *oldLayers = objc_getAssociatedObject(view, kCustomCAMLLayersKey);
+        for (CALayer *layer in oldLayers) [layer removeFromSuperlayer];
+        objc_setAssociatedObject(view, kCustomCAMLLayersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(view, kCustomStateControllersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(view, @"AppliedTendiesPath", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
+        if ([view respondsToSelector:@selector(contentView)]) {
+            UIView *contentView = [view performSelector:@selector(contentView)];
+            contentView.hidden = NO; // 恢复原生壁纸
+        }
+        return;
+    }
+
+    // 如果已经渲染过了，直接更新尺寸即可
+    if ([appliedPath isEqualToString:g_tendiesPath] && objc_getAssociatedObject(view, kCustomCAMLLayersKey)) {
+        NSArray *layers = objc_getAssociatedObject(view, kCustomCAMLLayersKey);
+        for (CALayer *lyr in layers) lyr.frame = view.bounds;
+        return;
+    }
+
+    // 移除旧图层
+    NSArray *oldLayers = objc_getAssociatedObject(view, kCustomCAMLLayersKey);
+    for (CALayer *layer in oldLayers) [layer removeFromSuperlayer];
 
     NSArray<NSURL *> *camlURLs = FindCAMLURLsInTendies(g_tendiesPath);
     if (camlURLs.count == 0) return;
@@ -176,6 +152,13 @@ static void ApplyTendiesToView(UIView *view) {
     if (layersArray.count > 0) {
         objc_setAssociatedObject(view, kCustomCAMLLayersKey, layersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(view, kCustomStateControllersKey, controllersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(view, @"AppliedTendiesPath", g_tendiesPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
+        // 隐藏底部的原生壁纸容器，防止相互干扰
+        if ([view respondsToSelector:@selector(contentView)]) {
+            UIView *contentView = [view performSelector:@selector(contentView)];
+            contentView.hidden = YES;
+        }
     }
 }
 
@@ -202,8 +185,7 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 }
 - (void)layoutSubviews {
     %orig;
-    NSArray *layers = objc_getAssociatedObject(self, kCustomCAMLLayersKey);
-    for (CALayer *lyr in layers) lyr.frame = self.bounds;
+    ApplyTendiesToView(self);
 }
 %end
 
@@ -219,40 +201,14 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
 %end
 %end // iOS14_15_Support
 
-// ==========================================
-// iOS 16-17: PosterBoard 资源劫持
-// ==========================================
-%group iOS16_17_PosterBoard
-%hook PRPosterDescriptor
-- (NSURL *)assetDirectory {
-    if (g_enabled && g_tendiesPath.length > 0) {
-        // 重定向为我们的描述符根目录
-        NSURL *customURL = FindDescriptorRootInTendies(g_tendiesPath);
-        if (customURL) return customURL; 
-    }
-    return %orig;
-}
-%end
-%end // iOS16_17_PosterBoard
-
-// ==========================================
-// 全局热重载监听器 (实现导入即刻生效)
-// ==========================================
+// 全局热重载监听器 (接收偏好设置改动)
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
         double version = kCFCoreFoundationVersionNumber;
-        
         if (version < 1953.1) {
-            // iOS 14-15：立刻重新渲染 CAML
             for (UIView *view in g_wallpaperViews) {
                 ApplyTendiesToView(view);
-            }
-        } else {
-            // iOS 16-17：如果是 PosterBoard 进程，直接退出让系统重启它以刷新所有缓存
-            if ([bundleId isEqualToString:@"com.apple.PosterBoard"]) {
-                exit(0);
             }
         }
     });
@@ -263,16 +219,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
     double version = kCFCoreFoundationVersionNumber;
     
-    // 根据进程分配任务
+    // 我们只需要 Hook SpringBoard (iOS 14-15)。iOS 16+ 将由 Prefs 独立注入
     if ([bundleId isEqualToString:@"com.apple.springboard"]) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
         if (version < 1953.1) {
             %init(iOS14_15_Support);
-        }
-    } else if ([bundleId isEqualToString:@"com.apple.PosterBoard"]) {
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
-        if (version >= 1953.1) {
-            %init(iOS16_17_PosterBoard);
         }
     }
 }
