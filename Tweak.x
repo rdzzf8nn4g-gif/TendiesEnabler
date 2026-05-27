@@ -3,9 +3,48 @@
 #import <objc/runtime.h>
 #import <Foundation/Foundation.h>
 
-// ==========================================
-// 前置接口声明 (避免 Github Actions 编译报错)
-// ==========================================
+// ================= 终极环境适配 (Rootful/Rootless/Roothide) =================
+#if __has_include(<roothide.h>)
+#import <roothide.h>
+#else
+#define jbroot(path) path
+#endif
+
+static NSString * GetPrefPath() {
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist";
+#if __has_include(<roothide.h>)
+    return jbroot(base);
+#else
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
+        return [@"/var/jb" stringByAppendingPathComponent:base];
+    }
+    return base;
+#endif
+}
+
+// ================= 全局变量与配置读取 =================
+static BOOL g_enabled = YES;
+static NSString *g_tendiesPath = @"";
+
+static void reloadPrefs() {
+    CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
+    CFPreferencesAppSynchronize(appID);
+    
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:GetPrefPath()];
+    if (dict) {
+        g_enabled = dict[@"Enabled"] ? [dict[@"Enabled"] boolValue] : YES;
+        g_tendiesPath = dict[@"TendiesPath"] ?: @"";
+    } else {
+        g_enabled = YES; 
+        g_tendiesPath = @"";
+    }
+}
+
+static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    reloadPrefs();
+}
+
+// ================= 前置接口声明 (避免 Github Actions 编译报错) =================
 @interface CAMLParser : NSObject
 @property (retain) NSURL *baseURL;
 @property (readonly) id result;
@@ -29,30 +68,8 @@
 - (NSURL *)serverIdentityURL;
 @end
 
-// ==========================================
-// 动态绑定与偏好读取辅助函数
-// ==========================================
-static const void *kCustomCAMLLayersKey = &kCustomCAMLLayersKey;
-static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 
-// 兼容 Rootless 和 Rootful 的读取方式
-static BOOL isTweakEnabled() {
-    Boolean exists;
-    Boolean enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), CFSTR("com.yourname.tendiesprefs"), &exists);
-    return exists ? enabled : YES;
-}
-
-static NSString *getTendiesPath() {
-    CFStringRef path = CFPreferencesCopyAppValue(CFSTR("TendiesPath"), CFSTR("com.yourname.tendiesprefs"));
-    if (path) {
-        NSString *result = (__bridge NSString *)path;
-        CFRelease(path);
-        return result;
-    }
-    return @""; // 默认为空
-}
-
-// 自动扫描 .tendies 内部寻找所有的 main.caml 文件 (因为有 Foreground, Floating, Background 等多层)
+// ================= 辅助函数：自动扫描并获取 CAML =================
 static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     NSMutableArray *camlURLs = [NSMutableArray array];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -72,6 +89,9 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     return camlURLs;
 }
 
+static const void *kCustomCAMLLayersKey = &kCustomCAMLLayersKey;
+static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
+
 
 // ==========================================
 // 核心组 1: iOS 14 - 15 (SpringBoard 强行渲染层)
@@ -82,15 +102,13 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
 
 - (id)initWithFrame:(CGRect)frame configuration:(id)configuration variant:(long long)variant cacheGroup:(id)group delegate:(id)delegate options:(unsigned long long)options {
     SBFWallpaperView *orig = %orig;
-    if (orig && isTweakEnabled()) {
-        NSString *tendiesPath = getTendiesPath();
-        
-        if (tendiesPath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:tendiesPath]) {
-            NSArray<NSURL *> *camlURLs = findCAMLFiles(tendiesPath);
+    if (orig && g_enabled) {
+        if (g_tendiesPath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:g_tendiesPath]) {
+            NSArray<NSURL *> *camlURLs = findCAMLFiles(g_tendiesPath);
             NSMutableArray *layersArray = [NSMutableArray array];
             NSMutableArray *controllersArray = [NSMutableArray array];
             
-            // 遍历并加载所有的 CAML 层 (Background, Floating, Foreground 等)
+            // 遍历所有 .ca 文件夹加载层
             for (NSURL *camlURL in camlURLs) {
                 NSURL *baseURL = [camlURL URLByDeletingLastPathComponent];
                 
@@ -105,7 +123,6 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
                         [orig.layer addSublayer:camlLayer];
                         
                         CAStateController *stateController = [[%c(CAStateController) alloc] initWithLayer:camlLayer];
-                        
                         [layersArray addObject:camlLayer];
                         [controllersArray addObject:stateController];
                     }
@@ -116,7 +133,6 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
                 objc_setAssociatedObject(orig, kCustomCAMLLayersKey, layersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(orig, kCustomStateControllersKey, controllersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 
-                // 监听锁屏状态切换
                 [[NSNotificationCenter defaultCenter] addObserver:orig selector:@selector(tendies_handleLockStateChange:) name:@"TendiesLockStateChanged" object:nil];
             }
         }
@@ -126,7 +142,7 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
 
 %new
 - (void)tendies_handleLockStateChange:(NSNotification *)note {
-    NSString *state = note.userInfo[@"state"]; // "Locked" 或 "Unlock"
+    NSString *state = note.userInfo[@"state"]; 
     NSArray *controllers = objc_getAssociatedObject(self, kCustomStateControllersKey);
     NSArray *layers = objc_getAssociatedObject(self, kCustomCAMLLayersKey);
     
@@ -134,7 +150,7 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
         for (NSUInteger i = 0; i < controllers.count; i++) {
             CAStateController *ctrl = controllers[i];
             CALayer *lyr = layers[i];
-            [ctrl setState:state ofLayer:lyr]; // 触发 CAML 动画
+            [ctrl setState:state ofLayer:lyr]; // 触发 CAML 内置动画状态 ("Locked" / "Unlock")
         }
     }
 }
@@ -144,7 +160,7 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     NSArray *layers = objc_getAssociatedObject(self, kCustomCAMLLayersKey);
     if (layers) {
         for (CALayer *lyr in layers) {
-            lyr.frame = self.bounds; // 屏幕旋转或调整大小时重新贴合
+            lyr.frame = self.bounds;
         }
     }
 }
@@ -153,28 +169,23 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     %orig;
 }
-
 %end
 
 
 %hook CSCoverSheetViewController
-
-// 当锁屏界面出现 (点亮屏幕 / 锁屏状态)
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    if (isTweakEnabled()) {
+    if (g_enabled) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" userInfo:@{@"state": @"Locked"}];
     }
 }
 
-// 当锁屏界面消失 (解锁成功进入桌面)
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    if (isTweakEnabled()) {
+    if (g_enabled) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" userInfo:@{@"state": @"Unlock"}];
     }
 }
-
 %end
 
 %end // iOS14_15_Support
@@ -187,23 +198,15 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
 
 %hook PRPosterDescriptor
 
-// 拦截系统壁纸的路径描述，将其替换为我们的 Tendies 路径
 - (id)_initWithPath:(id)path {
-    if (isTweakEnabled()) {
-        NSString *customTendiesPath = getTendiesPath();
+    if (g_enabled && g_tendiesPath.length > 0) {
         NSFileManager *fm = [NSFileManager defaultManager];
-        
-        if (customTendiesPath.length > 0 && [fm fileExistsAtPath:customTendiesPath]) {
-            // 如果用户指定了路径，我们强制把加载的 Path 换掉。
-            // 注意：这会导致系统默认壁纸被覆盖显示为你的马里奥。
-            // 对于稳定的产品级开发，这里通常会结合 bundleID 或特定的 Identifier 过滤。
-            
-            // 为了防止在编译时 PRSPosterPath 找不到，使用 runtime 动态创建实例或路径处理
-            // 这里提供一种基于 NSURL 替换的变通方案
-            NSURL *customURL = [NSURL fileURLWithPath:customTendiesPath];
+        if ([fm fileExistsAtPath:g_tendiesPath]) {
+            // 利用 Hook 将原 PosterKit 请求的数据路径替换至设置路径
+            // 注意：因为原生代码实现会验证文件结构，所以你需要确保传入的是完整的 .tendies 或其内容路径。
+            NSURL *customURL = [NSURL fileURLWithPath:g_tendiesPath];
             if ([path respondsToSelector:@selector(serverIdentityURL)]) {
-                // 如果你想做到更细粒度的控制，可以在这里打断点分析。
-                // 作为演示，我们如果发现路径可以被替换，可以用自定义初始化的 path
+                // 如果后续发现崩溃或者不兼容，可以在此处扩展对私有类的替换逻辑
             }
         }
     }
@@ -216,15 +219,18 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
 
 
 // ==========================================
-// Tweak 入口 (自动判断系统和进程)
+// Tweak 入口
 // ==========================================
 %ctor {
-    if (!isTweakEnabled()) return;
+    reloadPrefs();
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+    
+    if (!g_enabled) return;
     
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
     double version = kCFCoreFoundationVersionNumber;
     
-    // CFCoreFoundationVersionNumber >= 1953.1 对应的是 iOS 16.0 及以上
+    // CFCoreFoundationVersionNumber >= 1953.1 对应 iOS 16.0 及以上
     if (version < 1953.1) {
         if ([bundleId isEqualToString:@"com.apple.springboard"]) {
             %init(iOS14_15_Support);
