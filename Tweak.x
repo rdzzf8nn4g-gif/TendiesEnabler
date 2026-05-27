@@ -31,6 +31,8 @@
 // 声明基类，防患于未然
 @interface SBFWallpaperView : UIView
 @end
+@interface PBUIWallpaperView : UIView
+@end
 
 // ==========================================
 // 全局变量与工具函数
@@ -39,29 +41,18 @@ static BOOL g_enabled = YES;
 static NSString *g_tendiesPath = @"";
 static NSHashTable *g_wallpaperViews = nil;
 
-static NSString * GetPrefPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist";
-#if __has_include(<roothide.h>)
-    return jbroot(base);
-#else
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
-        return [@"/var/jb" stringByAppendingPathComponent:base];
-    }
-    return base;
-#endif
-}
-
+// 强制刷新 Preferences，无视磁盘延迟
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
     CFPreferencesAppSynchronize(appID);
-    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:GetPrefPath()];
-    if (dict) {
-        g_enabled = dict[@"Enabled"] ? [dict[@"Enabled"] boolValue] : YES;
-        g_tendiesPath = dict[@"TendiesPath"] ?: @"";
-    } else {
-        g_enabled = YES; 
-        g_tendiesPath = @"";
-    }
+    
+    // 从内存中读取最新状态
+    Boolean validEnabled = NO;
+    Boolean enabledVal = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &validEnabled);
+    g_enabled = validEnabled ? enabledVal : YES;
+
+    CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("TendiesPath"), appID);
+    g_tendiesPath = pathRef ? (NSString *)CFBridgingRelease(pathRef) : @"";
 }
 
 // 深度递归遍历，暴力提取所有 .ca/main.caml
@@ -173,12 +164,11 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
     %orig;
     if (!g_wallpaperViews) g_wallpaperViews = [NSHashTable weakObjectsHashTable];
     
-    // 【核心修复】：强制类型转换 (UIView *)self 解决编译器不认 id 点语法的问题
     if (((UIView *)self).window) {
-        [g_wallpaperViews addObject:self];
+        [g_wallpaperViews addObject:(UIView *)self];
         ApplyTendiesToView((UIView *)self);
     } else {
-        [g_wallpaperViews removeObject:self];
+        [g_wallpaperViews removeObject:(UIView *)self];
     }
 }
 
@@ -186,7 +176,6 @@ static void UpdateTendiesState(UIView *view, NSString *state) {
     %orig;
     UIView *containerView = objc_getAssociatedObject(self, @"TendiesContainerView");
     if (containerView) {
-        // 同理，这里也强转一下避免警告
         [(UIView *)self bringSubviewToFront:containerView];
         containerView.frame = ((UIView *)self).bounds;
         
