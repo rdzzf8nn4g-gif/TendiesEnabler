@@ -3,7 +3,6 @@
 #import <objc/runtime.h>
 #import <Foundation/Foundation.h>
 
-// ================= 终极环境适配 (Rootful/Rootless/Roothide) =================
 #if __has_include(<roothide.h>)
 #import <roothide.h>
 #else
@@ -22,7 +21,6 @@ static NSString * GetPrefPath() {
 #endif
 }
 
-// ================= 全局变量与配置读取 =================
 static BOOL g_enabled = YES;
 static NSString *g_tendiesPath = @"";
 
@@ -44,7 +42,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     reloadPrefs();
 }
 
-// ================= 前置接口声明 (避免 Github Actions 编译报错) =================
 @interface CAMLParser : NSObject
 @property (retain) NSURL *baseURL;
 @property (readonly) id result;
@@ -68,19 +65,23 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (NSURL *)serverIdentityURL;
 @end
 
-
-// ================= 辅助函数：深度递归扫描解压后的 CAML 文件 =================
+// ==========================================
+// 【深度递归搜索引擎】：解决嵌套过深导致不生效的问题
+// ==========================================
 static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     NSMutableArray *camlURLs = [NSMutableArray array];
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    // 使用枚举器深度遍历解压后的文件夹，寻找所有以 .ca/main.caml 结尾的文件
+    // 使用深度枚举器，遍历解压后的文件夹内所有文件
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:tendiesBasePath];
-    NSString *file;
-    while (file = [enumerator nextObject]) {
-        if ([file hasSuffix:@".ca/main.caml"]) {
-            NSString *fullPath = [tendiesBasePath stringByAppendingPathComponent:file];
+    NSString *filePath;
+    
+    while ((filePath = [enumerator nextObject])) {
+        // 只要遇到 main.caml 就抓取它，无论嵌套多少层
+        if ([filePath hasSuffix:@"main.caml"]) {
+            NSString *fullPath = [tendiesBasePath stringByAppendingPathComponent:filePath];
             [camlURLs addObject:[NSURL fileURLWithPath:fullPath]];
+            NSLog(@"[TendiesEnabler] 成功抓取到动画文件: %@", fullPath);
         }
     }
     return camlURLs;
@@ -90,9 +91,6 @@ static const void *kCustomCAMLLayersKey = &kCustomCAMLLayersKey;
 static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 
 
-// ==========================================
-// 核心组 1: iOS 14 - 15 (SpringBoard 强行渲染层)
-// ==========================================
 %group iOS14_15_Support
 
 %hook SBFWallpaperView
@@ -105,7 +103,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
             NSMutableArray *layersArray = [NSMutableArray array];
             NSMutableArray *controllersArray = [NSMutableArray array];
             
-            // 遍历所有 .ca 文件夹加载层
             for (NSURL *camlURL in camlURLs) {
                 NSURL *baseURL = [camlURL URLByDeletingLastPathComponent];
                 
@@ -168,12 +165,10 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 }
 %end
 
-
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        // 【已修复】：补全了 object:nil 参数
         [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" object:nil userInfo:@{@"state": @"Locked"}];
     }
 }
@@ -181,7 +176,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        // 【已修复】：补全了 object:nil 参数
         [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" object:nil userInfo:@{@"state": @"Unlock"}];
     }
 }
@@ -190,9 +184,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 %end // iOS14_15_Support
 
 
-// ==========================================
-// 核心组 2: iOS 16 - 17 (PosterBoard 劫持)
-// ==========================================
 %group iOS16_17_Support
 
 %hook PRPosterDescriptor
@@ -201,8 +192,7 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
     if (g_enabled && g_tendiesPath.length > 0) {
         NSFileManager *fm = [NSFileManager defaultManager];
         if ([fm fileExistsAtPath:g_tendiesPath]) {
-            // 【已修复】：删除了未使用导致报错的 customURL 变量
-            // 此处用于未来可能的 PosterKit Hook
+            // 保留该入口用于拦截 iOS 16/17 原生 Descriptor，在此处后续处理自定义 URL
         }
     }
     return %orig(path);
@@ -213,9 +203,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 %end // iOS16_17_Support
 
 
-// ==========================================
-// Tweak 入口
-// ==========================================
 %ctor {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
