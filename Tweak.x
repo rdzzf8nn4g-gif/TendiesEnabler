@@ -25,11 +25,10 @@
 - (void)setState:(id)state ofLayer:(id)layer;
 @end
 
-@interface SBFLockScreenDateViewController : UIViewController
-@end
-
 @interface CSCoverSheetViewController : UIViewController
-- (SBFLockScreenDateViewController *)dateViewController;
+// 避免引入繁杂头文件，直接声明返回 UIViewController
+- (UIViewController *)dateViewController; 
+- (UIViewController *)complicationContainerViewController; // iOS 16+ 小组件容器
 @end
 
 @interface SBWallpaperController : NSObject
@@ -43,7 +42,8 @@ static BOOL g_enabled = YES;
 static NSString *g_tendiesPath = @"";
 
 static void reloadPrefs() {
-    CFStringRef appID = CFSTR("com.yourname.tendiesprefs"); // 记得替换为你的 bundleID
+    // 【注意】请确保这个 bundleID 与你 Prefs.m 中保持一致！
+    CFStringRef appID = CFSTR("com.yourname.tendiesprefs"); 
     CFPreferencesAppSynchronize(appID);
     
     Boolean validEnabled = NO;
@@ -65,8 +65,8 @@ static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
     NSMutableArray *camlURLs = [NSMutableArray array];
 
     while ((file = [enumerator nextObject])) {
-        // 严格过滤解压附带的 MAC 垃圾文件，防止 CAML 解析器崩溃
-        if ([file containsString:@"__MACOSX"] || [file hasPrefix:@"."]) continue;
+        // 严格过滤垃圾文件和隐藏文件，防止崩溃
+        if ([file containsString:@"__MACOSX"] || [file.lastPathComponent hasPrefix:@"."]) continue;
         
         if ([file hasSuffix:@".ca"]) {
             NSString *camlPath = [[basePath stringByAppendingPathComponent:file] stringByAppendingPathComponent:@"main.caml"];
@@ -76,7 +76,7 @@ static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
         }
     }
 
-    // 强制排序：背景(Background) -> 悬浮(Floating) -> 前景(Foreground)
+    // 层级强制排序：背景(Background) -> 悬浮(Floating) -> 前景(Foreground)
     [camlURLs sortUsingComparator:^NSComparisonResult(NSURL *u1, NSURL *u2) {
         int w1 = [u1.path.lowercaseString containsString:@"background"] ? 0 : ([u1.path.lowercaseString containsString:@"floating"] ? 1 : 2);
         int w2 = [u2.path.lowercaseString containsString:@"background"] ? 0 : ([u2.path.lowercaseString containsString:@"floating"] ? 1 : 2);
@@ -86,7 +86,7 @@ static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
 }
 
 // ==========================================
-// 核心视图类：负责解析并承载 CAML 动画
+// 核心视图类：在 SpringBoard 中承载 CAML 动画
 // ==========================================
 @interface TendiesView : UIView
 @property (nonatomic, strong) NSMutableArray *camlLayers;
@@ -101,12 +101,13 @@ static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
     if (self = [super initWithFrame:frame]) {
         self.camlLayers = [NSMutableArray array];
         self.stateControllers = [NSMutableArray array];
-        self.userInteractionEnabled = NO; // 禁止阻挡用户触摸
+        self.userInteractionEnabled = NO; // 禁止阻挡用户手势
     }
     return self;
 }
 
 - (void)loadTendiesFromPath:(NSString *)path {
+    // 每次加载前清理旧的动画图层
     for (CALayer *layer in self.camlLayers) {
         [layer removeFromSuperlayer];
     }
@@ -159,7 +160,7 @@ static TendiesView *g_lsTendiesView = nil; // 锁屏层
 static TendiesView *g_hsTendiesView = nil; // 桌面层
 
 // ==========================================
-// 动态 Hook 注入区 (最重逻辑)
+// 动态 Hook 注入区 
 // ==========================================
 %group UniversalWallpaper
 
@@ -167,8 +168,15 @@ static TendiesView *g_hsTendiesView = nil; // 桌面层
 %hook SBWallpaperController
 - (void)_applicationDidFinishLaunching:(id)arg1 {
     %orig;
-    UIView *container = MSHookIvar<UIView *>(self, "_wallpaperContainerView");
-    if (!container) container = [self _window];
+    
+    // 【修复】：不使用 MSHookIvar 宏，改用原生的 Runtime API，100% 解决编译错误且安全
+    UIView *container = nil;
+    Ivar containerIvar = class_getInstanceVariable([self class], "_wallpaperContainerView");
+    if (containerIvar) {
+        container = object_getIvar(self, containerIvar);
+    }
+    
+    if (!container) container = [self _window]; // 兜底获取 UIWindow
 
     if (container) {
         if (!g_hsTendiesView) {
@@ -178,16 +186,6 @@ static TendiesView *g_hsTendiesView = nil; // 桌面层
             [g_hsTendiesView setState:@"Unlock"]; // 桌面默认解锁状态
         }
         [container addSubview:g_hsTendiesView];
-    }
-}
-
-// 保证在任何壁纸刷新时，我们的容器都置于最顶层（覆盖原生壁纸）
-- (void)updateWallpaperForLocations:(long long)arg1 withCompletion:(id)arg2 {
-    %orig;
-    UIView *container = MSHookIvar<UIView *>(self, "_wallpaperContainerView");
-    if (!container) container = [self _window];
-    if (container && g_hsTendiesView && g_hsTendiesView.superview == container) {
-        [container bringSubviewToFront:g_hsTendiesView];
     }
 }
 %end
@@ -205,7 +203,7 @@ static TendiesView *g_hsTendiesView = nil; // 桌面层
     [self.view insertSubview:g_lsTendiesView atIndex:0];
 }
 
-// 精准的层级夹击算法：将视图置于原生壁纸之上，时钟界面之下
+// 【关键算法】：动态图层计算，确保壁纸遮盖原生海报，但绝对不遮挡时钟和小组件
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_lsTendiesView && g_lsTendiesView.superview == self.view) {
@@ -221,9 +219,17 @@ static TendiesView *g_hsTendiesView = nil; // 桌面层
         
         // 绝对不能遮挡时钟
         if ([self respondsToSelector:@selector(dateViewController)]) {
-            UIView *dateView = [[self dateViewController] view];
-            if (dateView && [self.view.subviews containsObject:dateView]) {
-                [self.view insertSubview:g_lsTendiesView belowSubview:dateView];
+            UIViewController *dateVC = [self dateViewController];
+            if (dateVC && dateVC.view && [self.view.subviews containsObject:dateVC.view]) {
+                [self.view insertSubview:g_lsTendiesView belowSubview:dateVC.view];
+            }
+        }
+        
+        // iOS 16+ 绝对不能遮挡小组件
+        if ([self respondsToSelector:@selector(complicationContainerViewController)]) {
+            UIViewController *compVC = [self complicationContainerViewController];
+            if (compVC && compVC.view && [self.view.subviews containsObject:compVC.view]) {
+                [self.view insertSubview:g_lsTendiesView belowSubview:compVC.view];
             }
         }
     }
@@ -257,6 +263,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 %ctor {
     reloadPrefs();
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+        // 监听设置 App 发来的通知
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
         %init(UniversalWallpaper);
     }
