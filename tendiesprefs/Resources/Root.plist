@@ -6,27 +6,29 @@
     <array>
         <dict>
             <key>cell</key> <string>PSGroupCell</string>
-            <key>label</key> <string>Global Settings</string>
+            <key>label</key> <string>生效开关</string>
         </dict>
         <dict>
             <key>cell</key> <string>PSSwitchCell</string>
             <key>default</key> <true/>
             <key>defaults</key> <string>com.yourname.tendiesprefs</string>
             <key>key</key> <string>Enabled</string>
-            <key>label</key> <string>Enable Tendies</string>
+            <key>label</key> <string>开启插件</string>
+            <key>PostNotification</key> <string>com.yourname.tendiesenabler/ReloadPrefs</string>
         </dict>
         
         <dict>
             <key>cell</key> <string>PSGroupCell</string>
-            <key>label</key> <string>Wallpaper Configuration</string>
-            <key>footerText</key> <string>Enter the full path to your unzipped .tendies folder (e.g. /var/mobile/Documents/Mario.tendies)</string>
+            <key>label</key> <string>壁纸配置</string>
+            <key>footerText</key> <string>请在 Filza 中解压 .tendies 格式，并将完整路径填入此处。例如：/var/mobile/Documents/Mario.tendies</string>
         </dict>
         <dict>
             <key>cell</key> <string>PSEditTextCell</string>
             <key>default</key> <string></string>
             <key>defaults</key> <string>com.yourname.tendiesprefs</string>
             <key>key</key> <string>TendiesPath</string>
-            <key>placeholder</key> <string>/var/mobile/.../YourWallpaper.tendies</string>
+            <key>placeholder</key> <string>输入 .tendies 绝对路径</string>
+            <key>PostNotification</key> <string>com.yourname.tendiesenabler/ReloadPrefs</string>
         </dict>
     </array>
     <key>title</key>
