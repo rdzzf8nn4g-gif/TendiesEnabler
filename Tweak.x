@@ -69,21 +69,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @end
 
 
-// ================= 辅助函数：自动扫描并获取 CAML =================
+// ================= 辅助函数：深度递归扫描解压后的 CAML 文件 =================
 static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     NSMutableArray *camlURLs = [NSMutableArray array];
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    NSString *contentsPath = [tendiesBasePath stringByAppendingPathComponent:@"contents"];
-    if (![fm fileExistsAtPath:contentsPath]) return camlURLs;
-    
-    NSArray *items = [fm contentsOfDirectoryAtPath:contentsPath error:nil];
-    for (NSString *item in items) {
-        if ([item hasSuffix:@".ca"]) {
-            NSString *camlFile = [[contentsPath stringByAppendingPathComponent:item] stringByAppendingPathComponent:@"main.caml"];
-            if ([fm fileExistsAtPath:camlFile]) {
-                [camlURLs addObject:[NSURL fileURLWithPath:camlFile]];
-            }
+    // 使用枚举器深度遍历解压后的文件夹，寻找所有以 .ca/main.caml 结尾的文件
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:tendiesBasePath];
+    NSString *file;
+    while (file = [enumerator nextObject]) {
+        if ([file hasSuffix:@".ca/main.caml"]) {
+            NSString *fullPath = [tendiesBasePath stringByAppendingPathComponent:file];
+            [camlURLs addObject:[NSURL fileURLWithPath:fullPath]];
         }
     }
     return camlURLs;
@@ -150,7 +147,7 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
         for (NSUInteger i = 0; i < controllers.count; i++) {
             CAStateController *ctrl = controllers[i];
             CALayer *lyr = layers[i];
-            [ctrl setState:state ofLayer:lyr]; // 触发 CAML 内置动画状态 ("Locked" / "Unlock")
+            [ctrl setState:state ofLayer:lyr]; 
         }
     }
 }
@@ -176,7 +173,7 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        // 修复：添加了 object:nil 参数
+        // 【已修复】：补全了 object:nil 参数
         [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" object:nil userInfo:@{@"state": @"Locked"}];
     }
 }
@@ -184,7 +181,7 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        // 修复：添加了 object:nil 参数
+        // 【已修复】：补全了 object:nil 参数
         [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" object:nil userInfo:@{@"state": @"Unlock"}];
     }
 }
@@ -204,8 +201,8 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
     if (g_enabled && g_tendiesPath.length > 0) {
         NSFileManager *fm = [NSFileManager defaultManager];
         if ([fm fileExistsAtPath:g_tendiesPath]) {
-            // 利用 Hook 将原 PosterKit 请求的数据路径替换至设置路径
-            // 修复：移除了导致 Github Actions 报错的 unused variable (未使用的变量)
+            // 【已修复】：删除了未使用导致报错的 customURL 变量
+            // 此处用于未来可能的 PosterKit Hook
         }
     }
     return %orig(path);
@@ -228,7 +225,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
     double version = kCFCoreFoundationVersionNumber;
     
-    // CFCoreFoundationVersionNumber >= 1953.1 对应 iOS 16.0 及以上
     if (version < 1953.1) {
         if ([bundleId isEqualToString:@"com.apple.springboard"]) {
             %init(iOS14_15_Support);
