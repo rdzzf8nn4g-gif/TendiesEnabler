@@ -1,7 +1,7 @@
 name: Build TendiesEnabler
 
 on:
- 
+  
   workflow_dispatch:
 
 jobs:
@@ -22,7 +22,6 @@ jobs:
       - name: 🛠️ 配置 Theos 环境 (Setup Roothide Theos)
         run: |
           echo "Cloning Roothide Theos fork..."
-          # 直接使用 Roothide 官方分支的 Theos，自带头文件且支持有根/无根/隐根编译！
           git clone --recursive https://github.com/roothide/theos.git $THEOS
 
       - name: 📦 下载 iOS SDK (Setup iOS SDKs)
@@ -34,7 +33,6 @@ jobs:
       - name: 🚀 运行编译脚本 (Run build.sh)
         run: |
           chmod +x build.sh
-          # 使用 sudo -E 提权执行
           sudo -E ./build.sh
 
       - name: 📤 上传编译产物 (Upload Artifacts)
