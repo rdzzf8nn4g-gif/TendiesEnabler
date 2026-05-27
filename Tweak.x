@@ -96,7 +96,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
     if (self = [super initWithFrame:frame]) {
         self.camlLayers = [NSMutableArray array];
         self.stateControllers = [NSMutableArray array];
-        self.userInteractionEnabled = NO; 
+        self.userInteractionEnabled = NO; // 必须为 NO，否则会阻断滑动解锁手势
     }
     return self;
 }
@@ -169,7 +169,7 @@ static void reloadPrefsAndInject() {
     }
 }
 
-// 统一的全局最底层壁纸挂载器
+// 统一的最底层壁纸挂载器 (增加暴力隐藏原生壁纸逻辑)
 static void injectTendiesIntoWallpaperContainer(UIView *container) {
     if (!container) return;
     
@@ -187,19 +187,26 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
         
         [tView loadTendiesFromPath:g_tendiesPath];
     } else {
-        // 确保我们的交互层永远在系统原始壁纸前面覆盖它
         [container bringSubviewToFront:tView];
         tView.frame = container.bounds;
+    }
+    
+    // 【核心修复】强制隐藏同级的所有其他视图，彻底杜绝系统原生壁纸/海报在滑动过程中走光
+    for (UIView *sub in container.subviews) {
+        if (sub != tView && !sub.hidden) {
+            sub.hidden = YES;
+        }
     }
 }
 
 // ==========================================
 // 动态 Hook 注入区
 // ==========================================
+
 %group UniversalWallpaper
 
 // --------------------------------------------------
-// 1. 桌面底层注入 (主要适配 iOS 14-15及桌面)
+// 1. 桌面底层注入 (主要负责 iOS 14-15 全局，以及 16-17 桌面)
 // --------------------------------------------------
 %hook SBWallpaperController
 - (void)_applicationDidFinishLaunching:(id)launching {
@@ -228,26 +235,7 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
 %end
 
 // --------------------------------------------------
-// 2. 锁屏海报层注入 (解决 iOS 16-17 下拉/滑动时露出原壁纸)
-// --------------------------------------------------
-%hook CSBackgroundContentViewController
-- (void)viewDidLoad {
-    %orig;
-    injectTendiesIntoWallpaperContainer(self.view);
-}
-- (void)viewDidLayoutSubviews {
-    %orig;
-    TendiesView *tView = objc_getAssociatedObject(self.view, "TendiesView");
-    if (tView) {
-        // 强势覆盖 iOS 16/17 自带海报
-        [self.view bringSubviewToFront:tView];
-        tView.frame = self.view.bounds;
-    }
-}
-%end
-
-// --------------------------------------------------
-// 3. 锁屏交互生命周期 (解决缺少动画/无响应交互的问题)
+// 2. 锁屏交互生命周期 (解决无跟手动画、缺少互动的问题)
 // --------------------------------------------------
 %hook CSCoverSheetViewController
 
@@ -259,7 +247,7 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
     }
 }
 
-// 核心修复：监听用户手指拖拽锁屏的第一时刻，立刻触发交互动画！
+// 【核心修复】监听用户手指触摸并拖拽锁屏的**第一时刻**，立刻触发交互动画！
 - (void)_scrollPanGestureBegan:(id)gesture {
     %orig;
     @synchronized(g_allTendiesViews) {
@@ -287,6 +275,26 @@ static void injectTendiesIntoWallpaperContainer(UIView *container) {
 
 %end // UniversalWallpaper
 
+
+// --------------------------------------------------
+// 3. 锁屏海报层独占注入 (仅在 iOS 16-17 执行，解决锁屏滑动露出原壁纸)
+// --------------------------------------------------
+%group iOS16Up
+
+%hook CSBackgroundContentViewController
+- (void)viewDidLoad {
+    %orig;
+    injectTendiesIntoWallpaperContainer(self.view);
+}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    injectTendiesIntoWallpaperContainer(self.view);
+}
+%end
+
+%end // iOS16Up
+
+
 // ==========================================
 // 热重载通知中枢
 // ==========================================
@@ -300,6 +308,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     reloadPrefsAndInject();
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+        
+        // 核心与 iOS 14-15 初始化
         %init(UniversalWallpaper);
+        
+        // 动态检测，只有存在 CSBackgroundContentViewController (即 iOS 16 及以上) 才初始化锁屏海报劫持逻辑
+        if (NSClassFromString(@"CSBackgroundContentViewController")) {
+            %init(iOS16Up);
+        }
     }
 }
