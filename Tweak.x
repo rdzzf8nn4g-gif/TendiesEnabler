@@ -9,6 +9,16 @@
 #endif
 
 // ==========================================
+// 辅助宏：确保 UI 强制在主线程刷新，防止后台线程崩溃
+// ==========================================
+#define EXEC_ON_MAIN(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_async(dispatch_get_main_queue(), block); \
+    }
+
+// ==========================================
 // 接口声明区
 // ==========================================
 @interface CAPackage : NSObject
@@ -27,7 +37,6 @@
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source;
 @end
 
-// 声明 PBUIWallpaperView 并暴露 variant 属性 (0=锁屏, 1=桌面)
 @interface PBUIWallpaperView : UIView
 @property (nonatomic, assign) NSInteger variant;
 @end
@@ -87,7 +96,7 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 @property (nonatomic, strong) NSMutableArray *camlLayers;
 @property (nonatomic, strong) NSMutableArray *stateControllers;
 @property (nonatomic, strong) NSString *currentState;
-@property (nonatomic, assign) BOOL isScrubbing; // 防止滑动中重复重置时间轴
+@property (nonatomic, assign) BOOL isScrubbing;
 
 - (void)loadTendiesFromPath:(NSString *)path;
 - (void)setState:(NSString *)state;
@@ -197,7 +206,6 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
     CFTimeInterval timeSincePause = [self.layer convertTime:CACurrentMediaTime() fromLayer:nil] - pausedTime;
     self.layer.beginTime = timeSincePause;
     
-    // 反悔滑动时复原状态
     if (velocityY > 0) {
         [self setState:@"Locked"];
     }
@@ -205,9 +213,9 @@ static NSArray<NSURL *> *FindCAPackageURLsInTendies(NSString *basePath) {
 @end
 
 // ==========================================
-// 注入逻辑：暴力干掉原生 Remote 视图，独霸容器
+// 注入逻辑：防重入锁与清场
 // ==========================================
-static BOOL isInjecting = NO; // 【核心防护锁：防止无限递归崩溃】
+static BOOL isInjecting = NO;
 
 static void injectTendiesSmart(UIView *container) {
     if (!container || !container.window) return;
@@ -237,9 +245,8 @@ static void injectTendiesSmart(UIView *container) {
     if (tView.superview != container) {
         [container addSubview:tView];
     }
-    [container bringSubviewToFront:tView]; // 永远在最前
+    [container bringSubviewToFront:tView]; 
     
-    // 清场行动：仅在 PBUIWallpaperView 下生效
     if ([container isKindOfClass:NSClassFromString(@"PBUIWallpaperView")]) {
         for (UIView *subview in container.subviews) {
             if (subview != tView && ![subview isKindOfClass:[TendiesView class]]) {
@@ -257,11 +264,13 @@ static void reloadPrefsAndInject() {
     g_enabled = dict[@"Enabled"] ? [dict[@"Enabled"] boolValue] : YES;
     g_tendiesPath = dict[@"TendiesPath"] ?: @"";
     
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *tView in g_allTendiesViews) {
-            [tView loadTendiesFromPath:g_tendiesPath];
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *tView in g_allTendiesViews) {
+                [tView loadTendiesFromPath:g_tendiesPath];
+            }
         }
-    }
+    });
 }
 
 // ==========================================
@@ -285,29 +294,34 @@ static void reloadPrefsAndInject() {
 }
 %end
 
-// --- 锁屏状态追踪 (通用) ---
+// --- 锁屏状态追踪 ---
 %hook CSCoverSheetViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
-    }
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) [v setState:@"Locked"];
+        }
+    });
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
-    }
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) [v setState:@"Unlock"];
+        }
+    });
 }
 
-// [仅限 iOS 14-15] 拦截旧版手势
 - (void)_scrollPanGestureBegan:(UIPanGestureRecognizer *)arg {
     %orig;
     if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
-        @synchronized(g_allTendiesViews) {
-            for (TendiesView *v in g_allTendiesViews) [v beginScrubbingUnlock];
-        }
+        EXEC_ON_MAIN(^{
+            @synchronized(g_allTendiesViews) {
+                for (TendiesView *v in g_allTendiesViews) [v beginScrubbingUnlock];
+            }
+        });
     }
 }
 
@@ -317,9 +331,11 @@ static void reloadPrefsAndInject() {
         CGFloat translationY = [arg translationInView:arg.view].y;
         CGFloat viewHeight = arg.view.bounds.size.height ?: 844.0;
         CGFloat progress = MAX(0.0, MIN(1.0, -translationY / viewHeight));
-        @synchronized(g_allTendiesViews) {
-            for (TendiesView *v in g_allTendiesViews) [v updateScrubbingProgress:progress];
-        }
+        EXEC_ON_MAIN(^{
+            @synchronized(g_allTendiesViews) {
+                for (TendiesView *v in g_allTendiesViews) [v updateScrubbingProgress:progress];
+            }
+        });
     }
 }
 
@@ -327,27 +343,32 @@ static void reloadPrefsAndInject() {
     %orig;
     if ([arg isKindOfClass:[UIPanGestureRecognizer class]]) {
         CGFloat velocityY = [arg velocityInView:arg.view].y;
-        @synchronized(g_allTendiesViews) {
-            for (TendiesView *v in g_allTendiesViews) [v endScrubbingWithVelocityY:velocityY];
-        }
+        EXEC_ON_MAIN(^{
+            @synchronized(g_allTendiesViews) {
+                for (TendiesView *v in g_allTendiesViews) [v endScrubbingWithVelocityY:velocityY];
+            }
+        });
     }
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     NSString *newState = mode ? @"Sleep" : @"Locked";
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:newState];
-    }
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) [v setState:newState];
+        }
+    });
 }
 
-// 兼容 iOS 16/17 中的 AOD 与息屏签名
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source {
     %orig;
     NSString *newState = mode ? @"Sleep" : @"Locked";
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) [v setState:newState];
-    }
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) [v setState:newState];
+        }
+    });
 }
 %end
 %end // UniversalWallpaper
@@ -360,73 +381,75 @@ static void reloadPrefsAndInject() {
 %hook PBUIWallpaperView
 - (void)didMoveToWindow {
     %orig;
-    // 【核心拦截】仅在锁屏壁纸（variant == 0）容器中注入，保护桌面网格免受破坏
     if (self.variant == 0) {
-        injectTendiesSmart(self);
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
     }
 }
 - (void)layoutSubviews {
     %orig;
     if (self.variant == 0) {
-        injectTendiesSmart(self);
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
     }
 }
 
 - (void)addSubview:(UIView *)view {
     %orig;
     if (self.variant == 0 && ![view isKindOfClass:[TendiesView class]]) {
-        injectTendiesSmart(self);
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
     }
 }
 
 - (void)insertSubview:(UIView *)view atIndex:(NSInteger)index {
     %orig;
     if (self.variant == 0 && ![view isKindOfClass:[TendiesView class]]) {
-        injectTendiesSmart(self);
+        EXEC_ON_MAIN(^{ injectTendiesSmart(self); });
     }
 }
 %end
 
-// [iOS 16/17 专属] 拦截真正的解锁进度与物理引擎同步！
+// 拦截底层物理引擎 (这些方法在 iOS 16/17 被派发在后台高优队列执行，必须强切回主线程！)
 %hook SBCoverSheetSlidingViewController
 
-// iOS 16 进度回调
 - (CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
     CGRect rect = %orig;
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) {
-            [v beginScrubbingUnlock];
-            [v updateScrubbingProgress:progress];
-        }
-    }
-    return rect;
-}
-
-// iOS 17 进度回调
-- (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
-    CGRect rect = %orig;
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) {
-            [v beginScrubbingUnlock];
-            [v updateScrubbingProgress:progress];
-        }
-    }
-    return rect;
-}
-
-// 解锁完成或放弃解锁的回调
-- (void)_finishTransitionToPresented:(BOOL)presented animated:(BOOL)animated withCompletion:(id)completion {
-    %orig;
-    @synchronized(g_allTendiesViews) {
-        for (TendiesView *v in g_allTendiesViews) {
-            [v endScrubbingWithVelocityY:0]; 
-            if (presented) {
-                [v setState:@"Locked"];
-            } else {
-                [v setState:@"Unlock"];
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) {
+                [v beginScrubbingUnlock];
+                [v updateScrubbingProgress:progress];
             }
         }
-    }
+    });
+    return rect;
+}
+
+- (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    CGRect rect = %orig;
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) {
+                [v beginScrubbingUnlock];
+                [v updateScrubbingProgress:progress];
+            }
+        }
+    });
+    return rect;
+}
+
+- (void)_finishTransitionToPresented:(BOOL)presented animated:(BOOL)animated withCompletion:(id)completion {
+    %orig;
+    EXEC_ON_MAIN(^{
+        @synchronized(g_allTendiesViews) {
+            for (TendiesView *v in g_allTendiesViews) {
+                [v endScrubbingWithVelocityY:0]; 
+                if (presented) {
+                    [v setState:@"Locked"];
+                } else {
+                    [v setState:@"Unlock"];
+                }
+            }
+        }
+    });
 }
 
 %end
@@ -436,9 +459,7 @@ static void reloadPrefsAndInject() {
 // 初始化与热重载
 // ==========================================
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        reloadPrefsAndInject();
-    });
+    reloadPrefsAndInject();
 }
 
 %ctor {
