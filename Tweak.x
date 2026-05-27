@@ -28,6 +28,10 @@
 @interface CSCoverSheetViewController : UIViewController
 @end
 
+// 【核心修复】：声明 SBFWallpaperView 继承自 UIView，让编译器识别 window 和 bounds 属性
+@interface SBFWallpaperView : UIView
+@end
+
 // ==========================================
 // 全局变量与工具函数
 // ==========================================
@@ -60,7 +64,7 @@ static void reloadPrefs() {
     }
 }
 
-// 【核心修复】：深度递归遍历，无视任何包装层级，暴力提取所有 .ca/main.caml
+// 深度递归遍历，无视任何包装层级，暴力提取所有 .ca/main.caml
 static NSArray<NSURL *> *FindCAMLURLsInTendies(NSString *basePath) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:basePath];
