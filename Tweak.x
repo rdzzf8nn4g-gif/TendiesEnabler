@@ -176,14 +176,16 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" userInfo:@{@"state": @"Locked"}];
+        // 修复：添加了 object:nil 参数
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" object:nil userInfo:@{@"state": @"Locked"}];
     }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" userInfo:@{@"state": @"Unlock"}];
+        // 修复：添加了 object:nil 参数
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesLockStateChanged" object:nil userInfo:@{@"state": @"Unlock"}];
     }
 }
 %end
@@ -203,11 +205,7 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
         NSFileManager *fm = [NSFileManager defaultManager];
         if ([fm fileExistsAtPath:g_tendiesPath]) {
             // 利用 Hook 将原 PosterKit 请求的数据路径替换至设置路径
-            // 注意：因为原生代码实现会验证文件结构，所以你需要确保传入的是完整的 .tendies 或其内容路径。
-            NSURL *customURL = [NSURL fileURLWithPath:g_tendiesPath];
-            if ([path respondsToSelector:@selector(serverIdentityURL)]) {
-                // 如果后续发现崩溃或者不兼容，可以在此处扩展对私有类的替换逻辑
-            }
+            // 修复：移除了导致 Github Actions 报错的 unused variable (未使用的变量)
         }
     }
     return %orig(path);
