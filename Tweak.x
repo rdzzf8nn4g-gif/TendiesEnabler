@@ -61,12 +61,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @interface CSCoverSheetViewController : UIViewController
 @end
 
-@interface PRSPosterPath : NSObject
-- (NSURL *)serverIdentityURL;
-@end
-
 // ==========================================
-// 【深度递归搜索引擎】：无视多少层嵌套，直接找出所有 main.caml
+// 【深度递归搜索引擎】：带 Z-Index 景深排序
 // ==========================================
 static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     NSMutableArray *camlURLs = [NSMutableArray array];
@@ -76,12 +72,25 @@ static NSArray<NSURL *> *findCAMLFiles(NSString *tendiesBasePath) {
     NSString *filePath;
     
     while ((filePath = [enumerator nextObject])) {
-        // iOS 壁纸的 CoreAnimation 引擎入口通常命名为 main.caml
         if ([filePath hasSuffix:@"main.caml"]) {
             NSString *fullPath = [tendiesBasePath stringByAppendingPathComponent:filePath];
             [camlURLs addObject:[NSURL fileURLWithPath:fullPath]];
         }
     }
+    
+    // 核心修复：对图层进行强制排序 Background (底) -> Floating (中) -> Foreground (顶)
+    [camlURLs sortUsingComparator:^NSComparisonResult(NSURL *url1, NSURL *url2) {
+        NSString *p1 = url1.path.lowercaseString;
+        NSString *p2 = url2.path.lowercaseString;
+        
+        int weight1 = [p1 containsString:@"background"] ? 0 : ([p1 containsString:@"floating"] ? 1 : 2);
+        int weight2 = [p2 containsString:@"background"] ? 0 : ([p2 containsString:@"floating"] ? 1 : 2);
+        
+        if (weight1 < weight2) return NSOrderedAscending;
+        if (weight1 > weight2) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    
     return camlURLs;
 }
 
@@ -98,13 +107,11 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
     if (orig && g_enabled) {
         if (g_tendiesPath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:g_tendiesPath]) {
             
-            // 自动递归搜索刚才解压好的文件夹中的 main.caml
             NSArray<NSURL *> *camlURLs = findCAMLFiles(g_tendiesPath);
             NSMutableArray *layersArray = [NSMutableArray array];
             NSMutableArray *controllersArray = [NSMutableArray array];
             
             for (NSURL *camlURL in camlURLs) {
-                // 将上一级目录作为素材根目录
                 NSURL *baseURL = [camlURL URLByDeletingLastPathComponent];
                 
                 CAMLParser *parser = [[%c(CAMLParser) alloc] init];
@@ -127,7 +134,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
             if (layersArray.count > 0) {
                 objc_setAssociatedObject(orig, kCustomCAMLLayersKey, layersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(orig, kCustomStateControllersKey, controllersArray, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                
                 [[NSNotificationCenter defaultCenter] addObserver:orig selector:@selector(tendies_handleLockStateChange:) name:@"TendiesLockStateChanged" object:nil];
             }
         }
@@ -145,7 +151,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
         for (NSUInteger i = 0; i < controllers.count; i++) {
             CAStateController *ctrl = controllers[i];
             CALayer *lyr = layers[i];
-            // 发送 Locked / Unlock 状态驱动底层动画
             [ctrl setState:state ofLayer:lyr]; 
         }
     }
@@ -186,20 +191,6 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
 %end // iOS14_15_Support
 
 
-%group iOS16_17_Support
-
-%hook PRPosterDescriptor
-
-- (id)_initWithPath:(id)path {
-    // 留空拦截占位，保障 iOS16+ PosterKit Hook 的接入点
-    return %orig(path);
-}
-
-%end
-
-%end // iOS16_17_Support
-
-
 %ctor {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
@@ -209,13 +200,11 @@ static const void *kCustomStateControllersKey = &kCustomStateControllersKey;
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
     double version = kCFCoreFoundationVersionNumber;
     
+    // 仅在 iOS 14-15 (版本号 < 1953) 且位于 SpringBoard 时生效
     if (version < 1953.1) {
         if ([bundleId isEqualToString:@"com.apple.springboard"]) {
             %init(iOS14_15_Support);
         }
-    } else {
-        if ([bundleId isEqualToString:@"com.apple.PosterBoard"]) {
-            %init(iOS16_17_Support);
-        }
     }
+    // iOS 16-17 无需 Hook，因为我们在 .m 中直接实现了原生注入 PosterBoard
 }
