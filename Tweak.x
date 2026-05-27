@@ -228,11 +228,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
         
-        // 关键：iOS 16 及以上，壁纸视图基类变为了 PBUIWallpaperView
-        if (NSClassFromString(@"PBUIWallpaperView")) {
-            %init(UniversalWallpaper, SBFWallpaperView = NSClassFromString(@"PBUIWallpaperView"));
-        } else {
-            %init(UniversalWallpaper); // iOS 14-15 默认使用 SBFWallpaperView
+        // 关键修复：将动态类提取为变量，保证只调用一次 %init
+        Class targetWallpaperClass = NSClassFromString(@"PBUIWallpaperView") ?: NSClassFromString(@"SBFWallpaperView");
+        if (targetWallpaperClass) {
+            %init(UniversalWallpaper, SBFWallpaperView = targetWallpaperClass);
         }
     }
 }
