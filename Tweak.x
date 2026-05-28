@@ -23,7 +23,6 @@ static NSString * GetTendiesStorageDir() {
     return base;
 #endif
 }
-// 🚀 删除了未使用的 WriteLog，完美解决编译 -Werror 报错！
 
 // ==========================================
 // 2. 补全系统私有 API 声明
@@ -31,12 +30,12 @@ static NSString * GetTendiesStorageDir() {
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
-- (BOOL)setState:(NSString *)state animated:(BOOL)animated; // 支持动画状态切换
+- (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
 @interface PBUIWallpaperView : UIView
 - (UIView *)contentView; 
-- (long long)variant; 
+- (long long)variant; // 0: 锁屏/下拉通知中心, 1: 桌面
 @end
 
 @interface CSCoverSheetViewController : UIViewController
@@ -72,13 +71,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 4. 自定义高并发渲染引擎视图 (深度识别架构)
+// 4. 渲染引擎视图 (独立缓存 + 精准状态机)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
 @property (nonatomic, strong) BSUICAPackageView *floatingView;
 @property (nonatomic, strong) BSUICAPackageView *fgView;
-@property (nonatomic, assign) long long wallpaperVariant;
+@property (nonatomic, assign) long long wallpaperVariant; 
 @property (nonatomic, strong) NSString *currentState;     
 
 @property (nonatomic, strong) NSString *cachedBgPath;
@@ -120,10 +119,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self reloadWallpaperViews];
 }
 
+// 🚀 核心修复 3：完美交互状态机
 - (void)handleStateChange:(NSNotification *)note {
     NSString *state = note.userInfo[@"state"];
-    if (state) {
+    if (!state) return;
+
+    if (self.wallpaperVariant == 0) {
+        // 锁屏/下拉通知中心：响应所有状态 (Sleep 息屏, Locked 锁屏, Unlock 解锁过渡)
         [self transitionToState:state];
+    } else if (self.wallpaperVariant == 1) {
+        // 桌面主屏幕：绝不进入 Locked 状态。只响应 Sleep 息屏 和 Unlock 正常互动
+        if ([state isEqualToString:@"Sleep"] || [state isEqualToString:@"Unlock"]) {
+            [self transitionToState:state];
+        }
     }
 }
 
@@ -149,13 +157,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         @synchronized(self) {
             if (!self.isPathCached) {
-                // 🚀 核心修复：深度递归遍历。无视复杂的目录嵌套，直接把深层的 .ca 文件挖出来
                 NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil];
                 
                 for (NSURL *fileURL in dirEnum) {
                     NSString *pathString = fileURL.path;
                     NSString *fileName = fileURL.lastPathComponent;
-                    
                     if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
                     
                     if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
@@ -193,19 +199,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 [self addSubview:self.fgView];
             }
             [self setNeedsLayout];
-            
-            // 初始化完毕后，强制应用当前状态（带动画过渡）
             [self transitionToState:self.currentState];
         });
     });
 }
 
-// 🚀 核心修复：激活交互动画
 - (void)transitionToState:(NSString *)stateName {
     if (!g_enabled) return;
     self.currentState = [stateName copy];
     
-    // 使用带有动画参数的方法，确保 Unlock/Locked 切换时动画生效
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:YES];
         [self.floatingView setState:stateName animated:YES];
@@ -219,40 +221,53 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @end
 
 // ==========================================
-// 5. 正统 Hook：将壁纸寄生于原生 contentView 内部
+// 5. 核心画布注入 (修复多任务卡片与原生遮挡)
 // ==========================================
 %hook PBUIWallpaperView
 
 - (void)layoutSubviews {
     %orig; 
     if (!g_enabled) return;
-    
-    // 🚀 核心修复：获取系统的 contentView。我们必须把渲染引擎塞进这里面，才能继承原生亮屏、息屏的过渡动画！
+
+    // 🚀 核心修复 1：阻断应用后台多任务卡片的污染！
+    UIWindow *window = self.window;
+    if (window) {
+        NSString *windowClass = NSStringFromClass([window class]);
+        // 如果是系统用来做模糊快照或后台卡片的虚拟窗口，直接拦截，不予渲染我们的动画壁纸
+        if ([windowClass containsString:@"Hosted"] || [windowClass containsString:@"Snapshot"]) {
+            return;
+        }
+    }
+
+    // 🚀 核心修复 2：获取系统的原生动画容器，实现“寄生”，完美继承不触摸就能自然亮屏的动画！
     UIView *cv = [self respondsToSelector:@selector(contentView)] ? [self contentView] : self;
     if (!cv) return;
     
     TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesRenderEngineKey");
+    long long currentVariant = [self respondsToSelector:@selector(variant)] ? [self variant] : 0;
+    
     if (!engineView) {
         engineView = [[TendiesRenderEngineView alloc] initWithFrame:cv.bounds];
-        
-        long long currentVariant = 0;
-        if ([self respondsToSelector:@selector(variant)]) {
-            currentVariant = [self variant]; 
-        }
         engineView.wallpaperVariant = currentVariant;
         engineView.currentState = (currentVariant == 1) ? @"Unlock" : @"Locked";
         
         objc_setAssociatedObject(self, "TendiesRenderEngineKey", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        
-        // 挂载到系统唤醒视图内部
-        [cv addSubview:engineView];
+        [cv addSubview:engineView]; // 注入到原生唤醒容器内部
         [engineView reloadWallpaperViews];
+    } else {
+        // 🚀 核心修复 4：防止系统重用缓存导致锁屏变桌面！
+        // 如果系统回收了这块视图并改变了它的用途，我们要立刻修正它的动画状态！
+        if (engineView.wallpaperVariant != currentVariant) {
+            engineView.wallpaperVariant = currentVariant;
+            NSString *targetState = (currentVariant == 1) ? @"Unlock" : @"Locked";
+            [engineView transitionToState:targetState];
+        }
     }
     
     engineView.frame = cv.bounds;
     [cv bringSubviewToFront:engineView];
     
-    // 🚀 核心修复：暴力镇压系统原生静态图，但绝对不能隐藏 cv 本身！
+    // 隐藏 cv 内容器里系统原生的图片，但绝对不隐藏 cv 自己，以免破坏亮屏动画
     for (UIView *sub in cv.subviews) {
         if (sub != engineView && ![sub isKindOfClass:NSClassFromString(@"TendiesRenderEngineView")]) {
             sub.hidden = YES;
@@ -260,15 +275,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
 }
-
 %end
 
 // ==========================================
-// 6. Hook 锁屏控制器：只发通知，0性能消耗
+// 6. 锁屏控制器状态发射器
 // ==========================================
 %hook CSCoverSheetViewController
 
-// 拦截息屏/点亮状态 (Sleep / Locked)
+// 发射息屏/点亮指令
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
@@ -285,7 +299,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 拦截滑开解锁进入桌面 (Unlock)
+// 发射解锁滑开进桌面的指令
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     if (g_enabled) {
