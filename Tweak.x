@@ -8,7 +8,7 @@
 #endif
 
 // ==========================================
-// 1. 物理日志系统 (方便排错)
+// 1. 物理日志系统 (越狱开发的救星)
 // ==========================================
 static NSString * GetLogFilePath() {
     NSString *base = @"/var/mobile/Library/Caches";
@@ -36,7 +36,7 @@ static NSString * GetLogFilePath() {
 } while(0)
 
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【替换为你真实的 BundleID】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【务必确认这里是你的 Bundle ID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -48,42 +48,62 @@ static NSString * GetPrefsPlistPath() {
 }
 
 // ==========================================
-// 2. 动态调用的私有 API 接口声明
+// 2. 补全私有 API 声明 (完美修复编译报错)
 // ==========================================
-// 专门用来播放 .ca (CAML) 动画包的私有视图
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
 @end
 
+@interface PBUIWallpaperView : UIView
+- (UIView *)contentView; // 修复 forward declaration 报错的核心
+@end
+
+@interface CSCoverSheetViewController : UIViewController
+- (void)setInScreenOffMode:(BOOL)mode;
+- (void)setDismissed:(BOOL)dismissed;
+@end
+
+
 // ==========================================
-// 3. 我们的核心渲染引擎管理器
+// 3. 多实例渲染引擎 (每个系统壁纸容器拥有一个)
 // ==========================================
 @interface TendiesRenderEngine : NSObject
+@property (nonatomic, weak) UIView *containerView;
 @property (nonatomic, strong) BSUICAPackageView *bgView;
 @property (nonatomic, strong) BSUICAPackageView *floatingView;
 @property (nonatomic, strong) BSUICAPackageView *fgView;
 @property (nonatomic, assign) BOOL isEnabled;
 
-+ (instancetype)sharedEngine;
+- (instancetype)initWithContainerView:(UIView *)containerView;
 - (void)reloadWallpaper;
-- (void)attachToContainerView:(UIView *)containerView;
 - (void)transitionToState:(NSString *)stateName;
 @end
 
 @implementation TendiesRenderEngine
 
-+ (instancetype)sharedEngine {
-    static TendiesRenderEngine *sharedInstance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        sharedInstance = [[self alloc] init];
-    });
-    return sharedInstance;
+- (instancetype)initWithContainerView:(UIView *)containerView {
+    self = [super init];
+    if (self) {
+        self.containerView = containerView;
+        
+        // 监听设置 App 传来的重新加载通知
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadWallpaper) name:@"TendiesEngineInternalReload" object:nil];
+        // 监听锁屏状态切换通知
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleStateChange:) name:@"TendiesEngineStateChange" object:nil];
+        
+        [self reloadWallpaper];
+    }
+    return self;
+}
+
+- (void)handleStateChange:(NSNotification *)note {
+    NSString *state = note.userInfo[@"state"];
+    if (state) [self transitionToState:state];
 }
 
 - (void)reloadWallpaper {
-    TENDIES_LOG(@"🔄 渲染引擎开始重载壁纸...");
+    TENDIES_LOG(@"🔄 引擎开始在容器 <%p> 中重载壁纸...", self.containerView);
     
     // 清除旧的图层
     [self.bgView removeFromSuperview];
@@ -97,7 +117,7 @@ static NSString * GetPrefsPlistPath() {
     self.isEnabled = [prefs[@"Enabled"] boolValue];
     
     if (!self.isEnabled) {
-        TENDIES_LOG(@"⚠️ 插件已关闭，不渲染任何图层。");
+        TENDIES_LOG(@"⚠️ 插件已关闭，清除图层。");
         return;
     }
     
@@ -108,11 +128,11 @@ static NSString * GetPrefsPlistPath() {
         return;
     }
     
-    // 强制加载 BaseBoardUI 框架 (BSUICAPackageView 所在框架)
+    // 强制加载 BaseBoardUI 框架
     dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
     Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
     if (!PackageViewClass) {
-        TENDIES_LOG(@"❌ 致命错误：无法加载系统 BSUICAPackageView 类！");
+        TENDIES_LOG(@"❌ 致命错误：无法加载 BSUICAPackageView 类！");
         return;
     }
 
@@ -120,62 +140,55 @@ static NSString * GetPrefsPlistPath() {
     NSString *floatPath = nil;
     NSString *fgPath = nil;
 
-    // 遍历查找 .ca 结尾的动画文件夹
-    NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:tendiesPath];
-    NSString *file;
-    while ((file = [dirEnum nextObject])) {
-        if ([file hasSuffix:@".ca"]) {
-            NSString *fullPath = [tendiesPath stringByAppendingPathComponent:file];
-            if ([file containsString:@"Background"]) bgPath = fullPath;
-            else if ([file containsString:@"Floating"]) floatPath = fullPath;
-            else if ([file containsString:@"Foreground"]) fgPath = fullPath;
+    // 强力递归搜索目录下的 .ca 文件夹
+    NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:tendiesPath]
+                                 includingPropertiesForKeys:@[NSURLIsDirectoryKey]
+                                                    options:0
+                                               errorHandler:nil];
+    for (NSURL *fileURL in dirEnum) {
+        NSNumber *isDirectory;
+        [fileURL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+        if ([isDirectory boolValue] && [fileURL.path hasSuffix:@".ca"]) {
+            NSString *fileName = fileURL.lastPathComponent;
+            if ([fileName containsString:@"Background"]) bgPath = fileURL.path;
+            else if ([fileName containsString:@"Floating"]) floatPath = fileURL.path;
+            else if ([fileName containsString:@"Foreground"]) fgPath = fileURL.path;
         }
     }
 
-    // 实例化 CA 动画视图
+    // 实例化 CA 动画视图并添加到容器
     if (bgPath) {
-        TENDIES_LOG(@"✅ 加载背景层: %@", bgPath);
+        TENDIES_LOG(@"✅ 加载背景层: %@", bgPath.lastPathComponent);
         self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:bgPath]];
-        self.bgView.layer.zPosition = -100; // 最底层
+        self.bgView.frame = self.containerView.bounds;
+        self.bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.bgView.layer.zPosition = -100;
+        [self.containerView addSubview:self.bgView];
     }
     if (floatPath) {
-        TENDIES_LOG(@"✅ 加载景深层: %@", floatPath);
+        TENDIES_LOG(@"✅ 加载景深层: %@", floatPath.lastPathComponent);
         self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:floatPath]];
-        self.floatingView.layer.zPosition = 100; // 中间层
+        self.floatingView.frame = self.containerView.bounds;
+        self.floatingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.floatingView.layer.zPosition = 100;
+        [self.containerView addSubview:self.floatingView];
     }
     if (fgPath) {
-        TENDIES_LOG(@"✅ 加载前景层: %@", fgPath);
+        TENDIES_LOG(@"✅ 加载前景层: %@", fgPath.lastPathComponent);
         self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:fgPath]];
-        self.fgView.layer.zPosition = 200; // 最上层
+        self.fgView.frame = self.containerView.bounds;
+        self.fgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.fgView.layer.zPosition = 200;
+        [self.containerView addSubview:self.fgView];
     }
     
-    // 初始状态为锁屏
+    // 默认进入锁屏状态
     [self transitionToState:@"Locked"];
 }
 
-- (void)attachToContainerView:(UIView *)containerView {
-    if (!self.isEnabled) return;
-    
-    // 把我们的动画图层塞进系统提供的容器里
-    if (self.bgView && self.bgView.superview != containerView) {
-        self.bgView.frame = containerView.bounds;
-        self.bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [containerView addSubview:self.bgView];
-    }
-    if (self.floatingView && self.floatingView.superview != containerView) {
-        self.floatingView.frame = containerView.bounds;
-        self.floatingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [containerView addSubview:self.floatingView];
-    }
-    if (self.fgView && self.fgView.superview != containerView) {
-        self.fgView.frame = containerView.bounds;
-        self.fgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [containerView addSubview:self.fgView];
-    }
-}
-
 - (void)transitionToState:(NSString *)stateName {
-    TENDIES_LOG(@"🎬 切换动画状态: %@", stateName);
+    if (!self.isEnabled) return;
+    TENDIES_LOG(@"🎬 图层状态切换至: %@", stateName);
     [self.bgView setState:stateName];
     [self.floatingView setState:stateName];
     [self.fgView setState:stateName];
@@ -183,19 +196,30 @@ static NSString * GetPrefsPlistPath() {
 
 @end
 
+
 // ==========================================
 // 4. Hook SpringBoard 渲染容器
 // ==========================================
-
-// 拦截系统底层的壁纸容器，把我们的动画引擎挂载上去
 %hook PBUIWallpaperView
 
 - (void)layoutSubviews {
     %orig; // 保持系统原有布局
     
-    UIView *contentView = [self performSelector:@selector(contentView)];
+    UIView *contentView = [self contentView]; // 编译不再报错！
     if (contentView) {
-        [[TendiesRenderEngine sharedEngine] attachToContainerView:contentView];
+        // 利用 associated object 给每个系统的 PBUIWallpaperView 绑定一个自己的专属引擎
+        TendiesRenderEngine *engine = objc_getAssociatedObject(self, "TendiesRenderEngineKey");
+        if (!engine) {
+            TENDIES_LOG(@"✨ 发现新的系统壁纸容器，为其分配专属渲染引擎！");
+            engine = [[TendiesRenderEngine alloc] initWithContainerView:contentView];
+            objc_setAssociatedObject(self, "TendiesRenderEngineKey", engine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        // 如果视图因为系统原因被移除了，引擎会重新把它加回去
+        if (engine.isEnabled && engine.bgView && engine.bgView.superview != contentView) {
+            [contentView addSubview:engine.bgView];
+            if (engine.floatingView) [contentView addSubview:engine.floatingView];
+            if (engine.fgView) [contentView addSubview:engine.fgView];
+        }
     }
 }
 
@@ -204,67 +228,42 @@ static NSString * GetPrefsPlistPath() {
 // ==========================================
 // 5. Hook 锁屏控制器，触发动画状态
 // ==========================================
-
-// 拦截锁屏控制器，这样才能触发马里奥跳出来（Unlock）或者待机（Sleep）的交互动画
 %hook CSCoverSheetViewController
 
 // 当屏幕熄灭或亮起时
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    if (mode) {
-        [[TendiesRenderEngine sharedEngine] transitionToState:@"Sleep"];
-    } else {
-        [[TendiesRenderEngine sharedEngine] transitionToState:@"Locked"];
-    }
+    NSString *state = mode ? @"Sleep" : @"Locked";
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
 }
 
 // 当锁屏被 Dismiss（即解锁进入主屏幕）时
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
-    if (dismissed) {
-        [[TendiesRenderEngine sharedEngine] transitionToState:@"Unlock"];
-    } else {
-        [[TendiesRenderEngine sharedEngine] transitionToState:@"Locked"];
-    }
+    NSString *state = dismissed ? @"Unlock" : @"Locked";
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
 }
 
 %end
 
 // ==========================================
-// 6. 接收设置更新通知
+// 6. 接收设置更新通知 (Darwin 进程间通信)
 // ==========================================
 static void PrefsNotificationCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    TENDIES_LOG(@"📥 收到设置界面的刷新通知，开始重载渲染引擎！");
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[TendiesRenderEngine sharedEngine] reloadWallpaper];
-        
-        // 强制刷新系统桌面以重绘 Layout
-        Class sbWallpaperControllerClass = NSClassFromString(@"SBWallpaperController");
-        if (sbWallpaperControllerClass) {
-            id wc = [sbWallpaperControllerClass performSelector:@selector(sharedInstance)];
-            if ([wc respondsToSelector:@selector(activeLockScreenPosterConfiguration)]) {
-                id lock = [wc performSelector:@selector(activeLockScreenPosterConfiguration)];
-                id home = [wc performSelector:@selector(activeHomeScreenPosterConfiguration)];
-                if ([wc respondsToSelector:@selector(_updateForLockScreenPosterConfiguration:homeScreenPosterConfiguration:)]) {
-                    [wc performSelector:@selector(_updateForLockScreenPosterConfiguration:homeScreenPosterConfiguration:) withObject:lock withObject:home];
-                }
-            }
-        }
-    });
+    TENDIES_LOG(@"📥 收到设置界面的 Darwin 通知，正在广播内部重载指令...");
+    // 收到设置通知后，把它转换成 SB 进程内部的通知，通知所有的引擎重新加载壁纸
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineInternalReload" object:nil];
 }
 
 %ctor {
     if ([[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) {
-        TENDIES_LOG(@"🚀 TendiesEnabler 已成功注入 SpringBoard。开始初始化渲染引擎。");
+        TENDIES_LOG(@"🚀 TendiesEnabler 成功注入 SpringBoard！开始监听设置.");
         
-        // 初始化时加载一次
-        [[TendiesRenderEngine sharedEngine] reloadWallpaper];
-        
-        // 监听设置 App 的刷新通知
+        // 监听设置 App 发来的 Darwin 跨进程通知
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), 
                                         NULL, 
                                         PrefsNotificationCallback, 
-                                        CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), 
+                                        CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), // 【确认这里和设置代码里抛出的字符串完全一致】
                                         NULL, 
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
     }
