@@ -15,9 +15,7 @@
 #import <roothide.h>
 #endif
 
-// ==========================================
-// 统一路径辅助函数
-// ==========================================
+// 统一路径获取
 static NSString * GetTendiesStorageDir() {
     NSString *base = @"/var/mobile/Documents/TendiesEnabler";
 #if __has_include(<roothide.h>)
@@ -31,7 +29,7 @@ static NSString * GetTendiesStorageDir() {
 }
 
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【替换为你真实的 bundleID】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist";
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -71,6 +69,7 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
+// 确保 PosterBoard 有权限读取 mobile 的解压文件
 - (void)forceOwnershipToMobile:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
@@ -90,7 +89,7 @@ static NSString * GetPrefsPlistPath() {
     NSURL *sourceURL = urls.firstObject;
     if (!sourceURL) return;
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在解析中...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在无缝注入...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
     spinner.center = CGPointMake(135.0, 65.5);
     [spinner startAnimating];
@@ -119,6 +118,7 @@ static NSString * GetPrefsPlistPath() {
             BOOL isDirectory = NO;
             [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
             
+            // 自动判断如果是解压好的目录则直接拷贝，如果是文件则用系统内置 unzip 释放
             if (isDirectory) {
                 NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
                 processSuccess = YES;
@@ -151,8 +151,10 @@ static NSString * GetPrefsPlistPath() {
             if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             
             if (processSuccess) {
+                // 赋予权限
                 [self forceOwnershipToMobile:unzipDir];
                 
+                // 写入当前路径并更新开关为 YES
                 NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
                 prefs[@"Enabled"] = @YES;
                 prefs[@"TendiesPath"] = unzipDir;
@@ -161,11 +163,12 @@ static NSString * GetPrefsPlistPath() {
                 [prefs writeToFile:plistPath atomically:YES];
                 [self forceOwnershipToMobile:plistPath]; 
                 
+                // 发出 Darwin 通知，这会触发 Tweak.x 里面的 ApplyTendiesWallpaper 逻辑！
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载完成 🚀" message:@"已完美实时应用！请退回桌面/锁屏查看效果。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载成功 🚀" message:@"已调用系统原生 API 无缝刷新！直接回到锁屏即可享受原生动态效果。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -197,6 +200,7 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
+// 常规的开关切换操作也发一次通知，让它重新走一遍加载
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
     if ([specifier.identifier isEqualToString:@"Enabled"]) {
