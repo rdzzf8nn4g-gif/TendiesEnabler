@@ -12,6 +12,8 @@ TWEAK_NAME = TendiesEnabler
 TendiesEnabler_FILES = Tweak.x
 TendiesEnabler_CFLAGS = -fobjc-arc
 TendiesEnabler_FRAMEWORKS = Foundation UIKit
+# 必须加上这行以支持系统原生的 SQLite3 数据库操作
+TendiesEnabler_LDFLAGS = -lsqlite3
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 SUBPROJECTS += tendiesprefs
