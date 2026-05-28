@@ -4,7 +4,7 @@
 #import <dlfcn.h>
 
 // ==========================================
-// 1. 终极路径与环境适配 (Rootful/Rootless/Roothide)
+// 1. 终极环境路径适配 (Rootful/Rootless/Roothide)
 // ==========================================
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -25,7 +25,7 @@ static NSString * GetTendiesStorageDir() {
 #endif
 }
 
-// 物理日志系统（直接写到不归沙盒管的公共Documents，确保百分百能看到日志）
+// 物理调试日志系统
 static void WriteLog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
@@ -47,6 +47,16 @@ static void WriteLog(NSString *format, ...) {
     }
 }
 
+// 递归打印视图层级树的调试助手 (破除隐藏遮挡黑盒)
+static void LogViewHierarchy(UIView *view, int depth) {
+    if (!view) return;
+    NSString *indent = [@"" stringByPaddingToLength:(depth * 4) withString:@" " startingAtIndex:0];
+    WriteLog(@"%@-> Class: %@, Frame: %@, Hidden: %d, Alpha: %.2f", indent, NSStringFromClass([view class]), NSStringFromCGRect(view.frame), view.hidden, view.alpha);
+    for (UIView *subview in view.subviews) {
+        LogViewHierarchy(subview, depth + 1);
+    }
+}
+
 // ==========================================
 // 2. 补全系统私有 API 声明
 // ==========================================
@@ -59,7 +69,7 @@ static void WriteLog(NSString *format, ...) {
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source; 
 - (void)setDismissed:(BOOL)dismissed;
-- (id)_backgroundContentViewController; // iOS 16/17 锁屏海报控制器
+- (id)_backgroundContentViewController; 
 @end
 
 @interface SpringBoard : UIApplication
@@ -67,7 +77,7 @@ static void WriteLog(NSString *format, ...) {
 @end
 
 // ==========================================
-// 3. 动态配置全局变量 (参考黄金方案)
+// 3. 动态配置全局变量
 // ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
@@ -77,14 +87,12 @@ static void reloadPrefs() {
     CFPreferencesAppSynchronize(appID);
     
     Boolean valid;
-    // 核心修复：改用原生 CFPreferences 跨进程穿透读取开关
     g_enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &valid) ? valid : NO;
     
     CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("TendiesPath"), appID);
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
         g_tendiesPath = [(__bridge NSString *)pathRef copy];
     } else {
-        // 兜底路径
         g_tendiesPath = [GetTendiesStorageDir() stringByAppendingPathComponent:@"ActiveTendies"];
     }
     
@@ -93,7 +101,6 @@ static void reloadPrefs() {
 
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
-    // 广播给所有渲染引擎实例进行重载
     [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineInternalReload" object:nil];
 }
 
@@ -135,6 +142,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (state) [self transitionToState:state];
 }
 
+// 核心修复位置 1：强制在布局周期刷新子视动效宽高，对抗生命周期初始零尺寸塌陷
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.bgView) self.bgView.frame = self.bounds;
+    if (self.floatingView) self.floatingView.frame = self.bounds;
+    if (self.fgView) self.fgView.frame = self.bounds;
+}
+
 - (void)reloadWallpaperViews {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.bgView removeFromSuperview];
@@ -142,16 +157,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.fgView removeFromSuperview];
         self.bgView = nil; self.floatingView = nil; self.fgView = nil;
         
-        if (!g_enabled) {
-            WriteLog(@"插件未开启，清理渲染层");
-            return;
-        }
+        if (!g_enabled) return;
         
         NSFileManager *fm = [NSFileManager defaultManager];
-        if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) {
-            WriteLog(@"❌ 引擎未找到资源路径: %@", g_tendiesPath);
-            return;
-        }
+        if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) return;
         
         void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
         if (!handle) return; 
@@ -164,7 +173,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         for (NSURL *fileURL in dirEnum) {
             NSString *pathString = fileURL.path;
-            // 清洗部分系统带来的末尾斜杠
             if ([pathString hasSuffix:@"/"]) {
                 pathString = [pathString substringToIndex:pathString.length - 1];
             }
@@ -225,26 +233,38 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         objc_setAssociatedObject(self, "TendiesEngineKey", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     
-    if (engineView.superview != self.view) {
-        [self.view insertSubview:engineView atIndex:0];
+    // 核心修复位置 2：移除强行沉底的 zPosition = -9999 机制，改用高级自动化层级算法
+    // 动态扫描锁屏下的子视图，寻找不透明的原生 Wallpaper 或是 Poster 视图
+    UIView *targetWallpaperView = nil;
+    for (UIView *subview in self.view.subviews) {
+        NSString *className = NSStringFromClass([subview class]);
+        if ([className containsString:@"Poster"] || [className containsString:@"Wallpaper"] || [className containsString:@"Background"] || [className containsString:@"Backdrop"]) {
+            targetWallpaperView = subview;
+        }
+    }
+    
+    if (targetWallpaperView) {
+        if (engineView.superview != self.view) {
+            // 精准注入：将我们的引擎插入到原生不透明壁纸层的正上方！既不沉底被挡住，也不顶置盖死时钟 UI
+            [self.view insertSubview:engineView aboveSubview:targetWallpaperView];
+            WriteLog(@"🎯 智能层级匹配：已成功把引擎叠在系统层 [%@] 之上", NSStringFromClass([targetWallpaperView class]));
+        }
+    } else {
+        if (engineView.superview != self.view) {
+            [self.view insertSubview:engineView atIndex:0];
+            WriteLog(@"⚠️ 未扫描到明确海报层，降级插入视图最底层");
+        }
     }
     
     engineView.frame = self.view.bounds;
-    engineView.layer.zPosition = -9999; // 强行沉底，防止硬阻断
-    [self.view sendSubviewToBack:engineView];
     
-    // 【核心抹杀】刺穿系统级 PosterKit 海报遮挡层
-    if ([self respondsToSelector:@selector(_backgroundContentViewController)]) {
-        id bgVC = [self _backgroundContentViewController];
-        if (bgVC && [bgVC respondsToSelector:@selector(view)]) {
-            UIView *bgView = [bgVC view];
-            if (bgView && (!bgView.hidden || bgView.alpha > 0)) {
-                WriteLog(@"🛡️ 成功拦截并隐藏系统海报背景层，强制腾出舞台");
-                bgView.hidden = YES;
-                bgView.alpha = 0.0;
-                bgView.layer.opacity = 0.0;
-            }
-        }
+    // 核心修复位置 3：全自动化抓取锁屏的完整视图拓扑树，方便在日志文件中一目了然
+    static BOOL hasLoggedHierarchy = NO;
+    if (!hasLoggedHierarchy) {
+        WriteLog(@"========== [调试] 开始打印锁屏视图层级全拓扑 ==========");
+        LogViewHierarchy(self.view, 0);
+        WriteLog(@"========== [调试] 锁屏视图层级全拓扑打印结束 ==========");
+        hasLoggedHierarchy = YES;
     }
 }
 
