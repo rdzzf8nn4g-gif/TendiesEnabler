@@ -4,7 +4,7 @@
 #import <dlfcn.h>
 
 // ==========================================
-// 1. 全越狱环境黄金路径适配 (对齐参考项目)
+// 1. 全越狱环境黄金路径适配
 // ==========================================
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -12,7 +12,6 @@
 #define jbroot(path) path
 #endif
 
-// 彻底放弃沙盒敏感的 Documents，改用共享偏好媒体空间
 static NSString * GetTendiesStorageDir() {
     NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
 #if __has_include(<roothide.h>)
@@ -70,7 +69,7 @@ static void WriteLog(NSString *format, ...) {
 @end
 
 // ==========================================
-// 3. 动态配置全局变量 (参考黄金方案穿盒读取)
+// 3. 动态配置全局变量
 // ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
@@ -89,7 +88,7 @@ static void reloadPrefs() {
         g_tendiesPath = [GetTendiesStorageDir() stringByAppendingPathComponent:@"ActiveTendies"];
     }
     
-    WriteLog(@"配置重载完成 - 开关: %d, 路径: %@", g_enabled, g_tendiesPath);
+    WriteLog(@"⚙️ 进程配置重载 -> 开关: %d, 路径: %@", g_enabled, g_tendiesPath);
 }
 
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -152,7 +151,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (!g_enabled) return;
         
         NSFileManager *fm = [NSFileManager defaultManager];
-        if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) return;
+        if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) {
+            WriteLog(@"❌ 错误：引擎指向的物理路径不存在 -> %@", g_tendiesPath);
+            return;
+        }
         
         void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
         if (!handle) return; 
@@ -161,43 +163,67 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (!PackageViewClass) return;
 
         NSString *bgPath = nil; NSString *floatPath = nil; NSString *fgPath = nil;
+        
+        // 开始遍历目录
         NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 errorHandler:nil];
         
+        BOOL hasFiles = NO;
         for (NSURL *fileURL in dirEnum) {
+            hasFiles = YES;
             NSString *pathString = fileURL.path;
+            
+            // 🔍 暴力探测：在日志里强制打印出每一个扫描到的路径，抓出潜伏的结构问题
+            WriteLog(@"[目录遍历探测] 正在扫描：%@", pathString);
+            
             if ([pathString hasSuffix:@"/"]) {
                 pathString = [pathString substringToIndex:pathString.length - 1];
             }
             
-            if ([pathString hasSuffix:@".ca"]) {
+            // 采用更安全的 pathExtension 匹配
+            if ([[pathString pathExtension] lowercaseString].isEqualToString(@"ca") || [pathString hasSuffix:@".ca"]) {
                 NSString *fileName = [pathString lastPathComponent];
+                WriteLog(@"🎯 [文件命中] 成功匹配到 Mica 核心动画包: %@", fileName);
+                
                 if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) bgPath = pathString;
                 else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) floatPath = pathString;
                 else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) fgPath = pathString;
             }
         }
+        
+        if (!hasFiles) {
+            WriteLog(@"❌ 警告：目标文件夹 ActiveTendies 内部空空如也，解压可能失败了！");
+            return;
+        }
 
+        BOOL loadSuccess = NO;
         if (bgPath) {
             self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:bgPath]];
             self.bgView.frame = self.bounds;
             self.bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [self addSubview:self.bgView];
+            loadSuccess = YES;
         }
         if (floatPath) {
             self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:floatPath]];
             self.floatingView.frame = self.bounds;
             self.floatingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [self addSubview:self.floatingView];
+            loadSuccess = YES;
         }
         if (fgPath) {
             self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:fgPath]];
             self.fgView.frame = self.bounds;
             self.fgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [self addSubview:self.fgView];
+            loadSuccess = YES;
         }
         
-        WriteLog(@"✅ 动效视图成功挂载，初始化 Locked 状态");
-        [self transitionToState:@"Locked"];
+        if (loadSuccess) {
+            WriteLog(@"✅ [真正成功] 动效包图层已真实构建并挂载完毕！");
+            [self transitionToState:@"Locked"];
+        } else {
+            WriteLog(@"❌ [加载失败] 虽然文件夹不为空，但内部没有包含任何命名正确的 .ca 动画层！");
+        }
     });
 }
 
@@ -242,7 +268,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
     TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesEngineKey");
     if (!engineView) {
-        WriteLog(@"✨ 检测到锁屏创建，织入 Tendies 渲染引擎...");
         engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
         objc_setAssociatedObject(self, "TendiesEngineKey", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
@@ -258,7 +283,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (targetWallpaperView) {
         if (engineView.superview != self.view) {
             [self.view insertSubview:engineView aboveSubview:targetWallpaperView];
-            WriteLog(@"🎯 叠层成功：已将引擎置于系统壁纸层 [%@] 之上", NSStringFromClass([targetWallpaperView class]));
         }
     } else {
         if (engineView.superview != self.view) {
