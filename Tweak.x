@@ -172,15 +172,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             hasFiles = YES;
             NSString *pathString = fileURL.path;
             
-            // 🔍 暴力探测：在日志里强制打印出每一个扫描到的路径，抓出潜伏的结构问题
+            // 🔍 暴力探测日志
             WriteLog(@"[目录遍历探测] 正在扫描：%@", pathString);
             
             if ([pathString hasSuffix:@"/"]) {
                 pathString = [pathString substringToIndex:pathString.length - 1];
             }
             
-            // 采用更安全的 pathExtension 匹配
-            if ([[pathString pathExtension] lowercaseString].isEqualToString(@"ca") || [pathString hasSuffix:@".ca"]) {
+            // 🐛 核心修复语法：正确使用 isEqualToString: 方法
+            if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
                 NSString *fileName = [pathString lastPathComponent];
                 WriteLog(@"🎯 [文件命中] 成功匹配到 Mica 核心动画包: %@", fileName);
                 
