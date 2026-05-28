@@ -24,26 +24,7 @@ static NSString * GetTendiesStorageDir() {
 #endif
 }
 
-static void WriteLog(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    
-    NSString *logMsg = [NSString stringWithFormat:@"[%@] 🚀 [TendiesEngine] %@\n", [NSDate date], message];
-    NSString *logPath = [GetTendiesStorageDir() stringByAppendingPathComponent:@"engine_debug.log"];
-    
-    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
-    if (!fileHandle) {
-        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
-        fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
-    }
-    if (fileHandle) {
-        [fileHandle seekToEndOfFile];
-        [fileHandle writeData:[logMsg dataUsingEncoding:NSUTF8StringEncoding]];
-        [fileHandle closeFile];
-    }
-}
+// 🚀 修复编译错误: 删除了未使用的 WriteLog 函数，避免 -Werror 拦截编译
 
 // ==========================================
 // 2. 补全系统私有 API 声明
@@ -64,15 +45,10 @@ static void WriteLog(NSString *format, ...) {
 @end
 
 // ==========================================
-// 3. 动态配置全局变量与内存缓存
+// 3. 动态配置全局变量
 // ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
-
-static NSString *cachedBgPath = nil;
-static NSString *cachedFloatPath = nil;
-static NSString *cachedFgPath = nil;
-static BOOL isPathCached = NO;
 
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
@@ -87,9 +63,6 @@ static void reloadPrefs() {
     } else {
         g_tendiesPath = [GetTendiesStorageDir() stringByAppendingPathComponent:@"ActiveTendies"];
     }
-    
-    cachedBgPath = nil; cachedFloatPath = nil; cachedFgPath = nil;
-    isPathCached = NO;
 }
 
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -107,6 +80,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) long long wallpaperVariant;
 @property (nonatomic, strong) NSString *currentState;     
 
+// 🚀 核心修复：把路径缓存从“全局”变为“实例独占”，彻底隔离锁屏与桌面
+@property (nonatomic, strong) NSString *cachedBgPath;
+@property (nonatomic, strong) NSString *cachedFloatPath;
+@property (nonatomic, strong) NSString *cachedFgPath;
+@property (nonatomic, assign) BOOL isPathCached;
+
 - (void)reloadWallpaperViews;
 - (void)transitionToState:(NSString *)stateName;
 @end
@@ -121,8 +100,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.userInteractionEnabled = NO; 
         self.wallpaperVariant = 0;
         self.currentState = @"Locked";
+        self.isPathCached = NO;
         
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadWallpaperViews) name:@"TendiesEngineInternalReload" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(forceReload) name:@"TendiesEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleStateChange:) name:@"TendiesEngineStateChange" object:nil];
     }
     return self;
@@ -130,6 +110,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)forceReload {
+    self.isPathCached = NO;
+    self.cachedBgPath = nil;
+    self.cachedFloatPath = nil;
+    self.cachedFgPath = nil;
+    [self reloadWallpaperViews];
 }
 
 - (void)handleStateChange:(NSNotification *)note {
@@ -160,21 +148,35 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         NSFileManager *fm = [NSFileManager defaultManager];
         if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) return;
         
-        if (!isPathCached) {
-            NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 errorHandler:nil];
-            for (NSURL *fileURL in dirEnum) {
-                NSString *pathString = fileURL.path;
-                if ([fileURL.lastPathComponent hasPrefix:@"."] || [pathString containsString:@"/__MACOSX"]) continue; 
-                if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
+        @synchronized(self) {
+            if (!self.isPathCached) {
+                // 🚀 核心修复：智能识别 .tendies 文件夹结构
+                // 如果是锁屏(0)找 LockScreen 文件夹，桌面(1)找 HomeScreen 文件夹
+                NSString *targetSub = (self.wallpaperVariant == 0) ? @"LockScreen" : @"HomeScreen";
+                NSString *specificPath = [g_tendiesPath stringByAppendingPathComponent:targetSub];
                 
-                if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
-                    NSString *fileName = [pathString lastPathComponent];
-                    if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) cachedBgPath = [pathString copy];
-                    else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) cachedFloatPath = [pathString copy];
-                    else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) cachedFgPath = [pathString copy];
+                NSString *searchPath = g_tendiesPath; // 默认使用根目录
+                BOOL isDir = NO;
+                // 如果存在专用的子文件夹，则进入子文件夹搜索
+                if ([fm fileExistsAtPath:specificPath isDirectory:&isDir] && isDir) {
+                    searchPath = specificPath;
                 }
+
+                NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:searchPath] includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 errorHandler:nil];
+                for (NSURL *fileURL in dirEnum) {
+                    NSString *pathString = fileURL.path;
+                    if ([fileURL.lastPathComponent hasPrefix:@"."] || [pathString containsString:@"/__MACOSX"]) continue; 
+                    if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
+                    
+                    if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
+                        NSString *fileName = [pathString lastPathComponent];
+                        if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) self.cachedBgPath = [pathString copy];
+                        else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) self.cachedFloatPath = [pathString copy];
+                        else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) self.cachedFgPath = [pathString copy];
+                    }
+                }
+                self.isPathCached = YES;
             }
-            isPathCached = YES;
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -186,18 +188,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             if (!PackageViewClass) return;
 
-            if (cachedBgPath) {
-                self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:cachedBgPath]];
+            if (self.cachedBgPath) {
+                self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedBgPath]];
                 self.bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 [self addSubview:self.bgView];
             }
-            if (cachedFloatPath) {
-                self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:cachedFloatPath]];
+            if (self.cachedFloatPath) {
+                self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFloatPath]];
                 self.floatingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 [self addSubview:self.floatingView];
             }
-            if (cachedFgPath) {
-                self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:cachedFgPath]];
+            if (self.cachedFgPath) {
+                self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFgPath]];
                 self.fgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                 [self addSubview:self.fgView];
             }
