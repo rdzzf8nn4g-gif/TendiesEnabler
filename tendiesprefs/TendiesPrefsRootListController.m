@@ -13,9 +13,11 @@
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
+#else
+#define jbroot(path) path
 #endif
 
-// 统一路径获取
+// 黄金路径终极适配：全系统多环境完美对齐
 static NSString * GetTendiesStorageDir() {
     NSString *base = @"/var/mobile/Documents/TendiesEnabler";
 #if __has_include(<roothide.h>)
@@ -69,7 +71,6 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 确保 PosterBoard 有权限读取 mobile 的解压文件
 - (void)forceOwnershipToMobile:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
@@ -118,7 +119,6 @@ static NSString * GetPrefsPlistPath() {
             BOOL isDirectory = NO;
             [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
             
-            // 自动判断如果是解压好的目录则直接拷贝，如果是文件则用系统内置 unzip 释放
             if (isDirectory) {
                 NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
                 processSuccess = YES;
@@ -151,10 +151,8 @@ static NSString * GetPrefsPlistPath() {
             if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             
             if (processSuccess) {
-                // 赋予权限
                 [self forceOwnershipToMobile:unzipDir];
                 
-                // 写入当前路径并更新开关为 YES
                 NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
                 prefs[@"Enabled"] = @YES;
                 prefs[@"TendiesPath"] = unzipDir;
@@ -163,7 +161,6 @@ static NSString * GetPrefsPlistPath() {
                 [prefs writeToFile:plistPath atomically:YES];
                 [self forceOwnershipToMobile:plistPath]; 
                 
-                // 发出 Darwin 通知，这会触发 Tweak.x 里面的 ApplyTendiesWallpaper 逻辑！
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -200,7 +197,6 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 常规的开关切换操作也发一次通知，让它重新走一遍加载
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
     if ([specifier.identifier isEqualToString:@"Enabled"]) {
