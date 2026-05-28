@@ -1,44 +1,50 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <dlfcn.h> // 必须引入，用于强制加载私有库
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
 #endif
 
 // ==========================================
-// 动态调用的私有 API 声明 (无需额外链接库)
+// 1. 物理文件日志系统 (越狱开发的救星)
 // ==========================================
-@interface LSApplicationProxy : NSObject
-+ (id)applicationProxyForIdentifier:(NSString *)identifier;
-- (NSURL *)dataContainerURL;
-@end
+static NSString * GetLogFilePath() {
+    NSString *base = @"/var/mobile/Documents/TendiesEnabler";
+#if __has_include(<roothide.h>)
+    base = jbroot(base);
+#else
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
+        base = [@"/var/jb" stringByAppendingPathComponent:base];
+    }
+#endif
+    // 确保文件夹存在
+    if (![[NSFileManager defaultManager] fileExistsAtPath:base]) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    return [base stringByAppendingPathComponent:@"tweak.log"];
+}
 
-@interface PRSService : NSObject
-- (void)refreshPosterDescriptorsForExtension:(id)ext sessionInfo:(id)info completion:(void(^)(BOOL, NSError *))completion;
-// iOS 17
-- (void)createPosterConfigurationForProviderIdentifier:(id)provider posterDescriptorIdentifier:(id)descId role:(id)role completion:(void(^)(id config, NSError *err))completion;
-- (void)updateToSelectedConfiguration:(id)config role:(id)role completion:(void(^)(BOOL, NSError *))completion;
-// iOS 16
-- (void)createPosterConfigurationForProviderIdentifier:(id)provider posterDescriptorIdentifier:(id)descId completion:(void(^)(id config, NSError *err))completion;
-- (void)updateToSelectedConfiguration:(id)config completion:(void(^)(BOOL, NSError *))completion;
-@end
-
-@interface SBWallpaperController : NSObject
-+ (id)sharedInstance;
-// iOS 17
-- (void)updatePosterConfigurationMatchingUUID:(id)uuid updates:(id)updates completion:(void(^)(void))completion;
-- (void)_updateWallpaperForLocations:(long long)locations options:(unsigned long long)options withCompletion:(void(^)(void))completion;
-// iOS 16 / 17 都有的后门强制刷新
-- (void)_updateForLockScreenPosterConfiguration:(id)lock homeScreenPosterConfiguration:(id)home;
-@end
-
+// 超级日志宏：带时间戳，直接追加写入物理文件
+#define TENDIES_LOG(fmt, ...) do { \
+    NSString *logMsg = [NSString stringWithFormat:@"[%@] " fmt @"\n", [NSDate date], ##__VA_ARGS__]; \
+    NSString *logPath = GetLogFilePath(); \
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath]; \
+    if (!fileHandle) { \
+        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil]; \
+        fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath]; \
+    } \
+    [fileHandle seekToEndOfFile]; \
+    [fileHandle writeData:[logMsg dataUsingEncoding:NSUTF8StringEncoding]]; \
+    [fileHandle closeFile]; \
+} while(0)
 
 // ==========================================
-// 路径辅助函数
+// 2. 辅助函数
 // ==========================================
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【注意: 换成你实际的 bundle id】
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist"; // 【确认是你的Bundle ID】
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -49,24 +55,46 @@ static NSString * GetPrefsPlistPath() {
 #endif
 }
 
-// 日志宏：带有明显的前缀，方便你在 Console 里搜索
-#define TENDIES_LOG(fmt, ...) NSLog(@"[TendiesEnabler_DEBUG] 🚀 " fmt, ##__VA_ARGS__)
+// ==========================================
+// 3. 动态调用的私有 API 声明
+// ==========================================
+@interface LSApplicationProxy : NSObject
++ (id)applicationProxyForIdentifier:(NSString *)identifier;
+- (NSURL *)dataContainerURL;
+@end
+
+@interface PRSService : NSObject
+- (void)refreshPosterDescriptorsForExtension:(id)ext sessionInfo:(id)info completion:(void(^)(BOOL, NSError *))completion;
+- (void)createPosterConfigurationForProviderIdentifier:(id)provider posterDescriptorIdentifier:(id)descId role:(id)role completion:(void(^)(id config, NSError *err))completion;
+- (void)updateToSelectedConfiguration:(id)config role:(id)role completion:(void(^)(BOOL, NSError *))completion;
+- (void)createPosterConfigurationForProviderIdentifier:(id)provider posterDescriptorIdentifier:(id)descId completion:(void(^)(id config, NSError *err))completion;
+- (void)updateToSelectedConfiguration:(id)config completion:(void(^)(BOOL, NSError *))completion;
+@end
+
+@interface SBWallpaperController : NSObject
++ (id)sharedInstance;
+- (void)_updateForLockScreenPosterConfiguration:(id)lock homeScreenPosterConfiguration:(id)home;
+@end
 
 // ==========================================
-// 核心逻辑：无缝注入与刷新
+// 4. 核心逻辑：无缝注入与刷新 (运行在 SB 中)
 // ==========================================
 static void ApplyTendiesWallpaper(void) {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        TENDIES_LOG(@"收到导入通知，开始执行壁纸挂载流程...");
+    TENDIES_LOG(@"====== 🚀 接收到设置通知，开始执行挂载流程 ======");
 
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        // 强制加载核心私有框架，防止 NSClassFromString 失败
+        dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY);
+        dlopen("/System/Library/PrivateFrameworks/PosterBoardServices.framework/PosterBoardServices", RTLD_LAZY);
+        
         NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:GetPrefsPlistPath()];
         if (!prefs) {
-            TENDIES_LOG(@"❌ 错误：无法读取偏好设置 Plist: %@", GetPrefsPlistPath());
+            TENDIES_LOG(@"❌ 错误：无法读取偏好设置 Plist。路径: %@", GetPrefsPlistPath());
             return;
         }
         
         if (![prefs[@"Enabled"] boolValue]) {
-            TENDIES_LOG(@"⚠️ 插件开关处于关闭状态，退出执行。");
+            TENDIES_LOG(@"⚠️ 插件开关处于关闭状态，退出。");
             return;
         }
 
@@ -82,19 +110,19 @@ static void ApplyTendiesWallpaper(void) {
         // 1. 获取 PosterBoard 真实沙盒数据目录
         Class LSAppProxyClass = NSClassFromString(@"LSApplicationProxy");
         if (!LSAppProxyClass) {
-            TENDIES_LOG(@"❌ 错误：当前环境中找不到 LSApplicationProxy 类");
+            TENDIES_LOG(@"❌ 错误：环境中找不到 LSApplicationProxy 类");
             return;
         }
         
         id proxy = [LSAppProxyClass applicationProxyForIdentifier:@"com.apple.PosterBoard"];
-        NSURL *dataContainerURL = [proxy dataContainerURL];
+        NSURL *dataContainerURL = [proxy performSelector:@selector(dataContainerURL)];
         if (!dataContainerURL) {
             TENDIES_LOG(@"❌ 错误：获取 PosterBoard 的沙盒 dataContainerURL 失败。");
             return;
         }
         TENDIES_LOG(@"✅ PosterBoard 沙盒路径: %@", dataContainerURL.path);
 
-        // 2. 递归寻找被解压出来的真实描述符目录 (包含 identifier 文件的文件夹)
+        // 2. 寻找模板描述符目录
         NSDirectoryEnumerator *enumerator = [fm enumeratorAtURL:[NSURL fileURLWithPath:tendiesPath]
                                      includingPropertiesForKeys:@[NSURLIsDirectoryKey]
                                                         options:NSDirectoryEnumerationSkipsHiddenFiles
@@ -110,7 +138,6 @@ static void ApplyTendiesWallpaper(void) {
                 NSString *identifierPath = [fileURL.path stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"];
                 if ([fm fileExistsAtPath:identifierPath]) {
                     foundDescriptorURL = fileURL;
-                    // 尝试推断所属的 Extension (如 com.apple.EmojiPoster.EmojiPosterExtension 等)
                     NSArray *components = [fileURL.path pathComponents];
                     if (components.count >= 3) {
                         NSString *possibleExt = components[components.count - 3];
@@ -118,15 +145,15 @@ static void ApplyTendiesWallpaper(void) {
                             foundExtId = possibleExt;
                         }
                     }
-                    TENDIES_LOG(@"✅ 找到了有效的壁纸模板目录: %@", fileURL.path);
-                    TENDIES_LOG(@"✅ 推断的 Extension 标识符: %@", foundExtId);
+                    TENDIES_LOG(@"✅ 找到了壁纸模板目录: %@", fileURL.path);
+                    TENDIES_LOG(@"✅ 推断的 Extension: %@", foundExtId);
                     break;
                 }
             }
         }
 
         if (!foundDescriptorURL) {
-            TENDIES_LOG(@"❌ 错误：在解压目录中没有找到 'com.apple.posterkit.provider.descriptor.identifier' 文件，这不是一个合法的壁纸包！");
+            TENDIES_LOG(@"❌ 错误：在解压目录中没有找到 descriptor.identifier 文件，格式不正确！");
             return;
         }
 
@@ -134,17 +161,16 @@ static void ApplyTendiesWallpaper(void) {
         NSString *version = @"59";
         if (@available(iOS 17.0, *)) {
             version = @"61";
-            TENDIES_LOG(@"✅ 检测到 iOS 17+，使用 DataStore 版本号 61");
+            TENDIES_LOG(@"✅ 检测到 iOS 17+，使用版本 61");
         } else {
-            TENDIES_LOG(@"✅ 检测到 iOS 16，使用 DataStore 版本号 59");
+            TENDIES_LOG(@"✅ 检测到 iOS 16，使用版本 59");
         }
 
         NSString *newUUIDFolder = [[NSUUID UUID] UUIDString].uppercaseString;
         NSString *destExtDir = [NSString stringWithFormat:@"%@/Library/Application Support/PRBPosterExtensionDataStore/%@/Extensions/%@/descriptors", dataContainerURL.path, version, foundExtId];
         NSString *destPath = [destExtDir stringByAppendingPathComponent:newUUIDFolder];
 
-        TENDIES_LOG(@"⏳ 准备拷贝壁纸数据到目标海报板库...");
-        TENDIES_LOG(@"🎯 目标路径: %@", destPath);
+        TENDIES_LOG(@"⏳ 准备拷贝至目标路径: %@", destPath);
 
         [fm createDirectoryAtPath:destExtDir withIntermediateDirectories:YES attributes:nil error:nil];
         NSError *copyErr = nil;
@@ -152,17 +178,14 @@ static void ApplyTendiesWallpaper(void) {
         if ([fm copyItemAtPath:foundDescriptorURL.path toPath:destPath error:&copyErr]) {
             TENDIES_LOG(@"✅ 拷贝成功！新壁纸 UUID: %@", newUUIDFolder);
             
-            // 4. 随机化 ID 防止覆盖系统已有壁纸
+            // 4. 随机化 ID
             int randomizedID = 10000 + arc4random_uniform(90000);
             NSString *randomStr = [NSString stringWithFormat:@"%d", randomizedID];
-            TENDIES_LOG(@"⏳ 开始随机化内部 identifier 为: %@", randomStr);
-
-            NSError *writeErr = nil;
-            BOOL writeSuccess = [randomStr writeToFile:[destPath stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"] 
-                                            atomically:YES 
-                                              encoding:NSUTF8StringEncoding 
-                                                 error:&writeErr];
-            if (!writeSuccess) TENDIES_LOG(@"❌ 错误：写入 identifier 失败: %@", writeErr);
+            
+            [randomStr writeToFile:[destPath stringByAppendingPathComponent:@"com.apple.posterkit.provider.descriptor.identifier"] 
+                        atomically:YES 
+                          encoding:NSUTF8StringEncoding 
+                             error:nil];
             
             NSString *userInfoPath = [destPath stringByAppendingPathComponent:@"com.apple.posterkit.provider.contents.userInfo"];
             NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithContentsOfFile:userInfoPath];
@@ -177,65 +200,55 @@ static void ApplyTendiesWallpaper(void) {
                 wpPlist[@"identifier"] = @(randomizedID);
                 [wpPlist writeToFile:wpPlistPath atomically:YES];
             }
-            TENDIES_LOG(@"✅ 随机化 ID 完成。");
+            TENDIES_LOG(@"✅ 随机化 ID (%d) 完成。", randomizedID);
 
-            // 5. 实例化系统私有跨进程服务 (这是 SpringBoard 唯一可以安全操控 PosterBoard 的遥控器)
+            // 5. 实例化系统私有跨进程服务
             Class PRSServiceClass = NSClassFromString(@"PRSService");
             if (!PRSServiceClass) {
-                TENDIES_LOG(@"❌ 错误：当前环境中找不到 PRSService 类");
+                TENDIES_LOG(@"❌ 错误：找不到 PRSService 类。即使 dlopen 了也不行？");
                 return;
             }
             
             id posterService = [[PRSServiceClass alloc] init];
-            TENDIES_LOG(@"✅ 成功获取 PRSService 跨进程服务实例: %@", posterService);
+            TENDIES_LOG(@"✅ 获取 PRSService 实例: %@", posterService);
 
             // 6. 遥控海报板刷新缓存
-            TENDIES_LOG(@"⏳ 正在通过 IPC 通知 PosterBoard 扫描新加入的壁纸...");
+            TENDIES_LOG(@"⏳ 通知 PosterBoard 扫描新壁纸...");
             [posterService refreshPosterDescriptorsForExtension:foundExtId sessionInfo:nil completion:^(BOOL refreshSuccess, NSError *refreshErr) {
                 
-                TENDIES_LOG(@"📥 收到扫描回调 - 结果: %d, 错误: %@", refreshSuccess, refreshErr);
+                TENDIES_LOG(@"📥 扫描回调 - 结果: %d, 错误: %@", refreshSuccess, refreshErr);
                 
-                // 7. 实例化新壁纸的 Block
                 void (^createCompletion)(id, NSError *) = ^(id newConfig, NSError *createError) {
                     if (newConfig) {
-                        TENDIES_LOG(@"✅ 成功实例化壁纸配置对象: %@", newConfig);
+                        TENDIES_LOG(@"✅ 成功实例化壁纸配置: %@", newConfig);
                         
                         dispatch_async(dispatch_get_main_queue(), ^{
-                            TENDIES_LOG(@"⏳ 准备将新壁纸设置为 Active (当前生效)...");
+                            TENDIES_LOG(@"⏳ 准备将新壁纸设置为 Active...");
                             
-                            // 8. 遥控系统激活壁纸
                             if ([posterService respondsToSelector:@selector(updateToSelectedConfiguration:role:completion:)]) {
-                                // iOS 17+
                                 [posterService updateToSelectedConfiguration:newConfig role:@"PRPosterRoleLockScreen" completion:^(BOOL activeSuccess, NSError *activeErr) {
                                     TENDIES_LOG(@"🚀 iOS 17 激活请求结束 - 成功: %d, 错误: %@", activeSuccess, activeErr);
                                     
-                                    // 解决“桌面没反应”的问题，强制踢一下 SB 的图层控制器
                                     id sbController = [NSClassFromString(@"SBWallpaperController") sharedInstance];
-                                    if ([sbController respondsToSelector:@selector(_updateForLockScreenPosterConfiguration:homeScreenPosterConfiguration:)]) {
-                                        TENDIES_LOG(@"🔄 正在强制 SBWallpaperController 更新锁屏与主屏幕图层...");
-                                        [sbController _updateForLockScreenPosterConfiguration:newConfig homeScreenPosterConfiguration:newConfig];
-                                    }
+                                    TENDIES_LOG(@"🔄 强制 SBWallpaperController 刷新图层...");
+                                    [sbController _updateForLockScreenPosterConfiguration:newConfig homeScreenPosterConfiguration:newConfig];
                                 }];
                             } else {
-                                // iOS 16
                                 [posterService updateToSelectedConfiguration:newConfig completion:^(BOOL activeSuccess, NSError *activeErr) {
                                     TENDIES_LOG(@"🚀 iOS 16 激活请求结束 - 成功: %d, 错误: %@", activeSuccess, activeErr);
                                     
                                     id sbController = [NSClassFromString(@"SBWallpaperController") sharedInstance];
-                                    if ([sbController respondsToSelector:@selector(_updateForLockScreenPosterConfiguration:homeScreenPosterConfiguration:)]) {
-                                        TENDIES_LOG(@"🔄 正在强制 SBWallpaperController 更新锁屏与主屏幕图层...");
-                                        [sbController _updateForLockScreenPosterConfiguration:newConfig homeScreenPosterConfiguration:newConfig];
-                                    }
+                                    TENDIES_LOG(@"🔄 强制 SBWallpaperController 刷新图层...");
+                                    [sbController _updateForLockScreenPosterConfiguration:newConfig homeScreenPosterConfiguration:newConfig];
                                 }];
                             }
                         });
                     } else {
-                        TENDIES_LOG(@"❌ 错误：实例化配置失败 (返回的 config 为空): %@", createError);
+                        TENDIES_LOG(@"❌ 错误：实例化配置失败: %@", createError);
                     }
                 };
 
-                TENDIES_LOG(@"⏳ 正在基于刚导入的模板创建配置实例...");
-                // 根据 iOS 版本执行不同参数的创建方法
+                TENDIES_LOG(@"⏳ 基于模板创建 Configuration...");
                 if ([posterService respondsToSelector:@selector(createPosterConfigurationForProviderIdentifier:posterDescriptorIdentifier:role:completion:)]) {
                     [posterService createPosterConfigurationForProviderIdentifier:foundExtId posterDescriptorIdentifier:newUUIDFolder role:@"PRPosterRoleLockScreen" completion:createCompletion];
                 } else {
@@ -249,23 +262,17 @@ static void ApplyTendiesWallpaper(void) {
     });
 }
 
-// ==========================================
-// 监听来自设置 App 的通知
-// ==========================================
+// 接收来自设置 App 的通知
 static void PrefsNotificationCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     ApplyTendiesWallpaper();
 }
 
 %ctor {
-    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
-    // 只在 SpringBoard 进程响应
-    if ([bundleId isEqualToString:@"com.apple.springboard"]) {
-        // 使用底层的 Darwin Notify Center 监听设置面板发来的通知
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), 
-                                        NULL, 
-                                        PrefsNotificationCallback, 
-                                        CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), 
-                                        NULL, 
-                                        CFNotificationSuspensionBehaviorDeliverImmediately);
-    }
+    // 全局只注册一次通知。因为你在 plist 限制了 Bundle，这里肯定是 SpringBoard。
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), 
+                                    NULL, 
+                                    PrefsNotificationCallback, 
+                                    CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), 
+                                    NULL, 
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
 }
