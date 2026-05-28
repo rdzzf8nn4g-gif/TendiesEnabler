@@ -69,10 +69,16 @@ static void WriteLog(NSString *format, ...) {
 @end
 
 // ==========================================
-// 3. 动态配置全局变量
+// 3. 动态配置全局变量与内存高能缓存
 // ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
+
+// 核心性能缓存：将扫描出来的物理路径直接锁在内存里，避免在布局周期重复IO文件系统
+static NSString *cachedBgPath = nil;
+static NSString *cachedFloatPath = nil;
+static NSString *cachedFgPath = nil;
+static BOOL isPathCached = NO;
 
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
@@ -88,6 +94,10 @@ static void reloadPrefs() {
         g_tendiesPath = [GetTendiesStorageDir() stringByAppendingPathComponent:@"ActiveTendies"];
     }
     
+    // 开关或壁纸变更时，必须清空内存路径缓存
+    cachedBgPath = nil; cachedFloatPath = nil; cachedFgPath = nil;
+    isPathCached = NO;
+    
     WriteLog(@"⚙️ 进程配置重载 -> 开关: %d, 路径: %@", g_enabled, g_tendiesPath);
 }
 
@@ -97,7 +107,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 4. 自定义渲染引擎视图
+// 4. 自定义高并发渲染引擎视图
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -142,91 +152,72 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)reloadWallpaperViews {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.bgView removeFromSuperview];
-        [self.floatingView removeFromSuperview];
-        [self.fgView removeFromSuperview];
-        self.bgView = nil; self.floatingView = nil; self.fgView = nil;
+    // 性能重构核心：彻底移出系统主线程，丢进并发队列进行异步文件资产暴力检索
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         
-        if (!g_enabled) return;
+        if (!g_enabled) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
+                self.bgView = nil; self.floatingView = nil; self.fgView = nil;
+            });
+            return;
+        }
         
         NSFileManager *fm = [NSFileManager defaultManager];
-        if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) {
-            WriteLog(@"❌ 错误：引擎指向的物理路径不存在 -> %@", g_tendiesPath);
-            return;
-        }
+        if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) return;
         
-        void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
-        if (!handle) return; 
-        
-        Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
-        if (!PackageViewClass) return;
-
-        NSString *bgPath = nil; NSString *floatPath = nil; NSString *fgPath = nil;
-        
-        NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 errorHandler:nil];
-        
-        BOOL hasFiles = NO;
-        for (NSURL *fileURL in dirEnum) {
-            hasFiles = YES;
-            NSString *pathString = fileURL.path;
-            
-            // 还原真实轨迹：把探测日志强制放在最前面，防止因 continue 被跳过
-            WriteLog(@"[目录遍历探测] 正在扫描：%@ (文件名: %@)", pathString, fileURL.lastPathComponent);
-            
-            if ([pathString hasSuffix:@"/"]) {
-                pathString = [pathString substringToIndex:pathString.length - 1];
+        // 如果未命中内存缓存，则去遍历。后续刷新直接跳过此段耗时扫描
+        if (!isPathCached) {
+            NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 errorHandler:nil];
+            for (NSURL *fileURL in dirEnum) {
+                NSString *pathString = fileURL.path;
+                if ([fileURL.lastPathComponent hasPrefix:@"."] || [pathString containsString:@"/__MACOSX"]) {
+                    continue; 
+                }
+                if ([pathString hasSuffix:@"/"]) {
+                    pathString = [pathString substringToIndex:pathString.length - 1];
+                }
+                if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
+                    NSString *fileName = [pathString lastPathComponent];
+                    if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) cachedBgPath = [pathString copy];
+                    else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) cachedFloatPath = [pathString copy];
+                    else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) cachedFgPath = [pathString copy];
+                }
             }
-            
-            // 🛡️ 核心修复：精准过滤。只对文件名本身判断点前缀，拉黑 macOS 特有缓存，完美避开 /.jbroot 误杀！
-            if ([fileURL.lastPathComponent hasPrefix:@"."] || [pathString containsString:@"/__MACOSX"]) {
-                continue; 
-            }
-            
-            if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
-                NSString *fileName = [pathString lastPathComponent];
-                WriteLog(@"🎯 [文件命中] 成功匹配到 Mica 核心动画包: %@", fileName);
-                
-                if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) bgPath = pathString;
-                else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) floatPath = pathString;
-                else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) fgPath = pathString;
-            }
-        }
-        
-        if (!hasFiles) {
-            WriteLog(@"❌ 警告：目标文件夹 ActiveTendies 内部空空如也，解压可能失败了！");
-            return;
+            isPathCached = YES;
         }
 
-        BOOL loadSuccess = NO;
-        if (bgPath) {
-            self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:bgPath]];
-            self.bgView.frame = self.bounds;
-            self.bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [self addSubview:self.bgView];
-            loadSuccess = YES;
-        }
-        if (floatPath) {
-            self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:floatPath]];
-            self.floatingView.frame = self.bounds;
-            self.floatingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [self addSubview:self.floatingView];
-            loadSuccess = YES;
-        }
-        if (fgPath) {
-            self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:fgPath]];
-            self.fgView.frame = self.bounds;
-            self.fgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [self addSubview:self.fgView];
-            loadSuccess = YES;
-        }
-        
-        if (loadSuccess) {
-            WriteLog(@"✅ [真正成功] 动效包图层已真实构建并挂载完毕！");
+        // 瞬间回切主线程渲染挂载，实现0延迟响应，彻底消灭掉帧卡顿
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
+            self.bgView = nil; self.floatingView = nil; self.fgView = nil;
+            
+            void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
+            if (!handle) return; 
+            Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
+            if (!PackageViewClass) return;
+
+            if (cachedBgPath) {
+                self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:cachedBgPath]];
+                self.bgView.frame = self.bounds;
+                self.bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [self addSubview:self.bgView];
+            }
+            if (cachedFloatPath) {
+                self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:cachedFloatPath]];
+                self.floatingView.frame = self.bounds;
+                self.floatingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [self addSubview:self.floatingView];
+            }
+            if (cachedFgPath) {
+                self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:cachedFgPath]];
+                self.fgView.frame = self.bounds;
+                self.fgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [self addSubview:self.fgView];
+            }
+            [self setNeedsLayout];
             [self transitionToState:@"Locked"];
-        } else {
-            WriteLog(@"❌ [加载失败] 虽然文件夹不为空，但内部没有包含任何命名正确的 Background/Floating/Foreground .ca 动画层！");
-        }
+        });
     });
 }
 
@@ -239,13 +230,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @end
 
 // ==========================================
-// 5. Hook 系统桌面壁纸层注入
+// 5. Hook 系统桌面壁纸层注入 (多环境高适配桌面图层)
 // ==========================================
 %hook PBUIWallpaperView
 - (void)layoutSubviews {
     %orig; 
+    if (!g_enabled) return;
+    
     UIView *contentView = [self contentView];
-    if (contentView && g_enabled) {
+    if (contentView) {
         TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesRenderEngineKey");
         if (!engineView) {
             engineView = [[TendiesRenderEngineView alloc] initWithFrame:contentView.bounds];
@@ -256,6 +249,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         engineView.frame = contentView.bounds;
         [contentView sendSubviewToBack:engineView];
+        [engineView setNeedsLayout]; // 强制唤醒桌面图层尺寸刷新
     }
 }
 %end
@@ -306,6 +300,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
+// 状态拦截传递
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     NSString *state = mode ? @"Sleep" : @"Locked";
