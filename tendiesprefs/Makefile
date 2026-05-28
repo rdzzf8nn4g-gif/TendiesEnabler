@@ -5,9 +5,8 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = TendiesPrefs
 TendiesPrefs_FILES = TendiesPrefsRootListController.m
-TendiesPrefs_FRAMEWORKS = UIKit
-# 必须链接 Foundation 以避免某些符号找不到
-TendiesPrefs_PRIVATE_FRAMEWORKS = Preferences Bom
+TendiesPrefs_FRAMEWORKS = UIKit Foundation
+TendiesPrefs_PRIVATE_FRAMEWORKS = Preferences
 TendiesPrefs_INSTALL_PATH = /Library/PreferenceBundles
 TendiesPrefs_CFLAGS = -fobjc-arc
 
