@@ -34,7 +34,6 @@ static NSString * GetTendiesStorageDir() {
 @end
 
 @interface PBUIWallpaperView : UIView
-- (UIView *)contentView; 
 - (long long)variant; // 0: 锁屏/下拉通知中心, 1: 桌面
 @end
 
@@ -119,16 +118,16 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self reloadWallpaperViews];
 }
 
-// 🚀 核心修复 3：完美交互状态机
+// 🚀 核心状态机：拒绝状态错乱
 - (void)handleStateChange:(NSNotification *)note {
     NSString *state = note.userInfo[@"state"];
     if (!state) return;
 
     if (self.wallpaperVariant == 0) {
-        // 锁屏/下拉通知中心：响应所有状态 (Sleep 息屏, Locked 锁屏, Unlock 解锁过渡)
+        // 锁屏：响应 Sleep(息屏), Locked(亮屏锁定), Unlock(解锁滑开过渡)
         [self transitionToState:state];
     } else if (self.wallpaperVariant == 1) {
-        // 桌面主屏幕：绝不进入 Locked 状态。只响应 Sleep 息屏 和 Unlock 正常互动
+        // 桌面：绝不进入 Locked 状态。只响应 Sleep(息屏) 和 Unlock(正常互动)
         if ([state isEqualToString:@"Sleep"] || [state isEqualToString:@"Unlock"]) {
             [self transitionToState:state];
         }
@@ -163,6 +162,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     NSString *pathString = fileURL.path;
                     NSString *fileName = fileURL.lastPathComponent;
                     if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
+                    
+                    // 智能排除不属于当前变体的专属文件夹（如果没有专属文件夹则共用）
+                    if (self.wallpaperVariant == 0 && [pathString containsString:@"/HomeScreen"]) continue;
+                    if (self.wallpaperVariant == 1 && [pathString containsString:@"/LockScreen"]) continue;
                     
                     if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
                         if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) self.cachedBgPath = [pathString copy];
@@ -208,6 +211,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled) return;
     self.currentState = [stateName copy];
     
+    // 强制激流动效过渡
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:YES];
         [self.floatingView setState:stateName animated:YES];
@@ -221,7 +225,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @end
 
 // ==========================================
-// 5. 核心画布注入 (修复多任务卡片与原生遮挡)
+// 5. 核心画布注入 (防卡片污染 + 精准隐藏)
 // ==========================================
 %hook PBUIWallpaperView
 
@@ -229,34 +233,33 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     %orig; 
     if (!g_enabled) return;
 
-    // 🚀 核心修复 1：阻断应用后台多任务卡片的污染！
+    // 🚀 终极修复 1：拦截多任务后台卡片/快照，防止壁纸卡在卡片上！
     UIWindow *window = self.window;
     if (window) {
-        NSString *windowClass = NSStringFromClass([window class]);
-        // 如果是系统用来做模糊快照或后台卡片的虚拟窗口，直接拦截，不予渲染我们的动画壁纸
-        if ([windowClass containsString:@"Hosted"] || [windowClass containsString:@"Snapshot"]) {
-            return;
+        NSString *wClass = NSStringFromClass([window class]);
+        if ([wClass containsString:@"Hosted"] || 
+            [wClass containsString:@"Snapshot"] || 
+            [wClass containsString:@"Switcher"]) {
+            return; // 是后台卡片，直接退出，不渲染！
         }
     }
+    // 防止被缩小的假视图污染
+    if (self.bounds.size.width < 200) return; 
 
-    // 🚀 核心修复 2：获取系统的原生动画容器，实现“寄生”，完美继承不触摸就能自然亮屏的动画！
-    UIView *cv = [self respondsToSelector:@selector(contentView)] ? [self contentView] : self;
-    if (!cv) return;
-    
-    TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesRenderEngineKey");
     long long currentVariant = [self respondsToSelector:@selector(variant)] ? [self variant] : 0;
     
+    TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesRenderEngineKey");
+    
     if (!engineView) {
-        engineView = [[TendiesRenderEngineView alloc] initWithFrame:cv.bounds];
+        engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.bounds];
         engineView.wallpaperVariant = currentVariant;
         engineView.currentState = (currentVariant == 1) ? @"Unlock" : @"Locked";
         
         objc_setAssociatedObject(self, "TendiesRenderEngineKey", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [cv addSubview:engineView]; // 注入到原生唤醒容器内部
+        [self addSubview:engineView];
         [engineView reloadWallpaperViews];
     } else {
-        // 🚀 核心修复 4：防止系统重用缓存导致锁屏变桌面！
-        // 如果系统回收了这块视图并改变了它的用途，我们要立刻修正它的动画状态！
+        // 🚀 终极修复 2：防止系统回收利用视图导致锁屏变成桌面壁纸！
         if (engineView.wallpaperVariant != currentVariant) {
             engineView.wallpaperVariant = currentVariant;
             NSString *targetState = (currentVariant == 1) ? @"Unlock" : @"Locked";
@@ -264,14 +267,22 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
     
-    engineView.frame = cv.bounds;
-    [cv bringSubviewToFront:engineView];
+    engineView.frame = self.bounds;
+    engineView.hidden = NO;
+    engineView.alpha = 1.0;
+    [self bringSubviewToFront:engineView];
     
-    // 隐藏 cv 内容器里系统原生的图片，但绝对不隐藏 cv 自己，以免破坏亮屏动画
-    for (UIView *sub in cv.subviews) {
-        if (sub != engineView && ![sub isKindOfClass:NSClassFromString(@"TendiesRenderEngineView")]) {
-            sub.hidden = YES;
+    // 🚀 终极修复 3：精准打击！只隐藏原生图片和海报，绝不隐藏毛玻璃，保证桌面显示并继承亮屏动画
+    for (UIView *sub in self.subviews) {
+        if (sub == engineView) continue;
+        
+        NSString *cName = NSStringFromClass([sub class]);
+        // 专门干掉 PosterBoard 的海报层和静态图
+        if ([cName containsString:@"ScenePresentation"] || 
+            [cName containsString:@"UIImageView"] || 
+            [cName containsString:@"Video"]) {
             sub.alpha = 0.0;
+            sub.hidden = YES;
         }
     }
 }
@@ -287,7 +298,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     %orig;
     if (g_enabled) {
         NSString *state = mode ? @"Sleep" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
     }
 }
 
@@ -295,7 +308,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     %orig;
     if (g_enabled) {
         NSString *state = mode ? @"Sleep" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
     }
 }
 
@@ -304,7 +319,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     %orig;
     if (g_enabled) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
     }
 }
 
