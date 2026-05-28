@@ -2,7 +2,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <sys/stat.h>
-#include <unistd.h> // 确保 chown 和 chmod 函数的系统内联声明完整
+#include <unistd.h>
 
 @interface NSTask : NSObject
 @property (copy) NSString *launchPath;
@@ -18,11 +18,9 @@
 #define jbroot(path) path
 #endif
 
-// ==========================================
-// 1. 全越狱环境黄金路径适配 (Rootful/Rootless/Roothide)
-// ==========================================
+// 黄金共享偏好路径适配
 static NSString * GetTendiesStorageDir() {
-    NSString *base = @"/var/mobile/Documents/TendiesEnabler";
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -74,7 +72,6 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 确保 PosterBoard 和 SpringBoard 有权限读取解压文件
 - (void)forceOwnershipToMobile:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
@@ -114,16 +111,15 @@ static NSString * GetPrefsPlistPath() {
             NSString *unzipDir = [targetDir stringByAppendingPathComponent:@"ActiveTendies"];
             
             if (![fm fileExistsAtPath:targetDir]) {
-                [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:nil error:nil];
+                [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
             }
             [fm removeItemAtPath:unzipDir error:nil];
-            [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:nil error:nil];
+            [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
             
             BOOL processSuccess = NO;
             BOOL isDirectory = NO;
             [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
             
-            // 自动判断如果是解压好的目录则直接拷贝，如果是文件则用系统内置 unzip 释放
             if (isDirectory) {
                 NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
                 processSuccess = YES;
@@ -158,16 +154,12 @@ static NSString * GetPrefsPlistPath() {
             if (processSuccess) {
                 [self forceOwnershipToMobile:unzipDir];
                 
-                // =====================================================================
-                // 核心修复位置 1：壁纸导入成功时，使用 CFPreferences 将数据同步到全局中央管理区
-                // 穿透 iOS 16/17 严格的跨进程沙盒隔离，确保 Tweak 能够顺利读到路径
-                // =====================================================================
+                // 核心穿梭同步：写入全局 Preferences 中央托管，彻底打破沙盒壁垒
                 CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
                 CFPreferencesSetAppValue(CFSTR("Enabled"), kCFBooleanTrue, appID);
                 CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
                 CFPreferencesAppSynchronize(appID);
                 
-                // 本地 Plist 备份兼具 PreferenceLoader 界面回显
                 NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
                 prefs[@"Enabled"] = @YES;
                 prefs[@"TendiesPath"] = unzipDir;
@@ -176,20 +168,19 @@ static NSString * GetPrefsPlistPath() {
                 [prefs writeToFile:plistPath atomically:YES];
                 [self forceOwnershipToMobile:plistPath]; 
                 
-                // 发出 Darwin 通知，触发 Tweak.x 的内部重载逻辑
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载成功 🚀" message:@"已调用系统原生 API 无缝刷新！直接回到锁屏即可享受原生动态效果。" preferredStyle:UIAlertControllerStyleAlert];
-                        [alert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载成功 🚀" message:@"资产已导入系统公共共享空间，无缝击穿沙盒！" preferredStyle:UIAlertControllerStyleAlert];
+                        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
                 });
             } else {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"解压失败" message:@"无效的壁纸文件，或设备缺少 unzip 解压环境。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"解压失败" message:@"无效的壁纸文件，或设备缺少 unzip 环境。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -213,29 +204,21 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// =====================================================================
-// 核心修复位置 2：用户在开关切换操作时，同样进行 CFPreferences 中央同步区同步
-// =====================================================================
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
     
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
     if ([specifier.identifier isEqualToString:@"Enabled"]) {
-        
-        // 同步写入系统的全局偏好中央管理区（穿透沙盒）
         CFPreferencesSetAppValue(CFSTR("Enabled"), (__bridge CFPropertyListRef)value, appID);
         CFPreferencesAppSynchronize(appID);
         
-        // 本地备份写入
         NSString *plistPath = GetPrefsPlistPath();
         NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
         prefs[@"Enabled"] = value;
         [prefs writeToFile:plistPath atomically:YES];
         [self forceOwnershipToMobile:plistPath];
         
-        // 广播偏好重载 Darwin 通知
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
     }
 }
-
 @end
