@@ -4,7 +4,7 @@
 #import <dlfcn.h>
 
 // ==========================================
-// 1. 终极环境路径适配 (Rootful/Rootless/Roothide)
+// 1. 全越狱环境黄金路径适配 (对齐参考项目)
 // ==========================================
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -12,9 +12,9 @@
 #define jbroot(path) path
 #endif
 
-// 统一媒体解压路径获取
+// 彻底放弃沙盒敏感的 Documents，改用共享偏好媒体空间
 static NSString * GetTendiesStorageDir() {
-    NSString *base = @"/var/mobile/Documents/TendiesEnabler";
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -25,7 +25,6 @@ static NSString * GetTendiesStorageDir() {
 #endif
 }
 
-// 物理调试日志系统
 static void WriteLog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
@@ -47,22 +46,16 @@ static void WriteLog(NSString *format, ...) {
     }
 }
 
-// 递归打印视图层级树的调试助手 (破除隐藏遮挡黑盒)
-static void LogViewHierarchy(UIView *view, int depth) {
-    if (!view) return;
-    NSString *indent = [@"" stringByPaddingToLength:(depth * 4) withString:@" " startingAtIndex:0];
-    WriteLog(@"%@-> Class: %@, Frame: %@, Hidden: %d, Alpha: %.2f", indent, NSStringFromClass([view class]), NSStringFromCGRect(view.frame), view.hidden, view.alpha);
-    for (UIView *subview in view.subviews) {
-        LogViewHierarchy(subview, depth + 1);
-    }
-}
-
 // ==========================================
 // 2. 补全系统私有 API 声明
 // ==========================================
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
+@end
+
+@interface PBUIWallpaperView : UIView
+- (UIView *)contentView; 
 @end
 
 @interface CSCoverSheetViewController : UIViewController
@@ -77,7 +70,7 @@ static void LogViewHierarchy(UIView *view, int depth) {
 @end
 
 // ==========================================
-// 3. 动态配置全局变量
+// 3. 动态配置全局变量 (参考黄金方案穿盒读取)
 // ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
@@ -142,7 +135,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (state) [self transitionToState:state];
 }
 
-// 核心修复位置 1：强制在布局周期刷新子视动效宽高，对抗生命周期初始零尺寸塌陷
 - (void)layoutSubviews {
     [super layoutSubviews];
     if (self.bgView) self.bgView.frame = self.bounds;
@@ -218,7 +210,29 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @end
 
 // ==========================================
-// 5. Hook 锁屏控制器高级防遮挡注入
+// 5. Hook 系统桌面壁纸层注入
+// ==========================================
+%hook PBUIWallpaperView
+- (void)layoutSubviews {
+    %orig; 
+    UIView *contentView = [self contentView];
+    if (contentView && g_enabled) {
+        TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesRenderEngineKey");
+        if (!engineView) {
+            engineView = [[TendiesRenderEngineView alloc] initWithFrame:contentView.bounds];
+            objc_setAssociatedObject(self, "TendiesRenderEngineKey", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (engineView.superview != contentView) {
+            [contentView insertSubview:engineView atIndex:0];
+        }
+        engineView.frame = contentView.bounds;
+        [contentView sendSubviewToBack:engineView];
+    }
+}
+%end
+
+// ==========================================
+// 6. Hook 锁屏控制器高级防遮挡注入
 // ==========================================
 %hook CSCoverSheetViewController
 
@@ -228,47 +242,43 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
     TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesEngineKey");
     if (!engineView) {
-        WriteLog(@"✨ 检测到锁屏创建，无缝织入 Tendies 渲染引擎...");
+        WriteLog(@"✨ 检测到锁屏创建，织入 Tendies 渲染引擎...");
         engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
         objc_setAssociatedObject(self, "TendiesEngineKey", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     
-    // 核心修复位置 2：移除强行沉底的 zPosition = -9999 机制，改用高级自动化层级算法
-    // 动态扫描锁屏下的子视图，寻找不透明的原生 Wallpaper 或是 Poster 视图
     UIView *targetWallpaperView = nil;
     for (UIView *subview in self.view.subviews) {
         NSString *className = NSStringFromClass([subview class]);
-        if ([className containsString:@"Poster"] || [className containsString:@"Wallpaper"] || [className containsString:@"Background"] || [className containsString:@"Backdrop"]) {
+        if ([className containsString:@"Poster"] || [className containsString:@"Wallpaper"] || [className containsString:@"Background"]) {
             targetWallpaperView = subview;
         }
     }
     
     if (targetWallpaperView) {
         if (engineView.superview != self.view) {
-            // 精准注入：将我们的引擎插入到原生不透明壁纸层的正上方！既不沉底被挡住，也不顶置盖死时钟 UI
             [self.view insertSubview:engineView aboveSubview:targetWallpaperView];
-            WriteLog(@"🎯 智能层级匹配：已成功把引擎叠在系统层 [%@] 之上", NSStringFromClass([targetWallpaperView class]));
+            WriteLog(@"🎯 叠层成功：已将引擎置于系统壁纸层 [%@] 之上", NSStringFromClass([targetWallpaperView class]));
         }
     } else {
         if (engineView.superview != self.view) {
             [self.view insertSubview:engineView atIndex:0];
-            WriteLog(@"⚠️ 未扫描到明确海报层，降级插入视图最底层");
         }
     }
-    
     engineView.frame = self.view.bounds;
     
-    // 核心修复位置 3：全自动化抓取锁屏的完整视图拓扑树，方便在日志文件中一目了然
-    static BOOL hasLoggedHierarchy = NO;
-    if (!hasLoggedHierarchy) {
-        WriteLog(@"========== [调试] 开始打印锁屏视图层级全拓扑 ==========");
-        LogViewHierarchy(self.view, 0);
-        WriteLog(@"========== [调试] 锁屏视图层级全拓扑打印结束 ==========");
-        hasLoggedHierarchy = YES;
+    if ([self respondsToSelector:@selector(_backgroundContentViewController)]) {
+        id bgVC = [self _backgroundContentViewController];
+        if (bgVC && [bgVC respondsToSelector:@selector(view)]) {
+            UIView *bgView = [bgVC view];
+            if (bgView && (!bgView.hidden || bgView.alpha > 0)) {
+                bgView.hidden = YES;
+                bgView.alpha = 0.0;
+            }
+        }
     }
 }
 
-// 状态拦截传递
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     NSString *state = mode ? @"Sleep" : @"Locked";
@@ -288,9 +298,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 %end
 
-// ==========================================
-// 6. 构造初始化
-// ==========================================
 %ctor {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), 
