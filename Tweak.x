@@ -171,20 +171,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             hasFiles = YES;
             NSString *pathString = fileURL.path;
             
-            // 🛡️ 核心修复：一刀切强行拉黑任何带有 __MACOSX 或隐藏点符号的伪造资源路径！
-            if ([pathString containsString:@"__MACOSX"] || [pathString containsString:@"/."]) {
-                continue; 
-            }
-            
-            WriteLog(@"[有效目录遍历] 正在扫描：%@", pathString);
+            // 还原真实轨迹：把探测日志强制放在最前面，防止因 continue 被跳过
+            WriteLog(@"[目录遍历探测] 正在扫描：%@ (文件名: %@)", pathString, fileURL.lastPathComponent);
             
             if ([pathString hasSuffix:@"/"]) {
                 pathString = [pathString substringToIndex:pathString.length - 1];
             }
             
+            // 🛡️ 核心修复：精准过滤。只对文件名本身判断点前缀，拉黑 macOS 特有缓存，完美避开 /.jbroot 误杀！
+            if ([fileURL.lastPathComponent hasPrefix:@"."] || [pathString containsString:@"/__MACOSX"]) {
+                continue; 
+            }
+            
             if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
                 NSString *fileName = [pathString lastPathComponent];
-                WriteLog(@"🎯 [真正命中] 成功截获有效 Mica 核心动画包: %@", fileName);
+                WriteLog(@"🎯 [文件命中] 成功匹配到 Mica 核心动画包: %@", fileName);
                 
                 if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) bgPath = pathString;
                 else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) floatPath = pathString;
@@ -193,7 +194,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         if (!hasFiles) {
-            WriteLog(@"❌ 警告：目标文件夹 ActiveTendies 内部空空如也！");
+            WriteLog(@"❌ 警告：目标文件夹 ActiveTendies 内部空空如也，解压可能失败了！");
             return;
         }
 
@@ -221,10 +222,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         if (loadSuccess) {
-            WriteLog(@"✅ [挂载成功] 真实动效包已经成功加载到父容器中！");
+            WriteLog(@"✅ [真正成功] 动效包图层已真实构建并挂载完毕！");
             [self transitionToState:@"Locked"];
         } else {
-            WriteLog(@"❌ [匹配失败] 未能从解压包中提取到正确的 Background/Floating/Foreground 动画层！");
+            WriteLog(@"❌ [加载失败] 虽然文件夹不为空，但内部没有包含任何命名正确的 Background/Floating/Foreground .ca 动画层！");
         }
     });
 }
@@ -293,7 +294,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     engineView.frame = self.view.bounds;
     
-    // 参考高级除草方案：强行让原生海报背景变透明并隐藏，给自定义动效挪坑
     if ([self respondsToSelector:@selector(_backgroundContentViewController)]) {
         id bgVC = [self _backgroundContentViewController];
         if (bgVC && [bgVC respondsToSelector:@selector(view)]) {
@@ -301,7 +301,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (bgView && (!bgView.hidden || bgView.alpha > 0)) {
                 bgView.hidden = YES;
                 bgView.alpha = 0.0;
-                bgView.layer.opacity = 0.0;
             }
         }
     }
