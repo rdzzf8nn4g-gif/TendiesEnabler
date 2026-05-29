@@ -227,25 +227,6 @@ static BOOL g_isMountingEngine = NO;
 // ==========================================
 // 工具函数 (精准外科手术打击，保留系统模糊)
 // ==========================================
-static void TendiesHideLayerTree(CALayer *layer) {
-    if (!layer) return;
-    layer.hidden = YES;
-    layer.opacity = 0.0;
-    for (CALayer *sub in layer.sublayers) {
-        TendiesHideLayerTree(sub);
-    }
-}
-
-static void TendiesHideViewTree(UIView *view) {
-    if (!view) return;
-    view.hidden = YES;
-    view.alpha = 0.0;
-    view.layer.opacity = 0.0;
-    TendiesHideLayerTree(view.layer);
-    for (UIView *sub in view.subviews) {
-        TendiesHideViewTree(sub);
-    }
-}
 
 static id TendiesSafeValueForKey(id obj, NSString *key) {
     if (!obj || !key.length) return nil;
