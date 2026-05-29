@@ -4,6 +4,9 @@
 #import <dlfcn.h>
 #import <QuartzCore/QuartzCore.h>
 
+// ==========================================
+// 1. 全越狱环境黄金路径适配
+// ==========================================
 #if __has_include(<roothide.h>)
 #import <roothide.h>
 #else
@@ -23,7 +26,7 @@ static NSString * GetTendiesStorageDir() {
 }
 
 // ==========================================
-// 系统私有 API 声明 (iOS 16/17 核心)
+// 2. 系统私有 API 声明 (iOS 16/17 核心)
 // ==========================================
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
@@ -31,11 +34,7 @@ static NSString * GetTendiesStorageDir() {
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
-@interface CSBackgroundContentViewController : UIViewController
-@end
-
 @interface CSCoverSheetViewController : UIViewController
-@property (retain, nonatomic) CSBackgroundContentViewController *backgroundContentViewController;
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 @end
@@ -50,7 +49,7 @@ static NSString * GetTendiesStorageDir() {
 @end
 
 // ==========================================
-// 全局状态与配置
+// 3. 全局状态与配置
 // ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
@@ -76,7 +75,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (修复环境动画与触摸失效)
+// 4. 核心渲染引擎 
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -149,20 +148,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🎯 修复交互：不再冻结时间轴！直接利用系统传来的滑动进度触发弹簧动画！
 - (void)onSwipeProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     
-    // progress: 1.0 (锁屏完全显示) -> 0.0 (桌面完全显示)
-    // 只要用户上滑超过一丁点 (进度降到 0.98 以下)，立即触发 Unlock 形变，马里奥照常走路！
+    // progress < 0.98 代表锁屏开始往上滑动，触发 Unlock 形变
     if (progress < 0.98) {
         if (!self.isUnlocking) {
             self.isUnlocking = YES;
             [self transitionToState:@"Unlock" animated:YES];
         }
     } else {
-        // 用户取消滑动，退回锁屏，触发 Locked 归位
         if (self.isUnlocking) {
             self.isUnlocking = NO;
             [self transitionToState:@"Locked" animated:YES];
@@ -173,7 +169,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
     
-    // 🛡️ 终极防御锁：如果系统重复下发相同状态，直接拦截！保护底层动画对象不被强制重置！
     if ([self.currentState isEqualToString:stateName]) return; 
     self.currentState = [stateName copy];
     
@@ -295,6 +290,7 @@ static void EnsureEngineViewIsMounted() {
 // 拦截提取截图
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
+        // 直接欺骗系统：快照加载完成，但什么也不渲染！
         if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
         return; 
     }
@@ -309,18 +305,26 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 🚨 杀招 2：隐藏锁屏原生海报，透出底层引擎！
+// 🚨 杀招 2：隐藏锁屏原生海报 (修复 Unrecognized Selector 崩溃)
 // ==========================================
 %hook CSCoverSheetViewController
+
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
-        // 剥开锁屏的遮羞布！让底层的 TendiesEngine 露出来！
-        UIViewController *bgVC = [self backgroundContentViewController];
-        if (bgVC && bgVC.view) {
-            bgVC.view.hidden = YES;
-            bgVC.view.alpha = 0.0;
+        // 使用 KVC 和 @try 绝对防御，防止读取系统非公开属性时造成崩溃
+        @try {
+            id bgVC = [self valueForKey:@"_backgroundContentViewController"];
+            if (bgVC) {
+                UIView *bgView = [bgVC valueForKey:@"view"];
+                if (bgView) {
+                    bgView.hidden = YES;
+                    bgView.alpha = 0.0;
+                }
+            }
+        } @catch (NSException *e) {
+            // 静默处理，防止任何意外的崩溃
         }
     }
 }
@@ -353,7 +357,6 @@ static void EnsureEngineViewIsMounted() {
 // ==========================================
 %hook SBCoverSheetSlidingViewController
 
-// 这个方法掌管着你手指上下滑动的最精确百分比 (1.0 = 锁屏完全显示，0.0 = 完全进入桌面)
 - (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
     CGRect ret = %orig;
     if (g_enabled) {
