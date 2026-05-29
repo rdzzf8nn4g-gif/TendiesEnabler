@@ -45,7 +45,11 @@ typedef struct {
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
-- (void)tendies_mountLockscreenEngineAndHideNative;
+- (void)tendies_forceHideNativeWallpaperLayers;
+@end
+
+@interface SBWallpaperEffectView : UIView
+@property (nonatomic) long long wallpaperStyle;
 @end
 
 // ==========================================
@@ -86,8 +90,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineInternalReload" object:nil];
 }
 
+
 // ==========================================
-// CAML 解析器与渲染核心 (对标 PBW 引擎的手工插值逻辑)
+// CAML 解析器 (接管底层坐标系)
 // ==========================================
 @interface TendiesCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -117,9 +122,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([elementName isEqualToString:@"CALayer"]) {
         NSString *layerId = attributeDict[@"id"];
         NSString *layerName = attributeDict[@"name"];
-        if (layerId && layerName) {
-            self.idToNameMap[layerId] = layerName;
-        }
+        if (layerId && layerName) self.idToNameMap[layerId] = layerName;
     } else if ([elementName isEqualToString:@"LKState"]) {
         self.currentParsingState = attributeDict[@"name"];
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
@@ -130,27 +133,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             NSString *valStr = attributeDict[@"value"];
             if (valStr) {
                 NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
-                if (!targetDict) {
-                    targetDict = [NSMutableDictionary dictionary];
-                    self.statesData[self.currentParsingTargetId] = targetDict;
-                }
+                if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
                 NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
-                if (!stateDict) {
-                    stateDict = [NSMutableDictionary dictionary];
-                    targetDict[self.currentParsingState] = stateDict;
-                }
+                if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[self.currentParsingState] = stateDict; }
                 stateDict[self.currentParsingKeyPath] = @([valStr doubleValue]);
             }
         }
     }
 }
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
-    if ([elementName isEqualToString:@"LKState"]) {
-        self.currentParsingState = nil;
-    } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
-        self.currentParsingTargetId = nil;
-        self.currentParsingKeyPath = nil;
-    }
+    if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
+    else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
 }
 @end
 
@@ -164,7 +157,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
-// 核心渲染引擎视图类 (现在将实例化两套，同时接收广播)
+// 核心渲染引擎视图 (包含动画插值逻辑)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -211,10 +204,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 - (void)forceReload {
-    self.isPathCached = NO;
-    self.cachedBgPath = nil;
-    self.cachedFloatPath = nil;
-    self.cachedFgPath = nil;
+    self.isPathCached = NO; self.cachedBgPath = nil; self.cachedFloatPath = nil; self.cachedFgPath = nil;
     [self reloadWallpaperViews];
 }
 
@@ -228,10 +218,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (void)onWakeUp {
     if (!g_enabled) return;
     self.isUnlocking = NO;
-    [CATransaction begin];
-    [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
-    [CATransaction commit];
-    [CATransaction flush];
+    [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
 }
 
 - (void)onSleep {
@@ -247,9 +234,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
             NSString *name = parser.idToNameMap[targetId];
             if (name) {
                 CALayer *found = TendiesFindLayerByName(pkgView.layer, name);
-                if (found) {
-                    layerMap[targetId] = found;
-                }
+                if (found) layerMap[targetId] = found;
             }
         }
     }
@@ -263,22 +248,16 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 - (void)applyProgress:(double)progress parser:(TendiesCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (NSString *targetId in parser.statesData) {
-        CALayer *layer = layerMap[targetId];
-        if (!layer) continue;
+        CALayer *layer = layerMap[targetId]; if (!layer) continue;
         NSDictionary *states = parser.statesData[targetId];
-        NSDictionary *lockedVals = states[@"Locked"];
-        NSDictionary *unlockVals = states[@"Unlock"];
+        NSDictionary *lockedVals = states[@"Locked"]; NSDictionary *unlockVals = states[@"Unlock"];
         if (!lockedVals || !unlockVals) continue;
         for (NSString *keyPath in lockedVals) {
-            NSNumber *lockNum = lockedVals[keyPath];
-            NSNumber *unlockNum = unlockVals[keyPath];
+            NSNumber *lockNum = lockedVals[keyPath]; NSNumber *unlockNum = unlockVals[keyPath];
             if (lockNum && unlockNum) {
-                double lockVal = [lockNum doubleValue];
-                double unlockVal = [unlockNum doubleValue];
-                double currentVal = lockVal + (unlockVal - lockVal) * progress;
+                double currentVal = [lockNum doubleValue] + ([unlockNum doubleValue] - [lockNum doubleValue]) * progress;
                 @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch (NSException *e) {}
             }
         }
@@ -307,25 +286,15 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     self.currentState = [stateName copy];
     
     if ([stateName isEqualToString:@"Unlock"]) {
-        [self ensureAllLayerMaps];
-        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap];
-        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap];
-        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        [self ensureAllLayerMaps]; [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
     } else if ([stateName isEqualToString:@"Locked"]) {
-        [self ensureAllLayerMaps];
-        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap];
-        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap];
-        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
     }
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:stateName animated:animated];
-        [self.floatingView setState:stateName animated:animated];
-        [self.fgView setState:stateName animated:animated];
+        [self.bgView setState:stateName animated:animated]; [self.floatingView setState:stateName animated:animated]; [self.fgView setState:stateName animated:animated];
     } else {
-        [self.bgView setState:stateName];
-        [self.floatingView setState:stateName];
-        [self.fgView setState:stateName];
+        [self.bgView setState:stateName]; [self.floatingView setState:stateName]; [self.fgView setState:stateName];
     }
 }
 
@@ -335,8 +304,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
                 self.bgView = nil; self.floatingView = nil; self.fgView = nil;
-            });
-            return;
+            }); return;
         }
         NSFileManager *fm = [NSFileManager defaultManager];
         if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) return;
@@ -344,8 +312,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
             if (!self.isPathCached) {
                 NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil];
                 for (NSURL *fileURL in dirEnum) {
-                    NSString *pathString = fileURL.path;
-                    NSString *fileName = fileURL.lastPathComponent;
+                    NSString *pathString = fileURL.path; NSString *fileName = fileURL.lastPathComponent;
                     if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
                     if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
                         if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) self.cachedBgPath = [pathString copy];
@@ -368,27 +335,21 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
             if (self.cachedBgPath) {
                 self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedBgPath]];
                 [self addSubview:self.bgView];
-                self.bgParser = [TendiesCAMLParser new];
-                [self.bgParser parseFile:[self.cachedBgPath stringByAppendingPathComponent:@"main.caml"]];
+                self.bgParser = [TendiesCAMLParser new]; [self.bgParser parseFile:[self.cachedBgPath stringByAppendingPathComponent:@"main.caml"]];
             }
             if (self.cachedFloatPath) {
                 self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFloatPath]];
                 [self addSubview:self.floatingView];
-                self.floatParser = [TendiesCAMLParser new];
-                [self.floatParser parseFile:[self.cachedFloatPath stringByAppendingPathComponent:@"main.caml"]];
+                self.floatParser = [TendiesCAMLParser new]; [self.floatParser parseFile:[self.cachedFloatPath stringByAppendingPathComponent:@"main.caml"]];
             }
             if (self.cachedFgPath) {
                 self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFgPath]];
                 [self addSubview:self.fgView];
-                self.fgParser = [TendiesCAMLParser new];
-                [self.fgParser parseFile:[self.cachedFgPath stringByAppendingPathComponent:@"main.caml"]];
+                self.fgParser = [TendiesCAMLParser new]; [self.fgParser parseFile:[self.cachedFgPath stringByAppendingPathComponent:@"main.caml"]];
             }
             [self setNeedsLayout];
             self.currentState = @"Init";
-            [CATransaction begin];
-            [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
-            [CATransaction commit];
-            [CATransaction flush];
+            [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
         });
     });
 }
@@ -396,47 +357,49 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 
 // ==========================================
-// 🚨 终极挂载策略 1：桌面挂载 (PBUIWallpaperViewController)
+// 引擎 1：挂载桌面壁纸层 (最底层，解决没动画问题)
 // ==========================================
+static void EnsureEngineViewIsMounted() {
+    if (!g_enabled) return;
+    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+    if (!wallpaperController) return;
+    
+    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
+    if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+    if (!targetContainer) return;
+    
+    TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
+    if (!engineView) {
+        engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
+        objc_setAssociatedObject(wallpaperController, "GlobalTendiesEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [targetContainer addSubview:engineView];
+        [engineView reloadWallpaperViews];
+    }
+    
+    if (engineView.superview != targetContainer) {
+        [engineView removeFromSuperview];
+        [targetContainer addSubview:engineView];
+    }
+    engineView.frame = targetContainer.bounds;
+    // 强制把我们的动画桌面放到最上层，防止被系统残留阻挡
+    [targetContainer bringSubviewToFront:engineView];
+}
+
+// 🎯 原样保留你原来成功的隐藏代码：彻底干掉系统壁纸和虚化层
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        // 取保挂载视图始终处于系统底端
-        UIView *homeView = [self respondsToSelector:@selector(homescreenWallpaperView)] ? [self homescreenWallpaperView] : self.view;
-        if (homeView) {
-            // 注意：绝不能给父视图设透明度 0，否则系统特效全部失效 (修正导致透明桌面的核心罪魁祸首)
-            homeView.hidden = NO;
-            homeView.alpha = 1.0;
-            
-            // 隐藏苹果原生的具体图片元素，但不干扰容器结构
-            for (UIView *sub in homeView.subviews) {
-                if (![sub isKindOfClass:NSClassFromString(@"TendiesRenderEngineView")]) {
-                    sub.alpha = 0.0;
-                    sub.hidden = YES;
-                }
-            }
+        if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
+            UIView *homeView = [self homescreenWallpaperView];
+            if (homeView) homeView.alpha = 0.0;
         }
-        
-        // 挂载第一套引擎: 桌面专属
-        TendiesRenderEngineView *hsEngine = objc_getAssociatedObject(self, "HSEngine");
-        if (!hsEngine && homeView) {
-            hsEngine = [[TendiesRenderEngineView alloc] initWithFrame:homeView.bounds];
-            objc_setAssociatedObject(self, "HSEngine", hsEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [hsEngine reloadWallpaperViews];
-            [homeView insertSubview:hsEngine atIndex:0];
-        }
-        if (hsEngine && homeView) {
-            if (hsEngine.superview != homeView) {
-                [hsEngine removeFromSuperview];
-                [homeView insertSubview:hsEngine atIndex:0];
-            }
-            hsEngine.frame = homeView.bounds;
+        if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
+            UIView *lockView = [self lockscreenWallpaperView];
+            if (lockView) lockView.alpha = 0.0;
         }
     }
 }
-
-// 防止系统生成切换特效快照闪屏
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
@@ -447,74 +410,83 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 %end
 
+%hook SBWallpaperEffectView
+- (void)layoutSubviews {
+    %orig;
+    if (g_enabled) {
+        self.hidden = YES;
+        self.alpha = 0.0;
+    }
+}
+- (void)setAlpha:(double)alpha {
+    if (g_enabled) { %orig(0.0); } else { %orig; }
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) { %orig(YES); } else { %orig; }
+}
+%end
+
 
 // ==========================================
-// 🚨 终极挂载策略 2：锁屏独立挂载 (CSCoverSheetViewController)
+// 引擎 2：挂载锁屏覆盖层 (解决透明漏底和锁屏无动画)
 // ==========================================
 %hook CSCoverSheetViewController
+
+// 保留你暴力杀掉原生锁屏海报的代码，防止它跑出来干扰
 %new
-- (void)tendies_mountLockscreenEngineAndHideNative {
+- (void)tendies_forceHideNativeWallpaperLayers {
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
     if (bgVC && bgVC.view) {
-        // 关键修复：保持锁屏背景完全不透明！这样滑下通知中心时就能完美盖住桌面图标，不会漏底！
-        bgVC.view.hidden = NO;
-        bgVC.view.alpha = 1.0;
-        
-        // 只隐藏系统默认的海报背景照片
-        for (UIView *sub in bgVC.view.subviews) {
-            if (![sub isKindOfClass:NSClassFromString(@"TendiesRenderEngineView")]) {
-                sub.alpha = 0.0;
-                sub.hidden = YES;
-            }
-        }
-        
-        // 挂载第二套引擎: 锁屏专属 (解决锁屏没动画的问题)
-        TendiesRenderEngineView *lsEngine = objc_getAssociatedObject(self, "LSEngine");
-        if (!lsEngine) {
-            lsEngine = [[TendiesRenderEngineView alloc] initWithFrame:bgVC.view.bounds];
-            objc_setAssociatedObject(self, "LSEngine", lsEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [lsEngine reloadWallpaperViews];
-            [bgVC.view insertSubview:lsEngine atIndex:0];
-        }
-        if (lsEngine.superview != bgVC.view) {
-            [lsEngine removeFromSuperview];
-            [bgVC.view insertSubview:lsEngine atIndex:0];
-        }
-        lsEngine.frame = bgVC.view.bounds;
+        bgVC.view.alpha = 0.0;
+        bgVC.view.hidden = YES;
     }
-    
-    // 隐藏碍眼的悬浮层与暗化层，展现最原始的高清壁纸
     UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
     if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
     if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
-        @try {
-            UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
-            if (dimmingLayer) { dimmingLayer.alpha = 0.0; dimmingLayer.hidden = YES; }
-        } @catch (NSException *e) {}
+        @try { UIView *dimmingLayer = [self valueForKey:@"_dimmingView"]; if (dimmingLayer) { dimmingLayer.alpha = 0.0; dimmingLayer.hidden = YES; } } @catch (NSException *e) {}
     }
 }
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    if (g_enabled) [self tendies_mountLockscreenEngineAndHideNative];
+    EnsureEngineViewIsMounted(); // 这里会刷新桌面底层的引擎
+    
+    if (g_enabled) {
+        // 第一步：执行你的暴力代码，干掉导致冲突的原生海报
+        [self tendies_forceHideNativeWallpaperLayers];
+        
+        // 第二步：在透明的锁屏背后，塞入一个专属的锁屏动画引擎 (自带黑底，完美遮挡桌面图标)
+        TendiesRenderEngineView *lsEngine = objc_getAssociatedObject(self, "LSEngine");
+        if (!lsEngine) {
+            lsEngine = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
+            objc_setAssociatedObject(self, "LSEngine", lsEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [lsEngine reloadWallpaperViews];
+            // 关键点：插入到 CSCoverSheetView 的最最底层！
+            [self.view insertSubview:lsEngine atIndex:0]; 
+        }
+        if (lsEngine.superview != self.view) {
+            [lsEngine removeFromSuperview];
+            [self.view insertSubview:lsEngine atIndex:0];
+        }
+        lsEngine.frame = self.view.bounds;
+    }
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    if (g_enabled) [self tendies_mountLockscreenEngineAndHideNative];
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
-
 - (void)_updateBackgroundContentView {
     %orig;
-    if (g_enabled) [self tendies_mountLockscreenEngineAndHideNative];
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
 - (void)_updateWallpaperEffectView {
     %orig;
-    if (g_enabled) [self tendies_mountLockscreenEngineAndHideNative];
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
 - (void)_updateWallpaper {
     %orig;
-    if (g_enabled) [self tendies_mountLockscreenEngineAndHideNative];
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
 
 - (void)updatePosterSwitcherSnapshots {
@@ -546,15 +518,12 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 
 // ==========================================
-// 动画进度广播 (核心：现在一滑，双引擎同时运算)
+// 全局进度分发中心 (一拉锁屏，桌面和锁屏动画完美同步)
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
-        if (arg5) {
-            void (^completionBlock)(void) = arg5;
-            completionBlock();
-        }
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
         return; 
     }
     %orig;
@@ -567,9 +536,10 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
+    EnsureEngineViewIsMounted();
     if (g_enabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            // 一个广播打出去，桌面引擎和锁屏引擎同时接收！完美同步丝滑！
+            // 引擎内部的通知中心，桌面和锁屏都会同时收到！
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
         });
     }
