@@ -11,8 +11,16 @@
 #endif
 
 // ==========================================
-// 核心私有 API 声明
+// 核心私有 API 声明 & 结构体修复
 // ==========================================
+
+// 💡 修复编译错误：全局具名声明该结构体
+typedef struct {
+    long long x0;
+    long long x1;
+    double x2;
+} PBUIWallpaperTransitionState;
+
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
@@ -24,17 +32,9 @@
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
 @end
 
-// 💡 修复关键点：全局声明具名结构体，防止 Logos 将匿名 struct 判定为两个冲突的类型
-typedef struct {
-    long long x0;
-    long long x1;
-    double x2;
-} PBUIWallpaperTransitionState;
-
 @interface PBUIWallpaperViewController : UIViewController
 @property (retain, nonatomic) UIView *homescreenWallpaperView;
 @property (retain, nonatomic) UIView *lockscreenWallpaperView;
-// 使用具名结构体
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
@@ -85,7 +85,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (修复环境动画假死 & 状态控制)
+// 核心渲染引擎 (尊重 CAML 原生动画逻辑)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -109,7 +109,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor clearColor]; // 这里可以用 clearColor，以免黑屏
+        self.backgroundColor = [UIColor clearColor]; // 必须透明
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -158,7 +158,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🎯 修复：不再强行暂停时间轴，保留背景动画！仅通过状态下发触发 Spring 阻尼动画
+// 🎯 利用 CAML 状态机自身触发阻尼弹动，保留马里奥的走路动画
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
@@ -178,7 +178,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
-    if ([self.currentState isEqualToString:stateName]) return; // 状态锁：防止重复下发导致动画闪烁
+    if ([self.currentState isEqualToString:stateName]) return; 
     self.currentState = [stateName copy];
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
@@ -288,85 +288,46 @@ static void EnsureEngineViewIsMounted() {
 // 🚨 快照杀手 & 底层拦截 (修复滑动露出原生壁纸)
 // ==========================================
 
-// 1. 彻底干掉 PaperBoardUI 的快照过渡和原生壁纸层
+// 1. 彻底透明化 PaperBoardUI 的桌面原生壁纸层
 %hook PBUIWallpaperViewController
-
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        // 强制隐藏原生的壁纸层，防止在滑动/过渡期间露出来
         UIView *homeView = [self homescreenWallpaperView];
         UIView *lockView = [self lockscreenWallpaperView];
-        if (homeView) homeView.hidden = YES;
-        if (lockView) lockView.hidden = YES;
+        // 💡 使用 alpha = 0.0 而不是 hidden=YES，防止被快照机制识别并调取原图缓存！
+        if (homeView) homeView.alpha = 0.0;
+        if (lockView) lockView.alpha = 0.0;
     }
 }
 
-// 拦截系统强行生成过渡期的模糊/快照视图
-// 💡 这里我们使用上方刚刚声明的具名结构体 PBUIWallpaperTransitionState
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
 }
 
-// 使用 void* 绕过复杂的 struct 指针解析，拦截过渡视图更新
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
     if (g_enabled) return NO;
     return %orig;
 }
-
 %end
 
 
-// 2. 拦截 SpringBoard 的截图动作
-%hook SBWallpaperController
-
-// 拦截系统强制铺上的层级快照 (iOS 16+)
-- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
-    if (g_enabled) {
-        if (arg5) {
-            void (^completionBlock)(void) = arg5;
-            completionBlock();
-        }
-        return; 
-    }
-    %orig;
-}
-
-// 拦截直接请求场景快照 (iOS 17+)
-- (void)_snapshotScene:(id)scene withOptions:(long long)options traitCollection:(id)collection completion:(id /* block */)completion {
-    if (g_enabled) {
-        if (completion) {
-            void (^completionBlock)(id) = completion;
-            completionBlock(nil); // 欺骗系统：快照为空
-        }
-        return;
-    }
-    %orig;
-}
-
-// 传递滑动进度，触发原生阻尼
-- (void)updateWallpaperAnimationWithProgress:(double)progress {
-    %orig;
-    EnsureEngineViewIsMounted();
-    if (g_enabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-        });
-    }
-}
-
-%end
-
-
-// ==========================================
-// 亮灭屏与锁屏状态同步
-// ==========================================
+// 2. 🔥【关键点】彻底透明化锁屏 (CoverSheet) 绑定的背景层！
 %hook CSCoverSheetViewController
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted();
+    if (g_enabled) {
+        // CSCoverSheetViewController 中含有一个 _backgroundContentViewController
+        // 这个 Controller 控制着滑动时的锁屏背景海报，必须透明化！
+        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        if (bgVC && bgVC.view) {
+            bgVC.view.alpha = 0.0;
+        }
+    }
 }
+
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
@@ -376,6 +337,7 @@ static void EnsureEngineViewIsMounted() {
         });
     }
 }
+
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
@@ -388,6 +350,46 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+
+// 3. 拦截 SpringBoard 的截图动作
+%hook SBWallpaperController
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    if (g_enabled) {
+        if (arg5) {
+            void (^completionBlock)(void) = arg5;
+            completionBlock();
+        }
+        return; 
+    }
+    %orig;
+}
+
+- (void)_snapshotScene:(id)scene withOptions:(long long)options traitCollection:(id)collection completion:(id /* block */)completion {
+    if (g_enabled) {
+        if (completion) {
+            void (^completionBlock)(id) = completion;
+            completionBlock(nil);
+        }
+        return;
+    }
+    %orig;
+}
+
+- (void)updateWallpaperAnimationWithProgress:(double)progress {
+    %orig;
+    EnsureEngineViewIsMounted();
+    if (g_enabled) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+        });
+    }
+}
+%end
+
+
+// ==========================================
+// 亮灭屏状态同步
+// ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
