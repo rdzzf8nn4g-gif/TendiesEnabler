@@ -33,8 +33,14 @@ static NSString * GetTendiesStorageDir() {
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
+// 声明 iOS 16/17 的原生壁纸视图继承自 UIView
 @interface PBUIWallpaperView : UIView
 @property (nonatomic, readonly) long long variant; // 0 = LockScreen, 1 = HomeScreen
+@end
+
+// 修复编译错误：声明 iOS 14/15 的原生壁纸视图继承自 UIView
+@interface SBFWallpaperView : UIView
+@property (nonatomic, readonly) long long variant;
 @end
 
 @interface CSCoverSheetViewController : UIViewController
@@ -77,7 +83,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 4. 统一渲染引擎 (优化版: 支持精准恢复 CA 动画)
+// 4. 统一渲染引擎 (支持精准恢复 CA 动画)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -130,7 +136,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (state) [self transitionToState:state];
 }
 
-// 核心修复 1：从系统假死状态中暴力唤醒图层！
+// 从系统假死状态中暴力唤醒图层
 - (void)wakeUpAnimations {
     if (!g_enabled || !g_isScreenOn) return;
     
@@ -232,7 +238,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 5. 核心修复 2：准确挂载到 PBUIWallpaperView (支持快照与分离)
+// 5. 挂载到 PBUIWallpaperView (支持快照与分离)
 // ==========================================
 %hook PBUIWallpaperView
 
@@ -242,17 +248,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesEngineSubView");
     if (!engineView) {
-        // 创建独立实例，彻底分离锁屏和桌面！完美解决后台卡片错乱 Bug！
+        // 创建独立实例，彻底分离锁屏和桌面，防止后台卡片错乱
         engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.bounds];
         
-        // 判断当前这个视图是服务于锁屏(0)还是桌面(1)
         if ([self respondsToSelector:@selector(variant)]) {
             engineView.variant = [self variant];
         }
         
         objc_setAssociatedObject(self, "TendiesEngineSubView", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         
-        // 挂载到系统原生壁纸视图的最高层，坚决不隐藏原有视图
         [self addSubview:engineView];
         [engineView reloadWallpaperViews];
     }
@@ -265,25 +269,34 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 // 兼容老版本 iOS 14 / 15
 %hook SBFWallpaperView
+
 - (void)layoutSubviews {
     %orig;
     if (!g_enabled) return;
+    
     TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesEngineSubView");
     if (!engineView) {
         engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.bounds];
-        if ([self respondsToSelector:@selector(variant)]) engineView.variant = [self variant];
+        
+        if ([self respondsToSelector:@selector(variant)]) {
+            engineView.variant = [self variant];
+        }
+        
         objc_setAssociatedObject(self, "TendiesEngineSubView", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
         [self addSubview:engineView];
         [engineView reloadWallpaperViews];
     }
+    
     engineView.frame = self.bounds;
     [self bringSubviewToFront:engineView];
 }
+
 %end
 
 
 // ==========================================
-// 6. 核心修复 3：背光监听器，解决“必须触摸才亮”的 Bug
+// 6. 背光监听器，解决“必须触摸才亮”的 Bug
 // ==========================================
 %hook SBBacklightController
 
@@ -295,7 +308,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             if (g_isScreenOn) {
-                // 屏幕点亮的瞬间，发布强力唤醒广播！
+                // 屏幕点亮的瞬间，发布强力唤醒广播
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineWakeUp" object:nil];
                 });
