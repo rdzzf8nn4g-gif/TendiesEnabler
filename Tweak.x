@@ -74,7 +74,7 @@ static BOOL g_isScreenOn = YES;
 static double g_lockProgress = 0.0;
 
 static BOOL TendiesShouldHideNativeWallpaperLayers(void) {
-    return (g_lockProgress <= 0.02 || g_lockProgress >= 0.98);
+    return YES;
 }
 
 static void reloadPrefs() {
@@ -397,7 +397,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -422,7 +422,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 不再强行干掉系统磨砂层，让锁屏下拉过程保持原生透明磨砂效果
+// 2. 保留系统原生磨砂/透明过渡，不强制隐藏
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -452,15 +452,6 @@ static void EnsureEngineViewIsMounted() {
     if (floatingLayer) {
         floatingLayer.alpha = 0.0;
         floatingLayer.hidden = YES;
-    }
-    if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
-        @try {
-            UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
-            if (dimmingLayer) {
-                dimmingLayer.alpha = 0.0;
-                dimmingLayer.hidden = YES;
-            }
-        } @catch (NSException *e) {}
     }
 }
 
@@ -517,7 +508,7 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 动画进度获取及快照拦截 (完全恢复你的初版，仅仅通过通知抛给 Parser 运算)
+// 动画进度获取及快照拦截
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -547,7 +538,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步 (未变动)
+// 亮灭屏与锁屏状态同步
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
