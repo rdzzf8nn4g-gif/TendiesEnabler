@@ -227,6 +227,26 @@ static BOOL g_isMountingEngine = NO;
 // ==========================================
 // 工具函数 (精准外科手术打击，保留系统模糊)
 // ==========================================
+static void TendiesHideLayerTree(CALayer *layer) {
+    if (!layer) return;
+    layer.hidden = YES;
+    layer.opacity = 0.0;
+    for (CALayer *sub in layer.sublayers) {
+        TendiesHideLayerTree(sub);
+    }
+}
+
+static void TendiesHideViewTree(UIView *view) {
+    if (!view) return;
+    view.hidden = YES;
+    view.alpha = 0.0;
+    view.layer.opacity = 0.0;
+    TendiesHideLayerTree(view.layer);
+    for (UIView *sub in view.subviews) {
+        TendiesHideViewTree(sub);
+    }
+}
+
 static id TendiesSafeValueForKey(id obj, NSString *key) {
     if (!obj || !key.length) return nil;
     @try {
@@ -261,9 +281,9 @@ static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
     g_isHidingNativeChrome = YES;
     @try {
         // [修复核心] 绝对不要碰 _dimmingView 和 _dimmingLayerView，保留下拉模糊
-        // [修复核心] 绝对不要把 _backgroundContentViewController.view 整体隐藏，它包含了底层模糊
+        // [修复核心] 绝对不要把 _backgroundContentViewController.view 整体隐藏，它可能影响结构
         
-        // 仅仅隐藏海报的浮动层(包含景深小组件等)
+        // 仅仅隐藏海报的浮动层(包含景深小组件等)，防止遮挡我们的前景
         @try {
             UIView *floatingLayer = TendiesSafeValueForKey(vc, @"_floatingLayerView");
             if (floatingLayer) {
@@ -288,7 +308,7 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
     }
 
     @try {
-        // 隐藏主屏幕的静态/动态壁纸容器
+        // 隐藏主屏幕的原生壁纸容器
         UIView *homeView = [vc homescreenWallpaperView];
         if (homeView) {
             homeView.hidden = YES;
@@ -315,15 +335,7 @@ static void TendiesHideBackgroundContentController(id vc) {
         return;
     }
 
-    // [修复核心] 只瞄准 presentationView 打击！它是承载 iOS16/17 Poster Scene 真实图像的元凶。
-    // 我们不动 backgroundContentView 和 wallpaperView，让系统的模糊正常运行。
-    @try {
-        UIView *pv = [vc valueForKey:@"presentationView"];
-        if (pv) {
-            pv.hidden = YES;
-            pv.alpha = 0.0;
-        }
-    } @catch (__unused NSException *e) {}
+    // [修复核心] 我们直接利用底层 Hook 彻底压制 CSBackgroundContentView，此处无需再暴力隐藏
 }
 
 static void TendiesHidePosterSwitcherController(id vc) {
@@ -444,7 +456,7 @@ static void TendiesHidePosterSwitcherController(id vc) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor clearColor]; // [修复核心] 不要设为纯黑，保证引擎底色透明，不阻挡更底层的模糊
+        self.backgroundColor = [UIColor clearColor]; // 保持透明，不遮挡底层模糊
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO;
         self.clipsToBounds = YES;
@@ -748,29 +760,33 @@ static void EnsureEngineViewIsMounted(void) {
 }
 
 // ==========================================
-// 强制压制原生壁纸闪现、恢复（核心新增）
+// 强制压制锁屏原生壁纸显示（最高权限锁死容器）
+// 这里仅 Hook 锁屏图像的真实容器，不干涉模糊引擎
 // ==========================================
-
-// [修改核心] 我们不再 Hook SBWallpaperEffectView，彻底释放它的模糊能力！
 
 %hook CSBackgroundContentView
 
-- (void)layoutSubviews {
-    %orig;
-    // 在系统每次刷新布局时，死死按住负责呈现图像的 presentationView
+- (void)setHidden:(BOOL)hidden {
     if (g_enabled) {
-        if ([self respondsToSelector:@selector(presentationView)]) {
-            UIView *pv = [self presentationView];
-            if (pv && !pv.hidden) {
-                pv.hidden = YES;
-                pv.alpha = 0.0;
-            }
-        }
+        %orig(YES);  // 永远强制隐藏锁屏海报层
+    } else {
+        %orig;
+    }
+}
+
+- (void)setAlpha:(CGFloat)alpha {
+    if (g_enabled) {
+        %orig(0.0);  // 永远强制透明
+    } else {
+        %orig;
     }
 }
 
 %end
 
+// ==========================================
+// 手势期间的守护Hook
+// ==========================================
 %hook SBCoverSheetSlidingViewController
 
 - (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
@@ -843,7 +859,6 @@ static void EnsureEngineViewIsMounted(void) {
 }
 
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
-    // 依然拦截它创建新的图像效果层，但已存在的系统级模糊层我们不动
     if (g_enabled) return nil;
     return %orig;
 }
@@ -1332,13 +1347,6 @@ static void EnsureEngineViewIsMounted(void) {
     TendiesHideCoverSheetChrome(self);
 }
 
-// [修复核心] 移除 setHidesDimmingLayer 的 Hook，原样放行，彻底还你原生黑色遮罩和模糊！
-/* - (void)setHidesDimmingLayer:(BOOL)layer {
-    if (g_enabled) { %orig(YES); } else { %orig; }
-    TendiesHideCoverSheetChrome(self);
-}
-*/
-
 - (void)requestIdleTimerResetForPoster {
     %orig;
     TendiesHideCoverSheetChrome(self);
@@ -1382,7 +1390,6 @@ static void EnsureEngineViewIsMounted(void) {
             void (^completionBlock)(void) = arg5;
             completionBlock();
         }
-        // 由于可能被后台调用，利用修复后的 EnsureEngineViewIsMounted 是安全的
         EnsureEngineViewIsMounted();
         return;
     }
