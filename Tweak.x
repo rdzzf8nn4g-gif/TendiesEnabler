@@ -11,7 +11,7 @@
 #endif
 
 // ==========================================
-// 💡 新增：用于拦截系统模糊过渡的结构体与头文件
+// 结构体与系统头文件声明
 // ==========================================
 typedef struct {
     long long x0;
@@ -25,18 +25,6 @@ typedef struct {
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
-
-static NSString * GetTendiesStorageDir() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
-#if __has_include(<roothide.h>)
-    return jbroot(base);
-#else
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
-        return [@"/var/jb" stringByAppendingPathComponent:base];
-    }
-    return base;
-#endif
-}
 
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
@@ -58,6 +46,25 @@ static NSString * GetTendiesStorageDir() {
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 @end
+
+@interface SBWallpaperEffectView : UIView
+@property (nonatomic) long long wallpaperStyle;
+@end
+
+// ==========================================
+// 全局变量与配置管理
+// ==========================================
+static NSString * GetTendiesStorageDir() {
+    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
+#if __has_include(<roothide.h>)
+    return jbroot(base);
+#else
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
+        return [@"/var/jb" stringByAppendingPathComponent:base];
+    }
+    return base;
+#endif
+}
 
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
@@ -83,7 +90,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (保留你完美的指尖跟踪动画)
+// 核心渲染引擎 (修复环境动画假死)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -94,6 +101,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSString *cachedBgPath;
 @property (nonatomic, strong) NSString *cachedFloatPath;
 @property (nonatomic, strong) NSString *cachedFgPath;
+@property (nonatomic, strong) NSString *currentState;
 
 - (void)reloadWallpaperViews;
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated;
@@ -111,6 +119,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
         self.isUnlocking = NO;
+        self.currentState = @"Init";
         
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(forceReload) name:@"TendiesEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"TendiesEngineWake" object:nil];
@@ -141,12 +150,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onWakeUp {
     if (!g_enabled) return;
-    self.layer.speed = 1.0;
-    if (self.bgView) self.bgView.layer.speed = 1.0;
-    if (self.floatingView) self.floatingView.layer.speed = 1.0;
-    if (self.fgView) self.fgView.layer.speed = 1.0;
     self.isUnlocking = NO;
-    
     [CATransaction begin];
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
     [CATransaction commit];
@@ -159,40 +163,20 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🎯 原封不动保留你的指尖跟踪时间轴逻辑
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     
-    if (progress > 0.01) {
+    // 手指只要滑动超过 5%，立刻利用 CAML 原生的 CASpringAnimation 触发阻尼进入桌面动画
+    if (progress > 0.05) {
         if (!self.isUnlocking) {
             self.isUnlocking = YES;
-            self.bgView.layer.speed = 0.0;
-            self.floatingView.layer.speed = 0.0;
-            self.fgView.layer.speed = 0.0;
-            
-            self.bgView.layer.beginTime = 0.0;
-            self.floatingView.layer.beginTime = 0.0;
-            self.fgView.layer.beginTime = 0.0;
-            
             [self transitionToState:@"Unlock" animated:YES];
         }
-        CFTimeInterval offset = progress * 0.8;
-        self.bgView.layer.timeOffset = offset;
-        self.floatingView.layer.timeOffset = offset;
-        self.fgView.layer.timeOffset = offset;
-        
     } else {
+        // 退回锁屏时，恢复锁定状态的弹簧形变
         if (self.isUnlocking) {
             self.isUnlocking = NO;
-            self.bgView.layer.speed = 1.0;
-            self.floatingView.layer.speed = 1.0;
-            self.fgView.layer.speed = 1.0;
-            
-            self.bgView.layer.timeOffset = 0.0;
-            self.floatingView.layer.timeOffset = 0.0;
-            self.fgView.layer.timeOffset = 0.0;
-            
             [self transitionToState:@"Locked" animated:YES];
         }
     }
@@ -200,6 +184,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
+    if ([self.currentState isEqualToString:stateName]) return; // 状态锁：防止重复下发导致动画闪烁
+    self.currentState = [stateName copy];
+    
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated];
         [self.floatingView setState:stateName animated:animated];
@@ -209,53 +196,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:stateName];
         [self.fgView setState:stateName];
     }
-}
-
-// 💡 核心修改 1：解析 Wallpaper.plist 准确读取联动文件
-- (void)parseWallpaperPlist {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *plistPath = nil;
-    
-    // 递归寻找 Wallpaper.plist
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:g_tendiesPath];
-    for (NSString *file in enumerator) {
-        if ([file.lastPathComponent isEqualToString:@"Wallpaper.plist"]) {
-            plistPath = [g_tendiesPath stringByAppendingPathComponent:file];
-            break;
-        }
-    }
-    
-    if (plistPath && [fm fileExistsAtPath:plistPath]) {
-        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-        NSDictionary *defaultAssets = dict[@"assets"][@"lockAndHome"][@"default"];
-        if (defaultAssets) {
-            NSString *baseDir = [plistPath stringByDeletingLastPathComponent];
-            NSString *bgName = defaultAssets[@"backgroundAnimationFileName"];
-            NSString *floatName = defaultAssets[@"floatingAnimationFileNameKey"] ?: defaultAssets[@"floatingAnimationFileName"];
-            NSString *fgName = defaultAssets[@"foregroundAnimationFileName"];
-            
-            if (bgName) self.cachedBgPath = [baseDir stringByAppendingPathComponent:bgName];
-            if (floatName) self.cachedFloatPath = [baseDir stringByAppendingPathComponent:floatName];
-            if (fgName) self.cachedFgPath = [baseDir stringByAppendingPathComponent:fgName];
-            
-            self.isPathCached = YES;
-            return;
-        }
-    }
-    
-    // 回退到你原来的名字遍历逻辑，防止不合规的壁纸包失效
-    NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil];
-    for (NSURL *fileURL in dirEnum) {
-        NSString *pathString = fileURL.path;
-        NSString *fileName = fileURL.lastPathComponent;
-        if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
-        if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
-            if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) self.cachedBgPath = [pathString copy];
-            else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) self.cachedFloatPath = [pathString copy];
-            else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) self.cachedFgPath = [pathString copy];
-        }
-    }
-    self.isPathCached = YES;
 }
 
 - (void)reloadWallpaperViews {
@@ -273,7 +213,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         @synchronized(self) {
             if (!self.isPathCached) {
-                [self parseWallpaperPlist]; // 💡 替换原来的解析方法
+                NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil];
+                for (NSURL *fileURL in dirEnum) {
+                    NSString *pathString = fileURL.path;
+                    NSString *fileName = fileURL.lastPathComponent;
+                    if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
+                    if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
+                        if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) self.cachedBgPath = [pathString copy];
+                        else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) self.cachedFloatPath = [pathString copy];
+                        else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) self.cachedFgPath = [pathString copy];
+                    }
+                }
+                self.isPathCached = YES;
             }
         }
 
@@ -285,20 +236,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             if (!PackageViewClass) return;
 
-            if (self.cachedBgPath && [fm fileExistsAtPath:self.cachedBgPath]) {
+            if (self.cachedBgPath) {
                 self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedBgPath]];
                 [self addSubview:self.bgView];
             }
-            if (self.cachedFloatPath && [fm fileExistsAtPath:self.cachedFloatPath]) {
+            if (self.cachedFloatPath) {
                 self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFloatPath]];
                 [self addSubview:self.floatingView];
             }
-            if (self.cachedFgPath && [fm fileExistsAtPath:self.cachedFgPath]) {
+            if (self.cachedFgPath) {
                 self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFgPath]];
                 [self addSubview:self.fgView];
             }
             [self setNeedsLayout];
             
+            self.currentState = @"Init";
             [CATransaction begin];
             [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
             [CATransaction commit];
@@ -310,15 +262,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 挂载核心引擎 (绝对保留原版的全局底层挂载，保证不黑屏)
+// 挂载核心引擎到 Window 最顶层
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
-    // 原汁原味保留：挂在底层容器上
-    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperOverlayContainerView"];
+    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
     if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
     if (!targetContainer) return;
     
@@ -340,14 +291,14 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 🚨 核心修改 2：拦截导致遮挡系统原生的视图 (防原壁纸漏底/景深遮挡)
+// 🚨 终极拦截：消灭原生海报与滑动模糊层 (iOS 16/17 核心修复)
 // ==========================================
 
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        // 让 PBUI 的原生壁纸变成全透明，引擎在它后面就能显露出来
         if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
             UIView *homeView = [self homescreenWallpaperView];
             if (homeView) homeView.alpha = 0.0;
@@ -358,7 +309,6 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
-// 阻止过渡截屏
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
@@ -369,25 +319,98 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+// 2. 干掉滑动时的系统高斯模糊过渡层 (SBWallpaperEffectView)
+%hook SBWallpaperEffectView
+- (void)layoutSubviews {
+    %orig;
+    if (g_enabled) {
+        self.hidden = YES;
+        self.alpha = 0.0;
+    }
+}
+- (void)setAlpha:(double)alpha {
+    if (g_enabled) {
+        %orig(0.0);
+    } else {
+        %orig;
+    }
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) {
+        %orig(YES);
+    } else {
+        %orig;
+    }
+}
+%end
 
-// 拦截 CoverSheet 背景的海报 (滑动时漏出来的就是它) 和时间景深遮挡层
+// 3. 暴力拦截 CoverSheet (锁屏) 的所有后台视图滚动刷新事件
 %hook CSCoverSheetViewController
+
+// 提取强制隐藏原生壁纸层的方法
+%new
+- (void)tendies_forceHideNativeWallpaperLayers {
+    // 隐藏背景海报
+    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+    if (bgVC && bgVC.view) {
+        bgVC.view.alpha = 0.0;
+        bgVC.view.hidden = YES;
+    }
+    
+    // 隐藏景深悬浮层
+    UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+    if (floatingLayer) {
+        floatingLayer.alpha = 0.0;
+        floatingLayer.hidden = YES;
+    }
+    
+    // 隐藏 iOS 17 的暗化层 (Dimming Layer)
+    if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
+        @try {
+            UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
+            if (dimmingLayer) {
+                dimmingLayer.alpha = 0.0;
+                dimmingLayer.hidden = YES;
+            }
+        } @catch (NSException *e) {}
+    }
+}
+
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
-        // 透明化独立锁屏海报
-        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-        if (bgVC && bgVC.view) {
-            bgVC.view.alpha = 0.0;
-        }
-        
-        // 透明化景深特效的悬浮遮挡层
-        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-        if (floatingLayer) {
-            floatingLayer.alpha = 0.0;
-        }
+        [self tendies_forceHideNativeWallpaperLayers];
     }
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (g_enabled) {
+        [self tendies_forceHideNativeWallpaperLayers];
+    }
+}
+
+// 🎯 核心拦截：阻止系统通过 ScrollView 联动恢复原生海报的 Alpha 值
+- (void)_updateBackgroundContentView {
+    %orig;
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
+}
+
+- (void)_updateWallpaperEffectView {
+    %orig;
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
+}
+
+- (void)_updateWallpaper {
+    %orig;
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
+}
+
+// 🎯 防止海报快照闪现 (如果在 iOS 17 由 CoverSheet 管理的话)
+- (void)updatePosterSwitcherSnapshots {
+    if (g_enabled) return;
+    %orig;
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
@@ -414,9 +437,10 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 快照拦截与进度分发
+// 动画进度获取及快照拦截
 // ==========================================
 %hook SBWallpaperController
+// 防止快照漏底 (兼容 iOS 16 早期的快照入口)
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
         if (arg5) {
@@ -429,7 +453,8 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)updatePosterSwitcherSnapshots {
-    if (!g_enabled) %orig;
+    if (g_enabled) return;
+    %orig;
 }
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
@@ -487,6 +512,10 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+
+// ==========================================
+// 构造函数
+// ==========================================
 %ctor {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
