@@ -22,7 +22,6 @@ typedef struct {
 @interface PBUIWallpaperViewController : UIViewController
 @property (retain, nonatomic) UIView *homescreenWallpaperView;
 @property (retain, nonatomic) UIView *lockscreenWallpaperView;
-- (void)tendies_applyHomescreenModifications;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -36,15 +35,9 @@ typedef struct {
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
 @end
 
-@interface SBBacklightController : NSObject
-+ (id)sharedInstance;
-@property (readonly, nonatomic) long long backlightState;
-@end
-
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
-- (void)tendies_applyLockscreenModifications;
 @end
 
 // ==========================================
@@ -86,7 +79,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (双引擎独立架构)
+// 核心渲染引擎 (双引擎架构)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, assign) NSInteger engineType; // 0 = 锁屏引擎, 1 = 桌面引擎
@@ -112,7 +105,7 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor blackColor]; 
+        self.backgroundColor = [UIColor blackColor]; // 💡 纯黑背景，物理遮挡原生海报！
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -150,7 +143,7 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 
 - (void)onWakeUp {
     if (!g_enabled) return;
-    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略一切亮屏事件
+    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略亮屏事件
     
     self.isUnlocking = g_isUnlocked;
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
@@ -158,7 +151,7 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 
 - (void)onSleep {
     if (!g_enabled) return;
-    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略一切灭屏事件
+    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略灭屏事件
     
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:NO];
@@ -166,7 +159,7 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 
 - (void)onStateChange:(NSNotification *)note {
     if (!g_enabled) return;
-    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略状态广播
+    if (self.engineType == 1) return; // 💡 桌面引擎忽略状态广播
     
     NSString *state = note.userInfo[@"state"];
     self.isUnlocking = [state isEqualToString:@"Unlock"];
@@ -175,7 +168,7 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
-    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略滑动
+    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略滑动阻尼
     
     double progress = [note.userInfo[@"progress"] doubleValue];
     
@@ -192,11 +185,11 @@ static TendiesRenderEngineView *g_lockEngine = nil;
     }
 }
 
-// 🎯 核心修复：状态强制拦截与动画强制包裹
+// 🎯 终极修复：用 UIView Spring 弹簧动画强行接管一切！解决假渐变！
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
     
-    // ⚠️ 终极必杀技：只要你是桌面引擎，你的状态就只能是 Unlock，绝对不允许变成 Locked！
+    // ⚠️ 桌面引擎永远锁死在 Unlock 状态，绝不变成锁屏样式！
     if (self.engineType == 1) {
         stateName = @"Unlock"; 
     }
@@ -205,21 +198,22 @@ static TendiesRenderEngineView *g_lockEngine = nil;
     self.currentState = [stateName copy];
     
     if (animated) {
-        [CATransaction begin];
-        // 强制 0.8s 弹性动画，逼迫系统对所有图层进行位移和缩放！
-        [CATransaction setAnimationDuration:0.8];
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
-        
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:stateName animated:NO];
-            [self.floatingView setState:stateName animated:NO];
-            [self.fgView setState:stateName animated:NO];
-        } else {
-            [self.bgView setState:stateName];
-            [self.floatingView setState:stateName];
-            [self.fgView setState:stateName];
-        }
-        [CATransaction commit];
+        // 强制使用 0.8s 时长的原生弹性阻尼动画包裹
+        [UIView animateWithDuration:0.8 delay:0.0 usingSpringWithDamping:0.8 initialSpringVelocity:0.2 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+            
+            // 传入 animated:YES，结合外层的 UIView 动画块，系统会自动计算所有位移和缩放！
+            if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+                [self.bgView setState:stateName animated:YES];
+                [self.floatingView setState:stateName animated:YES];
+                [self.fgView setState:stateName animated:YES];
+            } else {
+                [self.bgView setState:stateName];
+                [self.floatingView setState:stateName];
+                [self.fgView setState:stateName];
+            }
+            [self layoutIfNeeded]; // 强制刷新渲染
+            
+        } completion:nil];
     } else {
         if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
             [self.bgView setState:stateName animated:NO];
@@ -257,7 +251,6 @@ static TendiesRenderEngineView *g_lockEngine = nil;
             if (bgName) self.cachedBgPath = [baseDir stringByAppendingPathComponent:bgName];
             if (floatName) self.cachedFloatPath = [baseDir stringByAppendingPathComponent:floatName];
             if (fgName) self.cachedFgPath = [baseDir stringByAppendingPathComponent:fgName];
-            
             self.isPathCached = YES;
             return;
         }
@@ -316,7 +309,7 @@ static TendiesRenderEngineView *g_lockEngine = nil;
             }
             [self setNeedsLayout];
             
-            // 💡 初始化时强制转换
+            // 💡 初始化时：桌面引擎强行设置为 Unlock，锁屏引擎根据当前状态设置
             self.currentState = @"Init";
             if (self.engineType == 1) {
                 [self transitionToState:@"Unlock" animated:NO]; 
@@ -330,51 +323,30 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 
 
 // ==========================================
-// 🚀 终极精密挂载：防漏底、防错乱、防透视
+// 🚀 终极精密挂载：防漏底、防透视、绝对显示！
 // ==========================================
 
-// 1. 桌面引擎：挂载在 PBUIWallpaperViewController
+// 1. 桌面引擎：挂载在系统的 homescreenWallpaperView 上
 %hook PBUIWallpaperViewController
-%new
-- (void)tendies_applyHomescreenModifications {
+- (void)viewWillLayoutSubviews {
+    %orig;
     if (!g_enabled) return;
-    UIView *homeView = [self respondsToSelector:@selector(homescreenWallpaperView)] ? [self homescreenWallpaperView] : nil;
     
+    UIView *homeView = [self respondsToSelector:@selector(homescreenWallpaperView)] ? [self homescreenWallpaperView] : nil;
     if (homeView) {
         if (!g_homeEngine) {
             g_homeEngine = [[TendiesRenderEngineView alloc] initWithFrame:homeView.bounds];
-            g_homeEngine.engineType = 1; // 💡 我是桌面！
+            g_homeEngine.engineType = 1; // 💡 身份：桌面引擎
             [g_homeEngine reloadWallpaperViews];
         }
         if (g_homeEngine.superview != homeView) {
             [homeView addSubview:g_homeEngine];
         }
         g_homeEngine.frame = homeView.bounds;
-        
-        // 屏蔽桌面原生的杂碎视图
-        for (UIView *sub in homeView.subviews) {
-            if (sub != g_homeEngine) {
-                sub.hidden = YES;
-                sub.alpha = 0.0;
-            }
-        }
-        [homeView bringSubviewToFront:g_homeEngine];
-    }
-    
-    // 顺手静音 PBUI 的锁屏视图（如果有的话），防止重叠
-    UIView *lockView = [self respondsToSelector:@selector(lockscreenWallpaperView)] ? [self lockscreenWallpaperView] : nil;
-    if (lockView) {
-        lockView.hidden = YES;
-        lockView.alpha = 0.0;
+        [homeView bringSubviewToFront:g_homeEngine]; // 覆盖掉系统自带图片
     }
 }
-
-- (void)viewWillLayoutSubviews {
-    %orig;
-    [self tendies_applyHomescreenModifications];
-}
-
-// 阻止过渡截屏
+// 阻止过渡时的残影截屏
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
@@ -386,17 +358,17 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 %end
 
 
-// 2. 锁屏引擎：挂载在 CoverSheet 内部 (完全防漏底)
+// 2. 锁屏引擎：挂载在 CoverSheet 内部的背景上 (物理遮挡法，最安全)
 %hook CSCoverSheetViewController
-%new
-- (void)tendies_applyLockscreenModifications {
+- (void)viewWillLayoutSubviews {
+    %orig;
     if (!g_enabled) return;
 
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
     if (bgVC && bgVC.view) {
         if (!g_lockEngine) {
             g_lockEngine = [[TendiesRenderEngineView alloc] initWithFrame:bgVC.view.bounds];
-            g_lockEngine.engineType = 0; // 💡 我是锁屏！
+            g_lockEngine.engineType = 0; // 💡 身份：锁屏引擎
             [g_lockEngine reloadWallpaperViews];
         }
         if (g_lockEngine.superview != bgVC.view) {
@@ -404,53 +376,22 @@ static TendiesRenderEngineView *g_lockEngine = nil;
         }
         g_lockEngine.frame = bgVC.view.bounds;
         
-        // 🎯 地毯式防漏底：遍历 bgVC 内部所有子视图
-        // 强行把系统动态生成的原生海报和快照隐藏，只保留我们的 LockEngine！
-        for (UIView *sub in bgVC.view.subviews) {
-            if (sub != g_lockEngine) {
-                sub.hidden = YES;
-                sub.alpha = 0.0;
-            }
-        }
-        // 确保引擎绝对可见，没被系统误伤
-        g_lockEngine.hidden = NO;
-        g_lockEngine.alpha = 1.0;
+        // 🎯 核心逻辑：直接把我们的黑底引擎推到最顶层，当做一块幕布
+        // 物理遮挡住后面的系统原生海报，再也不用去修改系统容器的 alpha 导致崩溃！
         [bgVC.view bringSubviewToFront:g_lockEngine];
     }
     
-    // 隐藏碍事的景深特效遮挡，但**绝不隐藏**毛玻璃效果 (SBWallpaperEffectView)
+    // 景深特效层会挡住我们，这个必须透明化
     UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
     if (floatingLayer) {
-        floatingLayer.hidden = YES;
         floatingLayer.alpha = 0.0;
     }
 }
 
-- (void)viewWillLayoutSubviews {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
+- (void)viewDidLayoutSubviews { %orig; [self viewWillLayoutSubviews]; }
+- (void)_updateBackgroundContentView { %orig; [self viewWillLayoutSubviews]; }
 
-- (void)viewDidLayoutSubviews {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-
-// ⚠️ 只要系统敢在滑动时刷新背景，立刻再次镇压原生快照！
-- (void)_updateBackgroundContentView {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-- (void)_updateWallpaperEffectView {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-- (void)_updateWallpaper {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-
-// 彻底切断原生海报产生快照的根源
+// 防止截取原生快照闪烁
 - (void)updatePosterSwitcherSnapshots {
     if (g_enabled) return;
     %orig;
@@ -467,7 +408,7 @@ static TendiesRenderEngineView *g_lockEngine = nil;
 }
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
-    g_isUnlocked = dismissed; // 记录状态
+    g_isUnlocked = dismissed; // 记录最新状态
     if (g_enabled && g_isScreenOn) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         dispatch_async(dispatch_get_main_queue(), ^{
