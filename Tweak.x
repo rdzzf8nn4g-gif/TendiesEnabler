@@ -45,6 +45,7 @@ typedef struct {
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
+- (void)tendies_forceHideNativeWallpaperLayers; // 💡 加上这行声明，骗过编译器
 @end
 
 @interface SBWallpaperEffectView : UIView
