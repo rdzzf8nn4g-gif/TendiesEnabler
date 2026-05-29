@@ -228,7 +228,7 @@ static BOOL g_isHidingNativeChrome = NO;
 static BOOL g_isMountingEngine = NO;
 
 // ==========================================
-// 工具函数
+// 工具函数 (增加主线程保护)
 // ==========================================
 static void TendiesHideLayerTree(CALayer *layer) {
     if (!layer) return;
@@ -271,8 +271,16 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
     if (!g_enabled || !vc) return;
+    
+    // UI操作必须在主线程，防崩溃核心
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TendiesHideCoverSheetChrome(vc);
+        });
+        return;
+    }
+    
     if (g_isHidingNativeChrome) return;
-
     g_isHidingNativeChrome = YES;
     @try {
         @try {
@@ -321,6 +329,14 @@ static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
 
 static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
     if (!g_enabled || !vc) return;
+    
+    // 强制主线程
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TendiesHidePBWallpaperViews(vc);
+        });
+        return;
+    }
 
     @try {
         UIView *homeView = [vc homescreenWallpaperView];
@@ -335,6 +351,14 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
 
 static void TendiesHideBackgroundContentController(id vc) {
     if (!g_enabled || !vc) return;
+
+    // 强制主线程
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TendiesHideBackgroundContentController(vc);
+        });
+        return;
+    }
 
     @try {
         if ([vc respondsToSelector:@selector(view)]) {
@@ -361,6 +385,14 @@ static void TendiesHideBackgroundContentController(id vc) {
 
 static void TendiesHidePosterSwitcherController(id vc) {
     if (!g_enabled || !vc) return;
+
+    // 强制主线程
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TendiesHidePosterSwitcherController(vc);
+        });
+        return;
+    }
 
     @try {
         UIView *bg = [vc valueForKey:@"coverSheetBackgroundView"];
@@ -734,14 +766,22 @@ static void TendiesHidePosterSwitcherController(id vc) {
 @end
 
 // ==========================================
-// 挂载引擎视图
+// 挂载引擎视图 (加入主线程保护)
 // ==========================================
 static char kGlobalTendiesEngineKey;
 
 static void EnsureEngineViewIsMounted(void) {
     if (!g_enabled) return;
+    
+    // UI操作必须在主线程，防崩溃核心
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            EnsureEngineViewIsMounted();
+        });
+        return;
+    }
+    
     if (g_isMountingEngine) return;
-
     g_isMountingEngine = YES;
     @try {
         id wallpaperController = [%c(SBWallpaperController) sharedInstance];
@@ -1429,6 +1469,7 @@ static void EnsureEngineViewIsMounted(void) {
             void (^completionBlock)(void) = arg5;
             completionBlock();
         }
+        // 由于可能被后台调用，利用修复后的 EnsureEngineViewIsMounted 是安全的
         EnsureEngineViewIsMounted();
         return;
     }
