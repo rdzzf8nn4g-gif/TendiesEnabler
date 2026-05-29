@@ -43,6 +43,8 @@ typedef struct {
 @end
 
 @interface CSCoverSheetViewController : UIViewController
+@property (nonatomic, assign) BOOL dismissed; // 修复编译报错：声明属性
+- (BOOL)dismissed;                            // 修复编译报错：声明 Getter
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 - (void)tendies_forceHideNativeWallpaperLayers; 
@@ -184,7 +186,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor blackColor]; 
+        self.backgroundColor = [UIColor clearColor]; // 优化为透明，防止边缘黑边
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
