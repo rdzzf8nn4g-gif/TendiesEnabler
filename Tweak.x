@@ -50,6 +50,9 @@ typedef struct {
 @property (nonatomic) long long wallpaperStyle;
 @end
 
+@interface CSBackgroundContentView : UIView
+@end
+
 @interface CSBackgroundContentViewController : UIViewController
 @property (readonly, nonatomic) UIView *backgroundContentView;
 @property (readonly, nonatomic) UIView *presentationView;
@@ -164,6 +167,10 @@ typedef struct {
 - (void)viewDidLoad;
 - (void)loadView;
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator;
+@end
+
+@interface SBCoverSheetSlidingViewController : UIViewController
+- (id)contentViewController;
 @end
 
 // ==========================================
@@ -771,6 +778,85 @@ static void EnsureEngineViewIsMounted(void) {
         g_isMountingEngine = NO;
     }
 }
+
+// ==========================================
+// 强制压制原生壁纸闪现、恢复（核心新增）
+// ==========================================
+
+%hook SBWallpaperEffectView
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) {
+        %orig(YES);
+    } else {
+        %orig;
+    }
+}
+- (void)setAlpha:(CGFloat)alpha {
+    if (g_enabled) {
+        %orig(0.0);
+    } else {
+        %orig;
+    }
+}
+%end
+
+%hook CSBackgroundContentView
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) {
+        %orig(YES);
+    } else {
+        %orig;
+    }
+}
+- (void)setAlpha:(CGFloat)alpha {
+    if (g_enabled) {
+        %orig(0.0);
+    } else {
+        %orig;
+    }
+}
+%end
+
+%hook SBCoverSheetSlidingViewController
+
+- (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    CGRect result = %orig;
+    if (g_enabled) {
+        EnsureEngineViewIsMounted();
+    }
+    return result;
+}
+
+- (CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
+    CGRect result = %orig;
+    if (g_enabled) {
+        EnsureEngineViewIsMounted();
+    }
+    return result;
+}
+
+- (void)_dismissGestureChangedWithGestureRecognizer:(id)recognizer {
+    %orig;
+    if (g_enabled) {
+        id coverSheetVC = [self contentViewController];
+        if ([coverSheetVC isKindOfClass:%c(CSCoverSheetViewController)]) {
+            TendiesHideCoverSheetChrome(coverSheetVC);
+        }
+    }
+}
+
+- (void)_presentOrDismissGestureChangedWithGestureRecognizer:(id)recognizer {
+    %orig;
+    if (g_enabled) {
+        id coverSheetVC = [self contentViewController];
+        if ([coverSheetVC isKindOfClass:%c(CSCoverSheetViewController)]) {
+            TendiesHideCoverSheetChrome(coverSheetVC);
+        }
+    }
+}
+
+%end
+
 
 // ==========================================
 // PBUIWallpaperViewController
