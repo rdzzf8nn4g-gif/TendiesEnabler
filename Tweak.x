@@ -67,7 +67,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (修复指尖跟踪动画)
+// 核心渲染引擎 (修复环境动画假死)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -78,6 +78,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSString *cachedBgPath;
 @property (nonatomic, strong) NSString *cachedFloatPath;
 @property (nonatomic, strong) NSString *cachedFgPath;
+@property (nonatomic, strong) NSString *currentState;
 
 - (void)reloadWallpaperViews;
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated;
@@ -95,6 +96,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
         self.isUnlocking = NO;
+        self.currentState = @"Init";
         
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(forceReload) name:@"TendiesEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"TendiesEngineWake" object:nil];
@@ -125,12 +127,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onWakeUp {
     if (!g_enabled) return;
-    self.layer.speed = 1.0;
-    if (self.bgView) self.bgView.layer.speed = 1.0;
-    if (self.floatingView) self.floatingView.layer.speed = 1.0;
-    if (self.fgView) self.fgView.layer.speed = 1.0;
     self.isUnlocking = NO;
-    
     [CATransaction begin];
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
     [CATransaction commit];
@@ -143,43 +140,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🎯 完美修复指尖跟踪！
+// 🎯 修复：不再强行暂停时间轴，保留马里奥的走路动画！使用阻尼触发！
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     
-    if (progress > 0.01) {
+    // 手指只要滑动超过 5%，立刻利用 CAML 原生的 CASpringAnimation 触发阻尼进入桌面动画
+    if (progress > 0.05) {
         if (!self.isUnlocking) {
             self.isUnlocking = YES;
-            // 先将时间轴归零冻结，再派发动画指令
-            self.bgView.layer.speed = 0.0;
-            self.floatingView.layer.speed = 0.0;
-            self.fgView.layer.speed = 0.0;
-            
-            self.bgView.layer.beginTime = 0.0;
-            self.floatingView.layer.beginTime = 0.0;
-            self.fgView.layer.beginTime = 0.0;
-            
             [self transitionToState:@"Unlock" animated:YES];
         }
-        // 映射 CAML 弹簧动画进度 (0.8s 为主轴)
-        CFTimeInterval offset = progress * 0.8;
-        self.bgView.layer.timeOffset = offset;
-        self.floatingView.layer.timeOffset = offset;
-        self.fgView.layer.timeOffset = offset;
-        
     } else {
+        // 退回锁屏时，恢复锁定状态的弹簧形变
         if (self.isUnlocking) {
             self.isUnlocking = NO;
-            // 恢复时间流速，归位 Locked
-            self.bgView.layer.speed = 1.0;
-            self.floatingView.layer.speed = 1.0;
-            self.fgView.layer.speed = 1.0;
-            
-            self.bgView.layer.timeOffset = 0.0;
-            self.floatingView.layer.timeOffset = 0.0;
-            self.fgView.layer.timeOffset = 0.0;
-            
             [self transitionToState:@"Locked" animated:YES];
         }
     }
@@ -187,6 +162,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
+    if ([self.currentState isEqualToString:stateName]) return; // 状态锁：防止重复下发导致动画闪烁
+    self.currentState = [stateName copy];
+    
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated];
         [self.floatingView setState:stateName animated:animated];
@@ -250,6 +228,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
             [self setNeedsLayout];
             
+            self.currentState = @"Init";
             [CATransaction begin];
             [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
             [CATransaction commit];
@@ -261,15 +240,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 挂载核心引擎
+// 挂载核心引擎到 Window 最顶层
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
-    // 注入到绝对顶层的覆盖容器中
-    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperOverlayContainerView"];
+    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
     if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
     if (!targetContainer) return;
     
@@ -289,31 +267,7 @@ static void EnsureEngineViewIsMounted() {
     [targetContainer bringSubviewToFront:engineView];
 }
 
-
-// ==========================================
-// 🚨 快照杀手：拦截导致覆盖的系统原生截图
-// ==========================================
 %hook SBWallpaperController
-
-// 拦截系统强行铺上的 IOSurface 截图！
-- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
-    if (g_enabled) {
-        // 直接欺骗系统：快照加载完成，但什么也不渲染！
-        if (arg5) {
-            void (^completionBlock)(void) = arg5;
-            completionBlock();
-        }
-        return; 
-    }
-    %orig;
-}
-
-// 拦截后台多任务卡片的快照覆盖
-- (void)updatePosterSwitcherSnapshots {
-    if (!g_enabled) %orig;
-}
-
-// 传递滑动精度
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     EnsureEngineViewIsMounted();
@@ -330,13 +284,28 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     EnsureEngineViewIsMounted();
 }
+- (void)setInScreenOffMode:(BOOL)mode {
+    %orig;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
+- (void)setDismissed:(BOOL)dismissed {
+    %orig;
+    g_isUnlocked = dismissed;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
 %end
 
-// ==========================================
-// 亮灭屏与锁屏状态同步
-// ==========================================
 %hook SBBacklightController
-
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
     if (g_enabled) {
@@ -355,7 +324,6 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
-
 - (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
@@ -372,30 +340,6 @@ static void EnsureEngineViewIsMounted() {
                 });
             }
         }
-    }
-}
-
-%end
-
-%hook CSCoverSheetViewController
-- (void)setInScreenOffMode:(BOOL)mode {
-    %orig;
-    if (g_enabled && g_isScreenOn) {
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
-        });
-    }
-}
-
-- (void)setDismissed:(BOOL)dismissed {
-    %orig;
-    g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn) {
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
-        });
     }
 }
 %end
