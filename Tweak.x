@@ -22,7 +22,6 @@ typedef struct {
 @interface PBUIWallpaperViewController : UIViewController
 @property (retain, nonatomic) UIView *homescreenWallpaperView;
 @property (retain, nonatomic) UIView *lockscreenWallpaperView;
-- (void)tendies_applyHomescreenModifications;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -42,7 +41,8 @@ typedef struct {
 @end
 
 @interface CSCoverSheetViewController : UIViewController
-- (void)tendies_applyLockscreenModifications;
+- (void)setInScreenOffMode:(BOOL)mode; 
+- (void)setDismissed:(BOOL)dismissed;
 @end
 
 // ==========================================
@@ -84,7 +84,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (双引擎分离架构)
+// 核心渲染引擎 (双引擎架构)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, assign) NSInteger engineType; // 0 = 锁屏引擎, 1 = 桌面引擎
@@ -102,6 +102,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated;
 @end
 
+// 声明全局双引擎指针
+static TendiesRenderEngineView *g_homeEngine = nil;
+static TendiesRenderEngineView *g_lockEngine = nil;
+
 @implementation TendiesRenderEngineView
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -112,12 +116,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.isPathCached = NO;
         self.isUnlocking = NO;
         self.currentState = @"Init";
-        self.engineType = 0; // 默认是锁屏
+        self.engineType = 0; // 默认锁屏
         
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(forceReload) name:@"TendiesEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"TendiesEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"TendiesEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"TendiesEngineProgress" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"TendiesEngineStateChange" object:nil];
     }
     return self;
 }
@@ -143,9 +148,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onWakeUp {
     if (!g_enabled) return;
-    if (self.engineType == 1) return; // 💡 桌面引擎不参与亮屏动画，永远保持 Unlock
+    if (self.engineType == 1) return; // 💡 桌面引擎永远不动，忽略唤醒事件
     
-    self.isUnlocking = NO;
+    self.isUnlocking = g_isUnlocked;
     [CATransaction begin];
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
     [CATransaction commit];
@@ -154,16 +159,26 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onSleep {
     if (!g_enabled) return;
-    if (self.engineType == 1) return; // 💡 桌面引擎不参与灭屏动画
+    if (self.engineType == 1) return; // 💡 桌面引擎忽略睡眠事件
     
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🎯 只允许锁屏引擎跟踪滑动阻尼
+// 🎯 接收由 setDismissed 转发来的硬性状态切换
+- (void)onStateChange:(NSNotification *)note {
+    if (!g_enabled) return;
+    if (self.engineType == 1) return; // 💡 桌面引擎永远处于 Unlock 状态
+    
+    NSString *state = note.userInfo[@"state"];
+    self.isUnlocking = [state isEqualToString:@"Unlock"];
+    [self transitionToState:state animated:YES];
+}
+
+// 🎯 仅锁屏引擎跟踪滑动阻尼
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
-    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略一切锁屏滑动
+    if (self.engineType == 1) return; // 💡 桌面引擎直接忽略滑动，防止错乱
     
     double progress = [note.userInfo[@"progress"] doubleValue];
     
@@ -180,7 +195,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 🎯 核心修复：CATransaction 强制接管动画属性，彻底消灭“假渐变”
+// 🎯 核心修复 1：剥夺系统权限，强制用 CATransaction 补齐位移与缩放动画！
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
     if ([self.currentState isEqualToString:stateName]) return;
@@ -188,11 +203,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     if (animated) {
         [CATransaction begin];
-        // 设置 0.8s 匹配 WWDC 官方 CAML 的时长
+        // 强制 0.8s 弹性时长，完美修复“只有透明度渐变”的残缺效果！
         [CATransaction setAnimationDuration:0.8];
         [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
         
-        // ⚠️ 传入 animated:NO 阻止包内部不完整的动画，让 CATransaction 强制动画所有属性(坐标、缩放等)
+        // ⚠️ 传入 animated:NO 阻止内部自带的烂动画，让我们的 CATransaction 强制接管 position 和 bounds！
         if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
             [self.bgView setState:stateName animated:NO];
             [self.floatingView setState:stateName animated:NO];
@@ -216,7 +231,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 🎯 精确读取 Wallpaper.plist 实现多层 CA 完美挂载
+// 🎯 完美解析 Wallpaper.plist 实现多层联动
 - (void)parseWallpaperPlist {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *plistPath = nil;
@@ -247,7 +262,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
     
-    // Fallback 老旧壁纸
+    // Fallback 方案
     NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil];
     for (NSURL *fileURL in dirEnum) {
         NSString *pathString = fileURL.path;
@@ -301,7 +316,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
             [self setNeedsLayout];
             
-            // 💡 桌面引擎初始化后立刻暴力锁死为 Unlock，绝不参与锁屏逻辑
+            // 💡 核心修复 2：如果我是桌面引擎，强行初始化为 Unlock！解决桌面显示锁屏的 Bug！
             self.currentState = @"Init";
             [CATransaction begin];
             if (self.engineType == 1) {
@@ -318,37 +333,33 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 💡 精准挂载架构：消除“完全不显示”与“下拉透明”Bug
+// 💡 精密挂载架构：双引擎完美分离
 // ==========================================
 
-// 1. 桌面引擎：挂载在 SpringBoard 桌面控制器上
+// 1. 桌面引擎：挂载在全局底层 Window
 %hook PBUIWallpaperViewController
-%new
-- (void)tendies_applyHomescreenModifications {
-    if (!g_enabled) return;
-    UIView *homeView = [self respondsToSelector:@selector(homescreenWallpaperView)] ? [self homescreenWallpaperView] : nil;
-    if (homeView) {
-        TendiesRenderEngineView *homeEngine = objc_getAssociatedObject(self, "HomeEngine");
-        if (!homeEngine) {
-            homeEngine = [[TendiesRenderEngineView alloc] initWithFrame:homeView.bounds];
-            homeEngine.engineType = 1; // 💡 设置为桌面引擎
-            [homeEngine reloadWallpaperViews];
-            objc_setAssociatedObject(self, "HomeEngine", homeEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        if (homeEngine.superview != homeView) {
-            [homeEngine removeFromSuperview];
-            [homeView addSubview:homeEngine];
-        }
-        homeEngine.frame = homeView.bounds;
-    }
-}
-
 - (void)viewWillLayoutSubviews {
     %orig;
-    [self tendies_applyHomescreenModifications];
+    if (!g_enabled) return;
+    
+    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
+    if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+    
+    if (targetContainer) {
+        if (!g_homeEngine) {
+            g_homeEngine = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
+            g_homeEngine.engineType = 1; // 💡 身份：桌面引擎
+            [g_homeEngine reloadWallpaperViews];
+        }
+        if (g_homeEngine.superview != targetContainer) {
+            [targetContainer addSubview:g_homeEngine];
+        }
+        g_homeEngine.frame = targetContainer.bounds;
+        [targetContainer bringSubviewToFront:g_homeEngine];
+    }
 }
-
-// 阻止桌面刷新多余系统快照
+// 阻止过渡时的残影截屏
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
@@ -360,73 +371,75 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 %end
 
 
-// 2. 锁屏引擎：挂载在 CoverSheet 内部 (修复完全不显示)
+// 2. 锁屏引擎：挂载在 CoverSheet 内部 (完美修复“透视”和“消失”Bug)
 %hook CSCoverSheetViewController
-%new
-- (void)tendies_applyLockscreenModifications {
+- (void)viewWillLayoutSubviews {
+    %orig;
     if (!g_enabled) return;
 
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
     if (bgVC && bgVC.view) {
-        // 隐藏自带的系统海报
-        bgVC.view.alpha = 0.0;
-        bgVC.view.hidden = YES;
+        if (!g_lockEngine) {
+            g_lockEngine = [[TendiesRenderEngineView alloc] initWithFrame:bgVC.view.bounds];
+            g_lockEngine.engineType = 0; // 💡 身份：锁屏引擎
+            [g_lockEngine reloadWallpaperViews];
+        }
+        if (g_lockEngine.superview != bgVC.view) {
+            [bgVC.view addSubview:g_lockEngine];
+        }
+        g_lockEngine.frame = bgVC.view.bounds;
         
-        // ⚠️ 极其关键：我们的引擎必须挂载在原生海报的**父视图 (superview)** 上
-        // 绝对不能挂载在 bgVC.view 里面，否则会被上面的代码连带隐藏！
-        UIView *container = bgVC.view.superview;
-        if (container) {
-            TendiesRenderEngineView *lockEngine = objc_getAssociatedObject(self, "LockEngine");
-            if (!lockEngine) {
-                lockEngine = [[TendiesRenderEngineView alloc] initWithFrame:container.bounds];
-                lockEngine.engineType = 0; // 💡 设置为锁屏引擎
-                [lockEngine reloadWallpaperViews];
-                objc_setAssociatedObject(self, "LockEngine", lockEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // 🎯 手术刀级隐藏：只隐形系统原生的海报图层，绝对不隐藏我们的 LockEngine！
+        // 并且保留 SBWallpaperEffectView 的模糊效果！
+        for (UIView *sub in bgVC.view.subviews) {
+            if (sub != g_lockEngine) {
+                sub.hidden = YES;
+                sub.alpha = 0.0;
             }
-            if (lockEngine.superview != container) {
-                [lockEngine removeFromSuperview];
-                // 插入到底部，防止遮挡系统时间
-                [container insertSubview:lockEngine atIndex:0];
-            }
-            lockEngine.frame = container.bounds;
         }
     }
     
-    // 隐藏碍事的景深悬浮特效层
+    // 隐藏碍事的景深特效遮挡
     UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
     if (floatingLayer) {
-        floatingLayer.alpha = 0.0;
         floatingLayer.hidden = YES;
+        floatingLayer.alpha = 0.0;
+    }
+    if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
+        @try {
+            UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
+            if (dimmingLayer) dimmingLayer.hidden = YES;
+        } @catch (NSException *e) {}
     }
 }
 
-- (void)viewWillLayoutSubviews {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-
-- (void)viewDidLayoutSubviews {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-
-// 暴力镇压系统每次滑动的自动复原
-- (void)_updateBackgroundContentView {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-- (void)_updateWallpaperEffectView {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-- (void)_updateWallpaper {
-    %orig;
-    [self tendies_applyLockscreenModifications];
-}
-// 防止截取原生快照
+- (void)viewDidLayoutSubviews { %orig; [self viewWillLayoutSubviews]; }
+- (void)_updateBackgroundContentView { %orig; [self viewWillLayoutSubviews]; }
+- (void)_updateWallpaperEffectView { %orig; [self viewWillLayoutSubviews]; }
+- (void)_updateWallpaper { %orig; [self viewWillLayoutSubviews]; }
 - (void)updatePosterSwitcherSnapshots {
     if (g_enabled) return;
     %orig;
+}
+
+- (void)setInScreenOffMode:(BOOL)mode {
+    %orig;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
+- (void)setDismissed:(BOOL)dismissed {
+    %orig;
+    g_isUnlocked = dismissed;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
 }
 %end
 
@@ -444,6 +457,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 %end
+
 
 // ==========================================
 // 亮灭屏与锁屏状态同步
