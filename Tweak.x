@@ -45,7 +45,7 @@ typedef struct {
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
-- (void)tendies_forceHideNativeWallpaperLayers; // 💡 加上这行声明，骗过编译器
+- (void)tendies_forceHideNativeWallpaperLayers;
 @end
 
 @interface SBWallpaperEffectView : UIView
@@ -91,6 +91,83 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
+// CAML 解析器与渲染核心 (对标 PBW 引擎的手工插值逻辑)
+// ==========================================
+@interface TendiesCAMLParser : NSObject <NSXMLParserDelegate>
+@property (nonatomic, strong) NSMutableDictionary *idToNameMap;
+@property (nonatomic, strong) NSMutableDictionary *statesData;
+@property (nonatomic, copy) NSString *currentParsingState;
+@property (nonatomic, copy) NSString *currentParsingTargetId;
+@property (nonatomic, copy) NSString *currentParsingKeyPath;
+- (void)parseFile:(NSString *)path;
+@end
+
+@implementation TendiesCAMLParser
+- (instancetype)init {
+    if (self = [super init]) {
+        _idToNameMap = [NSMutableDictionary new];
+        _statesData = [NSMutableDictionary new];
+    }
+    return self;
+}
+- (void)parseFile:(NSString *)path {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
+    parser.delegate = self;
+    [parser parse];
+}
+- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
+    if ([elementName isEqualToString:@"CALayer"]) {
+        NSString *layerId = attributeDict[@"id"];
+        NSString *layerName = attributeDict[@"name"];
+        if (layerId && layerName) {
+            self.idToNameMap[layerId] = layerName;
+        }
+    } else if ([elementName isEqualToString:@"LKState"]) {
+        self.currentParsingState = attributeDict[@"name"];
+    } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
+        self.currentParsingTargetId = attributeDict[@"targetId"];
+        self.currentParsingKeyPath = attributeDict[@"keyPath"];
+    } else if ([elementName isEqualToString:@"value"]) {
+        if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
+            NSString *valStr = attributeDict[@"value"];
+            if (valStr) {
+                NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
+                if (!targetDict) {
+                    targetDict = [NSMutableDictionary dictionary];
+                    self.statesData[self.currentParsingTargetId] = targetDict;
+                }
+                NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
+                if (!stateDict) {
+                    stateDict = [NSMutableDictionary dictionary];
+                    targetDict[self.currentParsingState] = stateDict;
+                }
+                stateDict[self.currentParsingKeyPath] = @([valStr doubleValue]);
+            }
+        }
+    }
+}
+- (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
+    if ([elementName isEqualToString:@"LKState"]) {
+        self.currentParsingState = nil;
+    } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
+        self.currentParsingTargetId = nil;
+        self.currentParsingKeyPath = nil;
+    }
+}
+@end
+
+static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
+    if ([layer.name isEqualToString:name]) return layer;
+    for (CALayer *sub in layer.sublayers) {
+        CALayer *found = TendiesFindLayerByName(sub, name);
+        if (found) return found;
+    }
+    return nil;
+}
+
+// ==========================================
 // 核心渲染引擎 (修复环境动画假死)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
@@ -103,6 +180,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSString *cachedFloatPath;
 @property (nonatomic, strong) NSString *cachedFgPath;
 @property (nonatomic, strong) NSString *currentState;
+
+// 新增：注入 XML 解析器与动态图层缓存
+@property (nonatomic, strong) TendiesCAMLParser *bgParser;
+@property (nonatomic, strong) TendiesCAMLParser *floatParser;
+@property (nonatomic, strong) TendiesCAMLParser *fgParser;
+@property (nonatomic, strong) NSMutableDictionary *bgLayerMap;
+@property (nonatomic, strong) NSMutableDictionary *floatLayerMap;
+@property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 
 - (void)reloadWallpaperViews;
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated;
@@ -164,30 +249,110 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
+// ====== 提取的映射与渲染方法 ======
+- (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(TendiesCAMLParser *)parser packageView:(BSUICAPackageView *)pkgView {
+    if (!pkgView || !pkgView.layer || !parser) return;
+    if (layerMap.count == 0 && parser.statesData.count > 0) {
+        for (NSString *targetId in parser.statesData) {
+            NSString *name = parser.idToNameMap[targetId];
+            if (name) {
+                CALayer *found = TendiesFindLayerByName(pkgView.layer, name);
+                if (found) {
+                    layerMap[targetId] = found;
+                }
+            }
+        }
+    }
+}
+
+- (void)ensureAllLayerMaps {
+    [self ensureLayerMap:self.bgLayerMap parser:self.bgParser packageView:self.bgView];
+    [self ensureLayerMap:self.floatLayerMap parser:self.floatParser packageView:self.floatingView];
+    [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
+}
+
+- (void)applyProgress:(double)progress parser:(TendiesCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
+    if (layerMap.count == 0 || !parser) return;
+    
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    
+    for (NSString *targetId in parser.statesData) {
+        CALayer *layer = layerMap[targetId];
+        if (!layer) continue;
+        
+        NSDictionary *states = parser.statesData[targetId];
+        NSDictionary *lockedVals = states[@"Locked"];
+        NSDictionary *unlockVals = states[@"Unlock"];
+        
+        if (!lockedVals || !unlockVals) continue;
+        
+        for (NSString *keyPath in lockedVals) {
+            NSNumber *lockNum = lockedVals[keyPath];
+            NSNumber *unlockNum = unlockVals[keyPath];
+            if (lockNum && unlockNum) {
+                double lockVal = [lockNum doubleValue];
+                double unlockVal = [unlockNum doubleValue];
+                // 核心插值公式
+                double currentVal = lockVal + (unlockVal - lockVal) * progress;
+                
+                @try {
+                    [layer setValue:@(currentVal) forKeyPath:keyPath];
+                } @catch (NSException *e) {}
+            }
+        }
+    }
+    [CATransaction commit];
+}
+// ===================================
+
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     
-    // 手指只要滑动超过 5%，立刻利用 CAML 原生的 CASpringAnimation 触发阻尼进入桌面动画
-    if (progress > 0.05) {
-        if (!self.isUnlocking) {
-            self.isUnlocking = YES;
-            [self transitionToState:@"Unlock" animated:YES];
-        }
+    // 约束 progress 到 0.0 - 1.0 之间
+    progress = MAX(0.0, MIN(1.0, progress));
+    
+    // 确保图层已完全挂载并映射
+    [self ensureAllLayerMaps];
+    
+    // 彻底抛弃原生的状态触发，实施逐帧底层渲染！
+    [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
+    [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
+    [self applyProgress:progress parser:self.fgParser layerMap:self.fgLayerMap];
+    
+    // 维持系统状态标签，防止干扰后续动作
+    if (progress > 0.95) {
+        self.currentState = @"Unlock";
+        self.isUnlocking = NO;
+    } else if (progress < 0.05) {
+        self.currentState = @"Locked";
+        self.isUnlocking = NO;
     } else {
-        // 退回锁屏时，恢复锁定状态的弹簧形变
-        if (self.isUnlocking) {
-            self.isUnlocking = NO;
-            [self transitionToState:@"Locked" animated:YES];
-        }
+        self.isUnlocking = YES;
+        self.currentState = @"Scrubbing";
     }
 }
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
-    if ([self.currentState isEqualToString:stateName]) return; // 状态锁：防止重复下发导致动画闪烁
+    if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
+    // 补帧机制：如果是跳转锁屏或桌面，立刻通过引擎强制对齐参数，防止因缺失动画导致闪回
+    if ([stateName isEqualToString:@"Unlock"]) {
+        [self ensureAllLayerMaps];
+        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap];
+        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap];
+        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    } else if ([stateName isEqualToString:@"Locked"]) {
+        [self ensureAllLayerMaps];
+        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap];
+        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap];
+        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    }
+    
+    // 继续下发给系统视图处理剩余的状态（如透明度渐变、Sleep 暗化等原生功能）
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated];
         [self.floatingView setState:stateName animated:animated];
@@ -232,6 +397,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
             self.bgView = nil; self.floatingView = nil; self.fgView = nil;
+            
+            // 重置解析引擎与图层映射缓存
+            self.bgLayerMap = [NSMutableDictionary dictionary];
+            self.floatLayerMap = [NSMutableDictionary dictionary];
+            self.fgLayerMap = [NSMutableDictionary dictionary];
+            self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
+            
             void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             if (!handle) return; 
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
@@ -240,14 +412,20 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (self.cachedBgPath) {
                 self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedBgPath]];
                 [self addSubview:self.bgView];
+                self.bgParser = [TendiesCAMLParser new];
+                [self.bgParser parseFile:[self.cachedBgPath stringByAppendingPathComponent:@"main.caml"]];
             }
             if (self.cachedFloatPath) {
                 self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFloatPath]];
                 [self addSubview:self.floatingView];
+                self.floatParser = [TendiesCAMLParser new];
+                [self.floatParser parseFile:[self.cachedFloatPath stringByAppendingPathComponent:@"main.caml"]];
             }
             if (self.cachedFgPath) {
                 self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFgPath]];
                 [self addSubview:self.fgView];
+                self.fgParser = [TendiesCAMLParser new];
+                [self.fgParser parseFile:[self.cachedFgPath stringByAppendingPathComponent:@"main.caml"]];
             }
             [self setNeedsLayout];
             
