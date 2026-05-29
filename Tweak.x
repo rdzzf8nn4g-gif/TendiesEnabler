@@ -91,7 +91,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心：CAML 逐帧解析器 (完美提取坐标，赋予单引擎物理互动)
+// 核心：CAML 逐帧解析器
 // ==========================================
 @interface TendiesCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -245,11 +245,10 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
-// 核心插值方法
 - (void)applyProgress:(double)progress parser:(TendiesCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     [CATransaction begin]; 
-    [CATransaction setDisableActions:YES]; // 禁用系统默认补间动画，强行注入计算坐标
+    [CATransaction setDisableActions:YES]; 
     for (NSString *targetId in parser.statesData) {
         CALayer *layer = layerMap[targetId]; if (!layer) continue;
         NSDictionary *states = parser.statesData[targetId];
@@ -292,7 +291,6 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
         [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
     }
     
-    // 继续交由系统接管透明度等遗留效果
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated]; [self.floatingView setState:stateName animated:animated]; [self.fgView setState:stateName animated:animated];
     } else {
@@ -359,40 +357,38 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 
 // ==========================================
-// 修复后：桌面底层的全局渲染引擎
+// 修复后核心 1：直接在官方壁纸控制器中注入“桌面引擎”
 // ==========================================
-static void EnsureEngineViewIsMounted() {
-    if (!g_enabled) return;
-    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-    if (!wallpaperController) return;
-    
-    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
-    if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
-    if (!targetContainer) return;
-    
-    TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
-    if (!engineView) {
-        engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
-        objc_setAssociatedObject(wallpaperController, "GlobalTendiesEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        // 关键：插入到最底层，避免覆盖可能存在的系统手势层
-        [targetContainer insertSubview:engineView atIndex:0];
-        [engineView reloadWallpaperViews];
+%hook PBUIWallpaperViewController
+
+- (void)viewDidLoad {
+    %orig;
+    if (g_enabled) {
+        TendiesRenderEngineView *desktopEngine = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
+        objc_setAssociatedObject(self, "DesktopEngine", desktopEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self.view insertSubview:desktopEngine atIndex:0]; // 精确注入到底层
+        [desktopEngine reloadWallpaperViews];
     }
-    
-    if (engineView.superview != targetContainer) {
-        [engineView removeFromSuperview];
-        [targetContainer insertSubview:engineView atIndex:0];
-    }
-    engineView.frame = targetContainer.bounds;
-    [targetContainer sendSubviewToBack:engineView];
 }
 
-
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
-%hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
+        TendiesRenderEngineView *desktopEngine = objc_getAssociatedObject(self, "DesktopEngine");
+        if (!desktopEngine) {
+            desktopEngine = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
+            objc_setAssociatedObject(self, "DesktopEngine", desktopEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [self.view insertSubview:desktopEngine atIndex:0];
+            [desktopEngine reloadWallpaperViews];
+        }
+        if (desktopEngine.superview != self.view) {
+            [desktopEngine removeFromSuperview];
+            [self.view insertSubview:desktopEngine atIndex:0];
+        }
+        desktopEngine.frame = self.view.bounds;
+        [self.view sendSubviewToBack:desktopEngine];
+        
+        // 抹除原生残留，我们的 Engine 全面接管
         if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
             UIView *homeView = [self homescreenWallpaperView];
             if (homeView) homeView.alpha = 0.0;
@@ -403,17 +399,20 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
+
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
 }
+
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
     if (g_enabled) return NO;
     return %orig;
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层
+
+// 拦截原生滑动高斯模糊
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -423,22 +422,19 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) {
-        %orig(0.0);
-    } else {
-        %orig;
-    }
+    if (g_enabled) %orig(0.0);
+    else %orig;
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
-        %orig(YES);
-    } else {
-        %orig;
-    }
+    if (g_enabled) %orig(YES);
+    else %orig;
 }
 %end
 
-// 3. 修复后：暴力拦截 CoverSheet (锁屏) 的残留层，并注入第二个同步引擎解决透视
+
+// ==========================================
+// 核心 2：在锁屏下拉中注入“锁屏专属引擎”，完美防透视
+// ==========================================
 %hook CSCoverSheetViewController
 
 %new
@@ -464,25 +460,19 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// 在控制器初始化时，直接注入锁屏专属引擎
 - (void)viewDidLoad {
     %orig;
     if (g_enabled) {
         TendiesRenderEngineView *csEngine = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
-        // 关联对象绑定到锁屏控制器
         objc_setAssociatedObject(self, "CSEngine", csEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [self.view insertSubview:csEngine atIndex:0]; // 插入到 CoverSheet 的绝对最底层
+        [self.view insertSubview:csEngine atIndex:0]; // 注入锁屏最底层
         [csEngine reloadWallpaperViews];
     }
 }
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    // 依然保证桌面底层的引擎存活
-    EnsureEngineViewIsMounted(); 
-    
     if (g_enabled) {
-        // 维护锁屏专属引擎
         TendiesRenderEngineView *csEngine = objc_getAssociatedObject(self, "CSEngine");
         if (!csEngine) {
             csEngine = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
@@ -497,16 +487,13 @@ static void EnsureEngineViewIsMounted() {
         csEngine.frame = self.view.bounds;
         [self.view sendSubviewToBack:csEngine];
         
-        // 暴力抹除自带的壁纸残留
         [self tendies_forceHideNativeWallpaperLayers];
     }
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    if (g_enabled) {
-        [self tendies_forceHideNativeWallpaperLayers];
-    }
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
 
 - (void)_updateBackgroundContentView {
@@ -546,8 +533,9 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+
 // ==========================================
-// 动画进度获取及快照拦截
+// 动画进度广播源 (抛弃废旧挂载点，极为干净)
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -566,7 +554,6 @@ static void EnsureEngineViewIsMounted() {
 }
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
-    EnsureEngineViewIsMounted();
     if (g_enabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
