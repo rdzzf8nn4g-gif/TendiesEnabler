@@ -11,7 +11,7 @@
 #endif
 
 // ==========================================
-// 结构体与系统头文件声明
+// 结构体与必要私有类声明
 // ==========================================
 typedef struct {
     long long x0;
@@ -35,16 +35,31 @@ typedef struct {
 @interface SBWallpaperController : NSObject
 + (id)sharedInstance;
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5;
+- (void)updatePosterSwitcherSnapshots;
 @end
 
 @interface SBBacklightController : NSObject
 + (id)sharedInstance;
 @property (readonly, nonatomic) long long backlightState;
+- (void)setBacklightState:(long long)state source:(long long)source;
+- (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion;
+@end
+
+@interface SBWallpaperEffectView : UIView
+@property (nonatomic) long long wallpaperStyle;
 @end
 
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode;
+- (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source;
 - (void)setDismissed:(BOOL)dismissed;
+- (void)_setDismissed:(BOOL)dismissed;
+- (void)setCoverSheetIsVisible:(BOOL)visible;
+- (void)setPartiallyOnScreen:(BOOL)screen;
+- (void)setHidesDimmingLayer:(BOOL)layer;
+- (void)_setHasContentAboveCoverSheet:(BOOL)sheet;
+- (void)_setHasContentAboveCoverSheet:(BOOL)sheet isSignificantUserInteraction:(BOOL)interaction;
 - (void)updateInterstitialPresentationWithProgress:(double)progress;
 - (void)scrollPanGestureChanged:(id)changed;
 - (void)scrollPanGestureDidUpdate:(id)update;
@@ -55,16 +70,36 @@ typedef struct {
 - (void)_updateBackgroundContentView;
 - (void)_updateWallpaperEffectView;
 - (void)_updateWallpaper;
+- (void)_updateWallpaperFloatingLayerContainerView;
+- (void)_updateForegroundView;
+- (void)_updateContent;
+- (void)_updateDimmingLayer;
+- (void)_updateFullBleedContent;
+- (void)_updateComplicationSidebar;
+- (void)_updateAppearanceForTransitionToOrientation:(long long)orientation;
+- (void)updateAppearanceForController:(id)controller;
+- (void)updateAppearanceForController:(id)controller withAnimationSettings:(id)settings completion:(id /* block */)completion;
+- (void)updateBehaviorForController:(id)controller;
 - (void)updateFloatingLayerOrdering;
-- (void)viewWillAppear:(BOOL)animated;
-- (void)viewDidAppear:(BOOL)animated;
+- (void)updatePosterSwitcherPresentationWithProgress:(double)progress;
+- (void)requestIdleTimerResetForPoster;
+- (void)startObservingAmbientPresentationForController:(id)controller;
+- (void)ambientPresentationController:(id)controller didUpdatePresented:(BOOL)presented;
+- (void)ambientPresentationControllerCancelledPossiblePresentation:(id)presentation;
+- (void)ambientPresentationControllerWillPossiblyPresent:(id)present;
+- (void)transitionSource:(id)source didUpdateTransitionWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context;
+- (void)transitionSource:(id)source didEndWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context;
+- (void)overlayController:(id)controller didChangePresentationProgress:(double)progress newPresentationProgress:(double)newProgress fromLeading:(_Bool)leading;
+- (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear;
 - (void)viewWillLayoutSubviews;
 - (void)viewDidLayoutSubviews;
-- (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear;
-@end
-
-@interface SBWallpaperEffectView : UIView
-@property (nonatomic) long long wallpaperStyle;
+- (void)viewWillAppear:(BOOL)animated;
+- (void)viewDidAppear:(BOOL)animated;
+- (void)viewWillDisappear:(BOOL)animated;
+- (void)viewDidDisappear:(BOOL)animated;
+- (void)viewDidLoad;
+- (void)loadView;
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator;
 @end
 
 // ==========================================
@@ -91,12 +126,15 @@ static double g_lockProgress = 0.0;
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
     CFPreferencesAppSynchronize(appID);
-    Boolean valid;
+
+    Boolean valid = false;
     g_enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &valid) ? valid : NO;
+
     CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("TendiesPath"), appID);
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
-        g_tendiesPath = [(__bridge NSString *)pathRef copy];
+        g_tendiesPath = (__bridge_transfer NSString *)pathRef;
     } else {
+        if (pathRef) CFRelease(pathRef);
         g_tendiesPath = [GetTendiesStorageDir() stringByAppendingPathComponent:@"ActiveTendies"];
     }
 }
@@ -109,17 +147,88 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // ==========================================
 // 工具函数
 // ==========================================
+static void TendiesHideLayerTree(CALayer *layer) {
+    if (!layer) return;
+    layer.hidden = YES;
+    layer.opacity = 0.0;
+    layer.allowsGroupOpacity = YES;
+    for (CALayer *sub in layer.sublayers) {
+        TendiesHideLayerTree(sub);
+    }
+}
+
 static void TendiesHideViewTree(UIView *view) {
     if (!view) return;
     view.hidden = YES;
     view.alpha = 0.0;
     view.layer.opacity = 0.0;
+    TendiesHideLayerTree(view.layer);
     for (UIView *sub in view.subviews) {
         TendiesHideViewTree(sub);
     }
 }
 
+static id TendiesSafeValueForKey(id obj, NSString *key) {
+    if (!obj || !key.length) return nil;
+    @try {
+        return [obj valueForKey:key];
+    } @catch (__unused NSException *e) {
+        return nil;
+    }
+}
+
+static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
+    if (!g_enabled || !vc) return;
+
+    @try {
+        id bgVC = TendiesSafeValueForKey(vc, @"_backgroundContentViewController");
+        if (bgVC && [bgVC respondsToSelector:@selector(view)]) {
+            UIView *view = [bgVC valueForKey:@"view"];
+            TendiesHideViewTree(view);
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *floatingLayer = TendiesSafeValueForKey(vc, @"_floatingLayerView");
+        TendiesHideViewTree(floatingLayer);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *dimmingView = TendiesSafeValueForKey(vc, @"_dimmingView");
+        TendiesHideViewTree(dimmingView);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *dimmingLayerView = TendiesSafeValueForKey(vc, @"_dimmingLayerView");
+        TendiesHideViewTree(dimmingLayerView);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        if ([vc respondsToSelector:@selector(setHidesDimmingLayer:)]) {
+            [vc setHidesDimmingLayer:YES];
+        } else {
+            [vc setValue:@YES forKey:@"hidesDimmingLayer"];
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *statusBarBg = TendiesSafeValueForKey(vc, @"_statusBarBackgroundView");
+        if (statusBarBg) {
+            statusBarBg.hidden = YES;
+            statusBarBg.alpha = 0.0;
+            statusBarBg.layer.opacity = 0.0;
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void TendiesRefreshSystemChromeAndEngine(CSCoverSheetViewController *vc) {
+    if (!g_enabled) return;
+    EnsureEngineViewIsMounted();
+    TendiesHideCoverSheetChrome(vc);
+}
+
 static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
+    if (!layer || !name.length) return nil;
     if ([layer.name isEqualToString:name]) return layer;
     for (CALayer *sub in layer.sublayers) {
         CALayer *found = TendiesFindLayerByName(sub, name);
@@ -141,6 +250,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 @end
 
 @implementation TendiesCAMLParser
+
 - (instancetype)init {
     if (self = [super init]) {
         _idToNameMap = [NSMutableDictionary new];
@@ -148,18 +258,21 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     }
     return self;
 }
+
 - (void)parseFile:(NSString *)path {
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
+    if (!path.length || ![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
     NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data.length) return;
     NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
     parser.delegate = self;
     [parser parse];
 }
+
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
     if ([elementName isEqualToString:@"CALayer"]) {
         NSString *layerId = attributeDict[@"id"];
         NSString *layerName = attributeDict[@"name"];
-        if (layerId && layerName) self.idToNameMap[layerId] = layerName;
+        if (layerId.length && layerName.length) self.idToNameMap[layerId] = layerName;
     } else if ([elementName isEqualToString:@"LKState"]) {
         self.currentParsingState = attributeDict[@"name"];
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
@@ -168,7 +281,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     } else if ([elementName isEqualToString:@"value"]) {
         if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
             NSString *valStr = attributeDict[@"value"];
-            if (valStr) {
+            if (valStr.length) {
                 NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
                 if (!targetDict) {
                     targetDict = [NSMutableDictionary dictionary];
@@ -184,13 +297,16 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
         }
     }
 }
+
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
-    if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
-    else if ([elementName isEqualToString:@"LKStateSetValue"]) {
+    if ([elementName isEqualToString:@"LKState"]) {
+        self.currentParsingState = nil;
+    } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
         self.currentParsingTargetId = nil;
         self.currentParsingKeyPath = nil;
     }
 }
+
 @end
 
 // ==========================================
@@ -218,12 +334,15 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 @end
 
 @implementation TendiesRenderEngineView
+
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         self.backgroundColor = [UIColor blackColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO;
+        self.clipsToBounds = YES;
+        self.layer.zPosition = CGFLOAT_MAX;
         self.isPathCached = NO;
         self.isUnlocking = NO;
         self.currentState = @"Init";
@@ -250,9 +369,9 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (self.bgView) self.bgView.frame = self.bounds;
-    if (self.floatingView) self.floatingView.frame = self.bounds;
-    if (self.fgView) self.fgView.frame = self.bounds;
+    self.bgView.frame = self.bounds;
+    self.floatingView.frame = self.bounds;
+    self.fgView.frame = self.bounds;
 }
 
 - (void)onWakeUp {
@@ -260,6 +379,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     self.isUnlocking = NO;
     g_lockProgress = g_isUnlocked ? 1.0 : 0.0;
     [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
     [CATransaction commit];
     [CATransaction flush];
@@ -277,7 +397,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     if (layerMap.count == 0 && parser.statesData.count > 0) {
         for (NSString *targetId in parser.statesData) {
             NSString *name = parser.idToNameMap[targetId];
-            if (name) {
+            if (name.length) {
                 CALayer *found = TendiesFindLayerByName(pkgView.layer, name);
                 if (found) layerMap[targetId] = found;
             }
@@ -295,13 +415,16 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     if (layerMap.count == 0 || !parser) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+
     for (NSString *targetId in parser.statesData) {
         CALayer *layer = layerMap[targetId];
         if (!layer) continue;
+
         NSDictionary *states = parser.statesData[targetId];
         NSDictionary *lockedVals = states[@"Locked"];
         NSDictionary *unlockVals = states[@"Unlock"];
         if (!lockedVals || !unlockVals) continue;
+
         for (NSString *keyPath in lockedVals) {
             NSNumber *lockNum = lockedVals[keyPath];
             NSNumber *unlockNum = unlockVals[keyPath];
@@ -309,10 +432,11 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
                 double currentVal = [lockNum doubleValue] + ([unlockNum doubleValue] - [lockNum doubleValue]) * progress;
                 @try {
                     [layer setValue:@(currentVal) forKeyPath:keyPath];
-                } @catch (NSException *e) {}
+                } @catch (__unused NSException *e) {}
             }
         }
     }
+
     [CATransaction commit];
 }
 
@@ -384,22 +508,25 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
         }
 
         NSFileManager *fm = [NSFileManager defaultManager];
-        if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) return;
+        if (!g_tendiesPath.length || ![fm fileExistsAtPath:g_tendiesPath]) return;
 
-        @synchronized(self) {
+        @synchronized (self) {
             if (!self.isPathCached) {
                 NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath]
-                                            includingPropertiesForKeys:nil
-                                                               options:NSDirectoryEnumerationSkipsHiddenFiles
-                                                          errorHandler:nil];
+                                          includingPropertiesForKeys:nil
+                                                             options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                        errorHandler:nil];
                 for (NSURL *fileURL in dirEnum) {
                     NSString *pathString = fileURL.path;
                     NSString *fileName = fileURL.lastPathComponent;
-                    if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
-                    if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
-                        if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) self.cachedBgPath = [pathString copy];
-                        else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) self.cachedFloatPath = [pathString copy];
-                        else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) self.cachedFgPath = [pathString copy];
+                    if ([[pathString pathExtension].lowercaseString isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
+                        if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) {
+                            self.cachedBgPath = [pathString copy];
+                        } else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) {
+                            self.cachedFloatPath = [pathString copy];
+                        } else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) {
+                            self.cachedFgPath = [pathString copy];
+                        }
                     }
                 }
                 self.isPathCached = YES;
@@ -448,31 +575,46 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
             [self setNeedsLayout];
             self.currentState = @"Init";
+
             [CATransaction begin];
+            [CATransaction setDisableActions:YES];
             [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
             [CATransaction commit];
             [CATransaction flush];
+
+            EnsureEngineViewIsMounted();
         });
     });
 }
+
 @end
 
 // ==========================================
 // 挂载引擎视图
 // ==========================================
+static char kGlobalTendiesEngineKey;
+
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
+
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
 
-    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
-    if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+    UIView *targetContainer = nil;
+    @try {
+        targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
+    } @catch (__unused NSException *e) {}
+    if (!targetContainer) {
+        @try {
+            targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+        } @catch (__unused NSException *e) {}
+    }
     if (!targetContainer) return;
 
-    TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
+    TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, &kGlobalTendiesEngineKey);
     if (!engineView) {
         engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
-        objc_setAssociatedObject(wallpaperController, "GlobalTendiesEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(wallpaperController, &kGlobalTendiesEngineKey, engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [targetContainer addSubview:engineView];
         [engineView reloadWallpaperViews];
     }
@@ -481,7 +623,9 @@ static void EnsureEngineViewIsMounted() {
         [engineView removeFromSuperview];
         [targetContainer addSubview:engineView];
     }
+
     engineView.frame = targetContainer.bounds;
+    engineView.layer.zPosition = CGFLOAT_MAX;
     [targetContainer bringSubviewToFront:engineView];
 }
 
@@ -494,12 +638,12 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
     @try {
         UIView *homeView = [vc homescreenWallpaperView];
         TendiesHideViewTree(homeView);
-    } @catch (NSException *e) {}
+    } @catch (__unused NSException *e) {}
 
     @try {
         UIView *lockView = [vc lockscreenWallpaperView];
         TendiesHideViewTree(lockView);
-    } @catch (NSException *e) {}
+    } @catch (__unused NSException *e) {}
 }
 
 %hook PBUIWallpaperViewController
@@ -524,6 +668,11 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
     TendiesHidePBWallpaperViews(self);
 }
 
+- (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear {
+    %orig;
+    TendiesHidePBWallpaperViews(self);
+}
+
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
@@ -540,56 +689,36 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
 // SBWallpaperEffectView
 // ==========================================
 %hook SBWallpaperEffectView
+
 - (void)layoutSubviews {
     %orig;
 }
+
 - (void)setAlpha:(double)alpha {
     %orig;
 }
+
 - (void)setHidden:(BOOL)hidden {
     %orig;
 }
+
 %end
 
 // ==========================================
 // CSCoverSheetViewController
 // ==========================================
 static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
-    if (!g_enabled || !vc) return;
-
-    @try {
-        UIViewController *bgVC = [vc valueForKey:@"_backgroundContentViewController"];
-        if (bgVC && bgVC.view) {
-            TendiesHideViewTree(bgVC.view);
-        }
-    } @catch (NSException *e) {}
-
-    @try {
-        UIView *floatingLayer = [vc valueForKey:@"_floatingLayerView"];
-        if (floatingLayer) {
-            TendiesHideViewTree(floatingLayer);
-        }
-    } @catch (NSException *e) {}
-
-    @try {
-        UIView *dimmingLayer = [vc valueForKey:@"_dimmingView"];
-        if (dimmingLayer) {
-            dimmingLayer.hidden = YES;
-            dimmingLayer.alpha = 0.0;
-            dimmingLayer.layer.opacity = 0.0;
-        }
-    } @catch (NSException *e) {}
+    TendiesRefreshSystemChromeAndEngine(vc);
 }
 
 %hook CSCoverSheetViewController
 
-- (void)viewWillLayoutSubviews {
+- (void)loadView {
     %orig;
-    EnsureEngineViewIsMounted();
     TendiesHideCSNativeLayers(self);
 }
 
-- (void)viewDidLayoutSubviews {
+- (void)viewDidLoad {
     %orig;
     TendiesHideCSNativeLayers(self);
 }
@@ -604,7 +733,32 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
     TendiesHideCSNativeLayers(self);
 }
 
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)viewWillLayoutSubviews {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
 - (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator {
     %orig;
     TendiesHideCSNativeLayers(self);
 }
@@ -624,12 +778,62 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
     TendiesHideCSNativeLayers(self);
 }
 
-- (void)_updateWallpaper {
+- (void)_updateWallpaperFloatingLayerContainerView {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_updateForegroundView {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_updateContent {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_updateDimmingLayer {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_updateFullBleedContent {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_updateComplicationSidebar {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_updateAppearanceForTransitionToOrientation:(long long)orientation {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)updateAppearanceForController:(id)controller {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)updateAppearanceForController:(id)controller withAnimationSettings:(id)settings completion:(id /* block */)completion {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)updateBehaviorForController:(id)controller {
     %orig;
     TendiesHideCSNativeLayers(self);
 }
 
 - (void)updateFloatingLayerOrdering {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)updatePosterSwitcherPresentationWithProgress:(double)progress {
     %orig;
     TendiesHideCSNativeLayers(self);
 }
@@ -664,19 +868,36 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
     TendiesHideCSNativeLayers(self);
 }
 
-- (void)updatePosterSwitcherSnapshots {
-    if (g_enabled) return;
+- (void)_setHasContentAboveCoverSheet:(BOOL)sheet {
     %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_setHasContentAboveCoverSheet:(BOOL)sheet isSignificantUserInteraction:(BOOL)interaction {
+    %orig;
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled) {
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source {
+    %orig;
+    if (g_enabled) {
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)setDismissed:(BOOL)dismissed {
@@ -688,6 +909,72 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_setDismissed:(BOOL)dismissed {
+    %orig;
+    g_isUnlocked = dismissed;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)setCoverSheetIsVisible:(BOOL)visible {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)setPartiallyOnScreen:(BOOL)screen {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)setHidesDimmingLayer:(BOOL)layer {
+    if (g_enabled) {
+        %orig(YES);
+    } else {
+        %orig;
+    }
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)requestIdleTimerResetForPoster {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)startObservingAmbientPresentationForController:(id)controller {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)ambientPresentationController:(id)controller didUpdatePresented:(BOOL)presented {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)ambientPresentationControllerCancelledPossiblePresentation:(id)presentation {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)ambientPresentationControllerWillPossiblyPresent:(id)present {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)transitionSource:(id)source didUpdateTransitionWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)transitionSource:(id)source didEndWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)overlayController:(id)controller didChangePresentationProgress:(double)progress newPresentationProgress:(double)newProgress fromLeading:(_Bool)leading {
+    %orig;
+    TendiesHideCSNativeLayers(self);
 }
 
 %end
@@ -703,6 +990,7 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
             void (^completionBlock)(void) = arg5;
             completionBlock();
         }
+        EnsureEngineViewIsMounted();
         return;
     }
     %orig;
@@ -714,13 +1002,15 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
 }
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
-    %orig;
-    EnsureEngineViewIsMounted();
     if (g_enabled) {
+        EnsureEngineViewIsMounted();
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
         });
+        return;
     }
+
+    %orig;
 }
 
 %end
@@ -729,8 +1019,10 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
 // SBBacklightController
 // ==========================================
 %hook SBBacklightController
+
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
+
     if (g_enabled) {
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
@@ -747,8 +1039,10 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
         }
     }
 }
+
 - (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
+
     if (g_enabled) {
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
@@ -765,9 +1059,15 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
         }
     }
 }
+
 %end
 
 %ctor {
     reloadPrefs();
-    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                    NULL,
+                                    prefsChangedCallback,
+                                    CFSTR("com.yourname.tendiesprefs/ReloadPrefs"),
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorCoalesce);
 }
