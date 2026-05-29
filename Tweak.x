@@ -357,7 +357,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 @end
 
 // ==========================================
-// 【核心修改】废除老旧且死板的 EnsureEngineViewIsMounted，引入全局安全的单例提供者。
+// 全局单例引擎
 // ==========================================
 static TendiesRenderEngineView *g_sharedEngine = nil;
 static TendiesRenderEngineView *GetSharedEngine() {
@@ -413,46 +413,54 @@ static TendiesRenderEngineView *GetSharedEngine() {
 
 
 // ==========================================
-// 3. 【核心修复】智能管理 CoverSheet 背景图层及寄生挂载
+// 3. 智能管理 CoverSheet 动态图层与安全防黑屏
 // ==========================================
 %hook CSCoverSheetViewController
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"TendiesRequestReparentToCoverSheet" object:nil];
+    %orig;
+}
+
 - (void)viewDidLoad {
     %orig;
-    // 监听：当在软件里拉下通知中心时，接管引擎放入锁屏的最高优先级背景中！
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(tendies_handleReparent) name:@"TendiesRequestReparentToCoverSheet" object:nil];
 }
 
+// 【修复关键1】 必须有 %new
 %new
 - (void)tendies_handleReparent {
     if (!g_enabled) return;
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-    UIView *targetLockView = (bgVC && bgVC.view) ? bgVC.view : self.view;
     
-    if (targetLockView) {
+    // 严谨判空：绝不挂载到 self.view 导致你的锁屏时间与通知被遮挡！
+    if (bgVC && bgVC.view) {
+        UIView *targetLockView = bgVC.view;
         TendiesRenderEngineView *engine = GetSharedEngine();
+        
         if (engine.superview != targetLockView) {
             [engine removeFromSuperview];
-            // 插入在最底端，避免挡住时间、通知等组件
             [targetLockView insertSubview:engine atIndex:0];
         }
         engine.frame = targetLockView.bounds;
     }
 }
 
+// 【修复关键2】 补上缺失的 %new，彻底根绝 unrecognized selector 崩溃
+%new
 - (void)tendies_forceHideNativeWallpaperLayers {
-    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-    UIView *targetLockView = (bgVC && bgVC.view) ? bgVC.view : self.view;
+    if (!g_enabled) return;
     
-    if (targetLockView) {
-        // 【关键修复】这里千万不能把锁屏背景给干掉！否则透明度0就直接看到下面的App了！
-        // 我们要让它透明度100%，并涂成黑色打底，以此来阻挡原生App的画面泄露，只展示我们的引擎。
-        targetLockView.alpha = 1.0;
-        targetLockView.hidden = NO;
-        targetLockView.backgroundColor = [UIColor blackColor];
+    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+    
+    if (bgVC && bgVC.view) {
+        UIView *bgView = bgVC.view;
+        bgView.alpha = 1.0;
+        bgView.hidden = NO;
+        bgView.backgroundColor = [UIColor blackColor];
         
-        // 我们只需干掉锁屏层自带的模糊、截图和其他系统恶心图层即可
-        for (UIView *sub in targetLockView.subviews) {
+        // 只隐藏系统原生壁纸层，放过我们的渲染引擎
+        for (UIView *sub in bgView.subviews) {
             if (![sub isKindOfClass:[TendiesRenderEngineView class]]) {
                 sub.alpha = 0.0;
                 sub.hidden = YES;
@@ -476,7 +484,6 @@ static TendiesRenderEngineView *GetSharedEngine() {
     if (g_enabled) {
         [self tendies_forceHideNativeWallpaperLayers];
         
-        // 当未解锁或正在拖动过程中，主动抢占引擎控制权
         if (!g_isUnlocked || [GetSharedEngine() isUnlocking] || [GetSharedEngine() superview] == nil) {
             [self tendies_handleReparent];
         }
@@ -522,7 +529,7 @@ static TendiesRenderEngineView *GetSharedEngine() {
 %end
 
 // ==========================================
-// 4. 【核心修复】利用进度智能分配宿主容器 (Reparenting Coordinator)
+// 4. 进度同步与图层交接分配 (无缝穿梭机制)
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -545,12 +552,10 @@ static TendiesRenderEngineView *GetSharedEngine() {
     if (g_enabled) {
         TendiesRenderEngineView *engine = GetSharedEngine();
         
-        // 传递动画进度
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
         });
         
-        // 智能交接图层：当进度为 1.0 (完全解锁) 时，交接回系统底层桌面WallpaperWindow
         if (progress >= 1.0) {
             UIView *targetContainer = [self valueForKey:@"_wallpaperWindow"];
             if (!targetContainer) targetContainer = [self valueForKey:@"_wallpaperContainerView"];
@@ -561,7 +566,6 @@ static TendiesRenderEngineView *GetSharedEngine() {
                 engine.frame = targetContainer.bounds;
             }
         } else {
-            // 当进度 < 1.0 (锁屏或正在下拉通知中心) 时，发出广播让上方 CoverSheet 瞬间抓取引擎，彻底解决穿透问题！
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesRequestReparentToCoverSheet" object:nil];
             });
