@@ -85,37 +85,6 @@ typedef struct {
 @end
 
 @interface CSPosterSwitcherViewController : UIViewController
-- (void)_applicationHosterDidInvalidate;
-- (void)_dismissEntirely;
-- (void)_dismissTier:(BOOL)tier;
-- (unsigned long long)_effectiveSceneClientLayoutMode;
-- (void)_evaluateInitialTouchTransferActuation;
-- (void)_evaluateInitialTransitionActivation;
-- (void)_transitionScene:(id)scene toLayoutMode:(unsigned long long)mode animated:(BOOL)animated;
-- (void)_updateAppearanceWithClientLayoutMode:(unsigned long long)mode previousLayoutMode:(unsigned long long)prevMode transitionContext:(id)context;
-- (void)_updateAppearanceWithoutAnimation;
-- (void)_updateComplicationRowHiddenForSceneSettings:(id)settings;
-- (void)_updateFloatingLayerInlinedForSceneSettings:(id)settings;
-- (void)_updateLiveContentViewSpecificationForSceneSettings:(id)settings;
-- (void)_updateLiveFloatingViewSpecificationForSceneSettings:(id)settings;
-- (void)_updateLockVibrancyConfigurationForSceneSettings:(id)settings;
-- (void)_updateOverlayViewSpecificationForSceneSettings:(id)settings;
-- (void)_updateTopButtonLayoutForSceneSettings:(id)settings;
-- (void)handleBottomEdgeGestureBegan:(id)began;
-- (void)handleBottomEdgeGestureChanged:(id)changed;
-- (void)handleBottomEdgeGestureEnded:(id)ended;
-- (_Bool)handleEvent:(id)event;
-- (void)sceneHandle:(id)handle didCreateScene:(id)scene;
-- (void)sceneHandle:(id)handle didDestroyScene:(id)scene;
-- (_Bool)sceneHandle:(id)handle didReceiveAction:(id)action;
-- (void)sceneHandle:(id)handle didUpdateClientSettingsWithDiff:(id)diff transitionContext:(id)context;
-- (void)sceneHandle:(id)handle didUpdateContentState:(long long)state;
-- (void)sceneHandle:(id)handle didUpdateSettingsWithDiff:(id)diff previousSettings:(id)settings;
-- (void)setCoverSheetBackgroundView:(id)view;
-- (void)setCoverSheetFloatingView:(id)view;
-- (void)setCoverSheetWallpaperView:(id)view;
-- (void)viewDidAppear:(BOOL)animated;
-- (void)viewDidDisappear:(BOOL)animated;
 - (void)loadView;
 @end
 
@@ -124,49 +93,7 @@ typedef struct {
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source;
 - (void)setDismissed:(BOOL)dismissed;
 - (void)_setDismissed:(BOOL)dismissed;
-- (void)setCoverSheetIsVisible:(BOOL)visible;
-- (void)setPartiallyOnScreen:(BOOL)screen;
 - (void)setHidesDimmingLayer:(BOOL)layer;
-- (void)_setHasContentAboveCoverSheet:(BOOL)sheet;
-- (void)_setHasContentAboveCoverSheet:(BOOL)sheet isSignificantUserInteraction:(BOOL)interaction;
-- (void)updateInterstitialPresentationWithProgress:(double)progress;
-- (void)scrollPanGestureChanged:(id)changed;
-- (void)scrollPanGestureDidUpdate:(id)update;
-- (void)_scrollPanGestureBegan:(id)began;
-- (void)_scrollPanGestureChanged:(id)changed;
-- (void)_scrollPanGestureEnded:(id)ended;
-- (void)_updateBackground;
-- (void)_updateBackgroundContentView;
-- (void)_updateWallpaperEffectView;
-- (void)_updateWallpaper;
-- (void)_updateWallpaperFloatingLayerContainerView;
-- (void)_updateForegroundView;
-- (void)_updateContent;
-- (void)_updateDimmingLayer;
-- (void)_updateFullBleedContent;
-- (void)_updateComplicationSidebar;
-- (void)_updateAppearanceForTransitionToOrientation:(long long)orientation;
-- (void)updateAppearanceForController:(id)controller;
-- (void)updateAppearanceForController:(id)controller withAnimationSettings:(id)settings completion:(id /* block */)completion;
-- (void)updateBehaviorForController:(id)controller;
-- (void)updateFloatingLayerOrdering;
-- (void)updatePosterSwitcherPresentationWithProgress:(double)progress;
-- (void)requestIdleTimerResetForPoster;
-- (void)startObservingAmbientPresentationForController:(id)controller;
-- (void)ambientPresentationController:(id)controller didUpdatePresented:(BOOL)presented;
-- (void)ambientPresentationControllerCancelledPossiblePresentation:(id)presentation;
-- (void)ambientPresentationControllerWillPossiblyPresent:(id)present;
-- (void)overlayController:(id)controller didChangePresentationProgress:(double)progress newPresentationProgress:(double)newProgress fromLeading:(_Bool)leading;
-- (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear;
-- (void)viewWillLayoutSubviews;
-- (void)viewDidLayoutSubviews;
-- (void)viewWillAppear:(BOOL)animated;
-- (void)viewDidAppear:(BOOL)animated;
-- (void)viewWillDisappear:(BOOL)animated;
-- (void)viewDidDisappear:(BOOL)animated;
-- (void)viewDidLoad;
-- (void)loadView;
-- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator;
 @end
 
 @interface SBCoverSheetSlidingViewController : UIViewController
@@ -228,7 +155,7 @@ static BOOL g_isHidingNativeChrome = NO;
 static BOOL g_isMountingEngine = NO;
 
 // ==========================================
-// 工具函数 (增加主线程保护)
+// 工具函数 (严格强制主线程)
 // ==========================================
 static void TendiesHideLayerTree(CALayer *layer) {
     if (!layer) return;
@@ -272,7 +199,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
     if (!g_enabled || !vc) return;
     
-    // UI操作必须在主线程，防崩溃核心
+    // 强制 UI 操作在主线程，防止 TICK 动画队列崩溃！
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             TendiesHideCoverSheetChrome(vc);
@@ -294,6 +221,7 @@ static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
         @try {
             UIView *floatingLayer = TendiesSafeValueForKey(vc, @"_floatingLayerView");
             TendiesHideViewTree(floatingLayer);
+            if (floatingLayer) { floatingLayer.frame = CGRectZero; } // 核爆级隐藏
         } @catch (__unused NSException *e) {}
 
         @try {
@@ -766,14 +694,14 @@ static void TendiesHidePosterSwitcherController(id vc) {
 @end
 
 // ==========================================
-// 挂载引擎视图 (加入主线程保护)
+// 挂载引擎视图 (主线程强保)
 // ==========================================
 static char kGlobalTendiesEngineKey;
 
 static void EnsureEngineViewIsMounted(void) {
     if (!g_enabled) return;
     
-    // UI操作必须在主线程，防崩溃核心
+    // UI 操作必须在主线程执行！
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             EnsureEngineViewIsMounted();
@@ -820,45 +748,76 @@ static void EnsureEngineViewIsMounted(void) {
 }
 
 // ==========================================
-// 强制压制原生壁纸闪现、恢复（核心新增）
+// 终极武器：核爆级零尺寸抹杀（Zero-Frame Nuke）
+// 强行把原生壁纸的尺寸锁定为 0x0，让系统的 CAAnimation 彻底失效
 // ==========================================
 
-%hook SBWallpaperEffectView
-- (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
-        %orig(YES);
-    } else {
-        %orig;
-    }
+%hook PBUIWallpaperView
+- (void)setFrame:(CGRect)frame {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(frame); }
+}
+- (void)setBounds:(CGRect)bounds {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(bounds); }
 }
 - (void)setAlpha:(CGFloat)alpha {
-    if (g_enabled) {
-        %orig(0.0);
-    } else {
-        %orig;
-    }
+    if (g_enabled) { %orig(0.0); } else { %orig(alpha); }
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) { %orig(YES); } else { %orig(hidden); }
 }
 %end
 
 %hook CSBackgroundContentView
-- (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
-        %orig(YES);
-    } else {
-        %orig;
-    }
+- (void)setFrame:(CGRect)frame {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(frame); }
+}
+- (void)setBounds:(CGRect)bounds {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(bounds); }
 }
 - (void)setAlpha:(CGFloat)alpha {
-    if (g_enabled) {
-        %orig(0.0);
-    } else {
-        %orig;
-    }
+    if (g_enabled) { %orig(0.0); } else { %orig(alpha); }
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) { %orig(YES); } else { %orig(hidden); }
 }
 %end
 
+%hook SBWallpaperEffectView
+- (void)setFrame:(CGRect)frame {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(frame); }
+}
+- (void)setBounds:(CGRect)bounds {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(bounds); }
+}
+- (void)setAlpha:(CGFloat)alpha {
+    if (g_enabled) { %orig(0.0); } else { %orig(alpha); }
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) { %orig(YES); } else { %orig(hidden); }
+}
+%end
+
+%hook PBUIWallpaperEffectViewBase
+- (void)setFrame:(CGRect)frame {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(frame); }
+}
+- (void)setBounds:(CGRect)bounds {
+    if (g_enabled) { %orig(CGRectZero); } else { %orig(bounds); }
+}
+- (void)setAlpha:(CGFloat)alpha {
+    if (g_enabled) { %orig(0.0); } else { %orig(alpha); }
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) { %orig(YES); } else { %orig(hidden); }
+}
+%end
+
+// ==========================================
+// 动画拦截机制
+// ==========================================
 %hook SBCoverSheetSlidingViewController
 
+// iOS 17
 - (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
     CGRect result = %orig;
     if (g_enabled) {
@@ -867,12 +826,21 @@ static void EnsureEngineViewIsMounted(void) {
     return result;
 }
 
+// iOS 16
 - (CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
     CGRect result = %orig;
     if (g_enabled) {
         EnsureEngineViewIsMounted();
     }
     return result;
+}
+
+// 另一个可能的动画核心回调
+- (void)_animationTickedWithProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    %orig;
+    if (g_enabled) {
+        EnsureEngineViewIsMounted();
+    }
 }
 
 - (void)_dismissGestureChangedWithGestureRecognizer:(id)recognizer {
@@ -1469,7 +1437,6 @@ static void EnsureEngineViewIsMounted(void) {
             void (^completionBlock)(void) = arg5;
             completionBlock();
         }
-        // 由于可能被后台调用，利用修复后的 EnsureEngineViewIsMounted 是安全的
         EnsureEngineViewIsMounted();
         return;
     }
