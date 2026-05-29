@@ -40,7 +40,6 @@ static NSString * GetTendiesStorageDir() {
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
-// 真正的全局壁纸总司令部！
 @interface SBWallpaperController : NSObject
 + (id)sharedInstance;
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
@@ -80,13 +79,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 4. 统一渲染引擎 (加入强制 GPU 刷新与阻尼交互)
+// 4. 统一渲染引擎 (加入时间轴滑动劫持与防御锁)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
 @property (nonatomic, strong) BSUICAPackageView *floatingView;
 @property (nonatomic, strong) BSUICAPackageView *fgView;
 
+@property (nonatomic, strong) NSString *currentState; // 核心防御锁
 @property (nonatomic, assign) BOOL isPathCached;
 @property (nonatomic, assign) BOOL isUnlocking; 
 @property (nonatomic, strong) NSString *cachedBgPath;
@@ -105,10 +105,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        // 🔥 核心点 1：设为纯黑！这会像幕布一样彻底遮挡住底下原生海报的淡入淡出！
+        // 彻底遮挡底部原生跨接切换的黑布
         self.backgroundColor = [UIColor blackColor]; 
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
+        
+        self.currentState = @"Init"; // 初始伪状态
         self.isPathCached = NO;
         self.isUnlocking = NO;
         
@@ -116,12 +118,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"TendiesEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"TendiesEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"TendiesEngineProgress" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleStateChange:) name:@"TendiesEngineStateChange" object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+// 🛡️ 绝对防御：拒绝系统强行隐藏我们的壁纸引擎！
+- (void)setHidden:(BOOL)hidden {
+    [super setHidden:NO];
+}
+- (void)setAlpha:(CGFloat)alpha {
+    [super setAlpha:1.0];
 }
 
 - (void)forceReload {
@@ -139,23 +150,24 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.fgView) self.fgView.frame = self.bounds;
 }
 
-// 亮屏强制唤醒，粉碎假死
+// ==================================
+// 🔥 生命周期与指尖交互核心控制
+// ==================================
+
 - (void)onWakeUp {
     if (!g_enabled) return;
     
-    if (self.superview) self.superview.layer.speed = 1.0;
-    self.layer.speed = 1.0;
-    if (self.bgView) self.bgView.layer.speed = 1.0;
-    if (self.floatingView) self.floatingView.layer.speed = 1.0;
-    if (self.fgView) self.fgView.layer.speed = 1.0;
-
+    // 恢复正常时间轴
     self.isUnlocking = NO;
+    self.bgView.layer.speed = 1.0;
+    self.floatingView.layer.speed = 1.0;
+    self.fgView.layer.speed = 1.0;
+    self.bgView.layer.timeOffset = 0.0;
+    self.floatingView.layer.timeOffset = 0.0;
+    self.fgView.layer.timeOffset = 0.0;
+
     NSString *correctState = g_isUnlocked ? @"Unlock" : @"Locked";
-    
-    [CATransaction begin];
     [self transitionToState:correctState animated:NO];
-    [CATransaction commit];
-    [CATransaction flush]; // 直接推送底层渲染服务
 }
 
 - (void)onSleep {
@@ -164,25 +176,70 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🔥 核心点 2：滑动阻尼交互驱动！
+- (void)handleStateChange:(NSNotification *)note {
+    NSString *state = note.userInfo[@"state"];
+    if (state) {
+        // 当系统明确切换到桌面或锁屏时，恢复正常流速
+        self.isUnlocking = NO;
+        self.bgView.layer.speed = 1.0;
+        self.floatingView.layer.speed = 1.0;
+        self.fgView.layer.speed = 1.0;
+        self.bgView.layer.timeOffset = 0.0;
+        self.floatingView.layer.timeOffset = 0.0;
+        self.fgView.layer.timeOffset = 0.0;
+        [self transitionToState:state animated:YES];
+    }
+}
+
+// 👑 指尖魔术：用 TimeOffset 完美跟踪滑动进度！
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     
-    // 当手指开始上滑解锁，立即触发 CAML 的形变动画
-    if (progress > 0.05 && !self.isUnlocking) {
-        self.isUnlocking = YES;
-        [self transitionToState:@"Unlock" animated:YES];
-    } 
-    // 若取消上滑，退回底部则恢复锁定状态
-    else if (progress <= 0.05 && self.isUnlocking) {
-        self.isUnlocking = NO;
-        [self transitionToState:@"Locked" animated:YES];
+    if (progress > 0.02) {
+        if (!self.isUnlocking) {
+            self.isUnlocking = YES;
+            // 触发进入桌面状态 (激活 CAML 的动画构建)
+            [self transitionToState:@"Unlock" animated:YES];
+            
+            // 立刻冻结图层时间轴，准备进行指尖阻尼 Scrubbing
+            self.bgView.layer.speed = 0.0;
+            self.floatingView.layer.speed = 0.0;
+            self.fgView.layer.speed = 0.0;
+        }
+        
+        // 映射百分比！CAML 里 CASpringAnimation 的时长通常在 0.8s 左右
+        // 利用时间偏移，指尖划到哪里，图层状态就停在动画的第几秒！
+        CFTimeInterval offset = progress * 0.8;
+        self.bgView.layer.timeOffset = offset;
+        self.floatingView.layer.timeOffset = offset;
+        self.fgView.layer.timeOffset = offset;
+        
+    } else {
+        // 用户松手放弃解锁，进度回落到 0
+        if (self.isUnlocking) {
+            self.isUnlocking = NO;
+            // 恢复时间流逝，重新锁定
+            self.bgView.layer.speed = 1.0;
+            self.floatingView.layer.speed = 1.0;
+            self.fgView.layer.speed = 1.0;
+            self.bgView.layer.timeOffset = 0.0;
+            self.floatingView.layer.timeOffset = 0.0;
+            self.fgView.layer.timeOffset = 0.0;
+            
+            [self transitionToState:@"Locked" animated:YES];
+        }
     }
 }
 
+// 🛡️ 状态防抖锁：杜绝触摸导致 CA 假死
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
+    
+    // 🔥 如果系统疯狂下发同样的状态，直接拦截！保护 CAAnimation 图层不被清空。
+    if ([self.currentState isEqualToString:stateName]) return;
+    self.currentState = [stateName copy];
+    
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated];
         [self.floatingView setState:stateName animated:animated];
@@ -194,6 +251,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
+// 加载资源包
 - (void)reloadWallpaperViews {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         if (!g_enabled) {
@@ -252,6 +310,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
             [self setNeedsLayout];
             
+            self.currentState = @"Init"; // 强制重置锁
             [CATransaction begin];
             [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
             [CATransaction commit];
@@ -263,7 +322,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 5. 🎯 终极挂载辅助函数 (直击 _wallpaperWindow)
+// 5. 🎯 终极挂载辅助函数 (强制绑定 _wallpaperWindow)
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
@@ -289,7 +348,7 @@ static void EnsureEngineViewIsMounted() {
     }
     engineView.frame = targetContainer.bounds;
     
-    // 强制置顶！因为是全黑底色，原生海报就算在下面交叉过渡，用户也根本看不见！
+    // 强制置顶。全黑底色会遮盖原生淡入淡出的海报。
     [targetContainer bringSubviewToFront:engineView];
 }
 
@@ -306,11 +365,11 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 精准捕获交互进度
+// 捕捉滑动交互进度，精准下发给 RenderEngine 驱动 timeOffset
 %hook SBWallpaperController
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
-    EnsureEngineViewIsMounted(); // 滑动时确保引擎未丢失
+    EnsureEngineViewIsMounted();
     if (g_enabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
