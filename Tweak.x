@@ -11,10 +11,8 @@
 #endif
 
 // ==========================================
-// 核心私有 API 声明 & 结构体修复
+// 核心私有 API 声明 & 结构体
 // ==========================================
-
-// 💡 修复编译错误：全局具名声明该结构体
 typedef struct {
     long long x0;
     long long x1;
@@ -86,7 +84,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (解析 Wallpaper.plist + 恢复指尖跟踪)
+// 核心渲染引擎 (解析 Wallpaper.plist + 完美指尖追踪)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -109,7 +107,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor blackColor]; 
+        self.backgroundColor = [UIColor clearColor]; // 必须透明
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -162,7 +160,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🎯 原封不动地恢复你第一版写得非常好的指尖时间轴跟踪代码
+// 🎯 核心交互动画：通过时间轴精准搓擦 (Scrubbing)，实现多层跟随滑动！
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
@@ -170,7 +168,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (progress > 0.01) {
         if (!self.isUnlocking) {
             self.isUnlocking = YES;
-            // 先将时间轴归零冻结，再派发动画指令
+            
+            // 1. 下发 Unlock 状态，令 CAML 内部挂载 CASpringAnimation
+            [self transitionToState:@"Unlock" animated:YES];
+            // 2. 必须强制渲染树更新
+            [CATransaction flush];
+            
+            // 3. 冻结时间
             self.bgView.layer.speed = 0.0;
             self.floatingView.layer.speed = 0.0;
             self.fgView.layer.speed = 0.0;
@@ -178,10 +182,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.bgView.layer.beginTime = 0.0;
             self.floatingView.layer.beginTime = 0.0;
             self.fgView.layer.beginTime = 0.0;
-            
-            [self transitionToState:@"Unlock" animated:YES];
         }
-        // 映射 CAML 弹簧动画进度 (0.8s 为主轴)
+        
+        // 💡 从你的 CAML 看出，苹果原生的弹簧动画持续时间刚好是 0.8s！
         CFTimeInterval offset = progress * 0.8;
         self.bgView.layer.timeOffset = offset;
         self.floatingView.layer.timeOffset = offset;
@@ -217,7 +220,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 🎯 完美解析 Wallpaper.plist 获取真实的文件名
+// 🎯 解析 Wallpaper.plist 智能读取联动 .ca 包
 - (void)parseWallpaperPlist {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *plistPath = nil;
@@ -249,7 +252,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
     
-    // 如果找不到 plist (兼容老格式壁纸)，使用名称匹配作为后备方案
+    // 如果没有 plist，使用名称模糊匹配
     enumerator = [fm enumeratorAtPath:g_tendiesPath];
     for (NSString *subpath in enumerator) {
         NSString *fileName = subpath.lastPathComponent;
@@ -315,14 +318,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 原汁原味保留：挂载核心引擎到全局底层视图
+// 回归初心：挂载到全局系统底层容器
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
-    // 使用你第一版提供的稳定挂载点，绝不动桌面
+    // 💡 挂载在最深处的系统大容器中，保证桌面的完美展示！
     UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperOverlayContainerView"];
     if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
     if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
@@ -347,14 +350,14 @@ static void EnsureEngineViewIsMounted() {
 
 // ==========================================
 // 🚨 快照杀手 & 底层拦截 
-// 修复锁屏原壁纸漏出、桌面原壁纸漏出、景深遮挡
+// (根治锁屏原壁纸漏出、桌面原壁纸漏出、景深遮挡)
 // ==========================================
 
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        // 彻底透明化 iOS 16/17 桌面的原生海报视图，让我们的底层 Engine 露出来！
+        // 隐藏桌面上层原生的 PosterKit 壁纸层，让我们的引擎显露出来
         if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
             UIView *homeView = [self homescreenWallpaperView];
             if (homeView) homeView.alpha = 0.0;
@@ -370,6 +373,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
+// 拦截系统生成的临时模糊特效/过渡快照
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
@@ -387,13 +391,14 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
-        // 🔥 关键拦截 1：消灭导致你滑动锁屏时看到旧壁纸的罪魁祸首！
+        // 🔥 必杀 1：彻底消灭导致滑动锁屏时看到旧壁纸的罪魁祸首！
+        // 它是挂载在 CoverSheet 下方的海报背景，必须把它透明化！
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 0.0; 
         }
         
-        // 🔥 关键拦截 2：消灭开启景深效果 (Depth Effect) 时的图层遮挡！
+        // 🔥 必杀 2：消灭景深效果 (Depth Effect) 时生成的时间遮挡图层！
         UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
         if (floatingLayer) {
             floatingLayer.alpha = 0.0;
@@ -422,6 +427,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
+
 
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -453,7 +459,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步
+// 亮灭屏状态同步
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
