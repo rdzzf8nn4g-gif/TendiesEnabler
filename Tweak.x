@@ -22,15 +22,26 @@ static NSString * GetTendiesStorageDir() {
 #endif
 }
 
+// ==========================================
+// 系统私有 API 声明 (iOS 16/17 核心)
+// ==========================================
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
+@interface CSBackgroundContentViewController : UIViewController
+@end
+
+@interface CSCoverSheetViewController : UIViewController
+@property (retain, nonatomic) CSBackgroundContentViewController *backgroundContentViewController;
+- (void)setInScreenOffMode:(BOOL)mode; 
+- (void)setDismissed:(BOOL)dismissed;
+@end
+
 @interface SBWallpaperController : NSObject
 + (id)sharedInstance;
-- (void)updateWallpaperAnimationWithProgress:(double)progress;
 @end
 
 @interface SBBacklightController : NSObject
@@ -38,11 +49,9 @@ static NSString * GetTendiesStorageDir() {
 @property (readonly, nonatomic) long long backlightState;
 @end
 
-@interface CSCoverSheetViewController : UIViewController
-- (void)setInScreenOffMode:(BOOL)mode; 
-- (void)setDismissed:(BOOL)dismissed;
-@end
-
+// ==========================================
+// 全局状态与配置
+// ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
 static BOOL g_isUnlocked = NO; 
@@ -67,7 +76,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心渲染引擎 (修复环境动画假死)
+// 核心渲染引擎 (修复环境动画与触摸失效)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -84,7 +93,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated;
 - (void)onWakeUp;
 - (void)onSleep;
-- (void)onProgress:(NSNotification *)note;
+- (void)onSwipeProgress:(NSNotification *)note;
 @end
 
 @implementation TendiesRenderEngineView
@@ -101,7 +110,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(forceReload) name:@"TendiesEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"TendiesEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"TendiesEngineSleep" object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"TendiesEngineProgress" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSwipeProgress:) name:@"TendiesEngineSwipeProgress" object:nil];
     }
     return self;
 }
@@ -140,19 +149,20 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
-// 🎯 修复：不再强行暂停时间轴，保留马里奥的走路动画！使用阻尼触发！
-- (void)onProgress:(NSNotification *)note {
+// 🎯 修复交互：不再冻结时间轴！直接利用系统传来的滑动进度触发弹簧动画！
+- (void)onSwipeProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     
-    // 手指只要滑动超过 5%，立刻利用 CAML 原生的 CASpringAnimation 触发阻尼进入桌面动画
-    if (progress > 0.05) {
+    // progress: 1.0 (锁屏完全显示) -> 0.0 (桌面完全显示)
+    // 只要用户上滑超过一丁点 (进度降到 0.98 以下)，立即触发 Unlock 形变，马里奥照常走路！
+    if (progress < 0.98) {
         if (!self.isUnlocking) {
             self.isUnlocking = YES;
             [self transitionToState:@"Unlock" animated:YES];
         }
     } else {
-        // 退回锁屏时，恢复锁定状态的弹簧形变
+        // 用户取消滑动，退回锁屏，触发 Locked 归位
         if (self.isUnlocking) {
             self.isUnlocking = NO;
             [self transitionToState:@"Locked" animated:YES];
@@ -162,7 +172,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled) return;
-    if ([self.currentState isEqualToString:stateName]) return; // 状态锁：防止重复下发导致动画闪烁
+    
+    // 🛡️ 终极防御锁：如果系统重复下发相同状态，直接拦截！保护底层动画对象不被强制重置！
+    if ([self.currentState isEqualToString:stateName]) return; 
     self.currentState = [stateName copy];
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
@@ -240,15 +252,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 挂载核心引擎到 Window 最顶层
+// 挂载核心引擎到全局最底层 Window
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
-    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
-    if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
     if (!targetContainer) return;
     
     TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
@@ -264,26 +275,56 @@ static void EnsureEngineViewIsMounted() {
         [targetContainer addSubview:engineView];
     }
     engineView.frame = targetContainer.bounds;
+    
+    // 隐藏掉桌面系统原生的交叉淡入层
+    for (UIView *sub in targetContainer.subviews) {
+        if (sub != engineView) {
+            sub.hidden = YES;
+            sub.alpha = 0.0;
+        }
+    }
     [targetContainer bringSubviewToFront:engineView];
 }
 
+
+// ==========================================
+// 🚨 杀招 1：屏蔽原生系统快照交叉覆盖！
+// ==========================================
 %hook SBWallpaperController
-- (void)updateWallpaperAnimationWithProgress:(double)progress {
-    %orig;
-    EnsureEngineViewIsMounted();
+
+// 拦截提取截图
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-        });
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
     }
+    %orig;
+}
+
+// 拦截后台切换器截图
+- (void)updatePosterSwitcherSnapshots {
+    if (!g_enabled) %orig;
 }
 %end
 
+
+// ==========================================
+// 🚨 杀招 2：隐藏锁屏原生海报，透出底层引擎！
+// ==========================================
 %hook CSCoverSheetViewController
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted();
+    if (g_enabled) {
+        // 剥开锁屏的遮羞布！让底层的 TendiesEngine 露出来！
+        UIViewController *bgVC = [self backgroundContentViewController];
+        if (bgVC && bgVC.view) {
+            bgVC.view.hidden = YES;
+            bgVC.view.alpha = 0.0;
+        }
+    }
 }
+
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
@@ -293,6 +334,7 @@ static void EnsureEngineViewIsMounted() {
         });
     }
 }
+
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
@@ -305,26 +347,31 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+
+// ==========================================
+// 🚨 杀招 3：精准获取滑动进度！
+// ==========================================
+%hook SBCoverSheetSlidingViewController
+
+// 这个方法掌管着你手指上下滑动的最精确百分比 (1.0 = 锁屏完全显示，0.0 = 完全进入桌面)
+- (CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    CGRect ret = %orig;
+    if (g_enabled) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineSwipeProgress" object:nil userInfo:@{@"progress": @(progress)}];
+        });
+    }
+    return ret;
+}
+
+%end
+
+
+// ==========================================
+// 亮灭屏同步
+// ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
-    %orig;
-    if (g_enabled) {
-        BOOL screenOn = (state != 0);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            if (g_isScreenOn) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineWake" object:nil];
-                });
-            } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineSleep" object:nil];
-                });
-            }
-        }
-    }
-}
-- (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
         BOOL screenOn = (state != 0);
