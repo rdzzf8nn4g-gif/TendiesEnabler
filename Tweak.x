@@ -46,7 +46,6 @@ typedef struct {
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 - (void)tendies_forceHideNativeWallpaperLayers; 
-- (void)tendies_handleReparent;
 @end
 
 @interface SBWallpaperEffectView : UIView
@@ -92,7 +91,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心：CAML 逐帧解析器
+// 核心：CAML 逐帧解析器 (完美提取坐标，赋予单引擎物理互动)
 // ==========================================
 @interface TendiesCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -157,7 +156,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
-// 核心渲染引擎视图
+// 核心渲染引擎视图 (纯正单实例结构)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -246,10 +245,11 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
+// 核心插值方法：彻底解决以前只显示过渡动画（假死/渐变）的问题
 - (void)applyProgress:(double)progress parser:(TendiesCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     [CATransaction begin]; 
-    [CATransaction setDisableActions:YES];
+    [CATransaction setDisableActions:YES]; // 禁用系统默认补间动画，强行注入计算坐标
     for (NSString *targetId in parser.statesData) {
         CALayer *layer = layerMap[targetId]; if (!layer) continue;
         NSDictionary *states = parser.statesData[targetId];
@@ -292,6 +292,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
         [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
     }
     
+    // 继续交由系统接管透明度等遗留效果
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated]; [self.floatingView setState:stateName animated:animated]; [self.fgView setState:stateName animated:animated];
     } else {
@@ -356,20 +357,32 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 @end
 
+
 // ==========================================
-// 全局单例引擎
+// 完美动态挂载：彻底解决下拉透视 App 的问题
 // ==========================================
-static TendiesRenderEngineView *g_sharedEngine = nil;
-static TendiesRenderEngineView *GetSharedEngine() {
-    if (!g_sharedEngine) {
-        g_sharedEngine = [[TendiesRenderEngineView alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        [g_sharedEngine reloadWallpaperViews];
+static void MountTendiesEngineToTarget(UIView *targetContainer) {
+    if (!g_enabled || !targetContainer) return;
+    
+    // 使用单例全局引擎，防止重建导致掉帧或闪烁
+    TendiesRenderEngineView *engineView = objc_getAssociatedObject([UIApplication sharedApplication], "GlobalTendiesEngine");
+    if (!engineView) {
+        engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
+        objc_setAssociatedObject([UIApplication sharedApplication], "GlobalTendiesEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [engineView reloadWallpaperViews];
     }
-    return g_sharedEngine;
+    
+    // 动态转移视图层级
+    if (engineView.superview != targetContainer) {
+        [engineView removeFromSuperview];
+        [targetContainer addSubview:engineView];
+        [targetContainer sendSubviewToBack:engineView];
+    }
+    engineView.frame = targetContainer.bounds;
 }
 
 
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -394,7 +407,7 @@ static TendiesRenderEngineView *GetSharedEngine() {
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层
+// 2. 干掉滑动时的系统高斯模糊过渡层 (完全恢复你的初版)
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -404,77 +417,53 @@ static TendiesRenderEngineView *GetSharedEngine() {
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) %orig(0.0); else %orig;
+    if (g_enabled) {
+        %orig(0.0);
+    } else {
+        %orig;
+    }
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) %orig(YES); else %orig;
+    if (g_enabled) {
+        %orig(YES);
+    } else {
+        %orig;
+    }
 }
 %end
 
-
-// ==========================================
-// 3. 智能管理 CoverSheet 动态图层与安全防黑屏
-// ==========================================
+// 3. 暴力拦截 CoverSheet (锁屏) 的所有后台视图滚动刷新事件 (完全恢复你的初版)
 %hook CSCoverSheetViewController
-
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"TendiesRequestReparentToCoverSheet" object:nil];
-    %orig;
-}
-
-- (void)viewDidLoad {
-    %orig;
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(tendies_handleReparent) name:@"TendiesRequestReparentToCoverSheet" object:nil];
-}
-
-// 【修复关键1】 必须有 %new
-%new
-- (void)tendies_handleReparent {
-    if (!g_enabled) return;
-    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-    
-    // 严谨判空：绝不挂载到 self.view 导致你的锁屏时间与通知被遮挡！
-    if (bgVC && bgVC.view) {
-        UIView *targetLockView = bgVC.view;
-        TendiesRenderEngineView *engine = GetSharedEngine();
-        
-        if (engine.superview != targetLockView) {
-            [engine removeFromSuperview];
-            [targetLockView insertSubview:engine atIndex:0];
-        }
-        engine.frame = targetLockView.bounds;
-    }
-}
-
-// 【修复关键2】 补上缺失的 %new，彻底根绝 unrecognized selector 崩溃
 %new
 - (void)tendies_forceHideNativeWallpaperLayers {
-    if (!g_enabled) return;
-    
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-    
     if (bgVC && bgVC.view) {
-        UIView *bgView = bgVC.view;
-        bgView.alpha = 1.0;
-        bgView.hidden = NO;
-        bgView.backgroundColor = [UIColor blackColor];
-        
-        // 只隐藏系统原生壁纸层，放过我们的渲染引擎
-        for (UIView *sub in bgView.subviews) {
-            if (![sub isKindOfClass:[TendiesRenderEngineView class]]) {
-                sub.alpha = 0.0;
-                sub.hidden = YES;
+        // 【关键修复】：不要隐藏容器本身，否则会透视 App！
+        bgVC.view.alpha = 1.0;
+        bgVC.view.hidden = NO;
+        bgVC.view.backgroundColor = [UIColor clearColor];
+
+        // 遍历并隐藏原生的壁纸组件，唯独保留我们的自定义引擎视图
+        for (UIView *subview in bgVC.view.subviews) {
+            if (![subview isKindOfClass:[TendiesRenderEngineView class]]) {
+                subview.alpha = 0.0;
+                subview.hidden = YES;
             }
         }
     }
-
-    UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-    if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
     
+    UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+    if (floatingLayer) {
+        floatingLayer.alpha = 0.0;
+        floatingLayer.hidden = YES;
+    }
     if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
         @try {
             UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
-            if (dimmingLayer) { dimmingLayer.alpha = 0.0; dimmingLayer.hidden = YES; }
+            if (dimmingLayer) {
+                dimmingLayer.alpha = 0.0;
+                dimmingLayer.hidden = YES;
+            }
         } @catch (NSException *e) {}
     }
 }
@@ -484,8 +473,10 @@ static TendiesRenderEngineView *GetSharedEngine() {
     if (g_enabled) {
         [self tendies_forceHideNativeWallpaperLayers];
         
-        if (!g_isUnlocked || [GetSharedEngine() isUnlocking] || [GetSharedEngine() superview] == nil) {
-            [self tendies_handleReparent];
+        // 【关键修复】：锁屏出现或正在下拉时，把壁纸抓取到锁屏背景容器中，完美盖住底层 App！
+        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        if (bgVC && bgVC.view) {
+            MountTendiesEngineToTarget(bgVC.view);
         }
     }
 }
@@ -498,15 +489,21 @@ static TendiesRenderEngineView *GetSharedEngine() {
 }
 
 - (void)_updateBackgroundContentView {
-    %orig; if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
+    %orig;
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
 - (void)_updateWallpaperEffectView {
-    %orig; if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
+    %orig;
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
 - (void)_updateWallpaper {
-    %orig; if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
+    %orig;
+    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
 }
-
+- (void)updatePosterSwitcherSnapshots {
+    if (g_enabled) return;
+    %orig;
+}
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
@@ -529,7 +526,7 @@ static TendiesRenderEngineView *GetSharedEngine() {
 %end
 
 // ==========================================
-// 4. 进度同步与图层交接分配 (无缝穿梭机制)
+// 动画进度获取及快照拦截 (完全恢复你的初版，仅仅通过通知抛给 Parser 运算)
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -546,33 +543,26 @@ static TendiesRenderEngineView *GetSharedEngine() {
     if (g_enabled) return;
     %orig;
 }
-
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (g_enabled) {
-        TendiesRenderEngineView *engine = GetSharedEngine();
-        
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-        });
-        
-        if (progress >= 1.0) {
-            UIView *targetContainer = [self valueForKey:@"_wallpaperWindow"];
-            if (!targetContainer) targetContainer = [self valueForKey:@"_wallpaperContainerView"];
             
-            if (targetContainer && engine.superview != targetContainer) {
-                [engine removeFromSuperview];
-                [targetContainer insertSubview:engine atIndex:0];
-                engine.frame = targetContainer.bounds;
+            // 【关键修复】：当 progress >= 1.0 (完全解锁进入桌面) 时，锁屏容器消失
+            // 此时必须把壁纸重新挂载回桌面的最底层容器，防止桌面黑屏
+            if (progress >= 1.0) {
+                UIView *targetContainer = [self valueForKey:@"_wallpaperWindow"];
+                if (!targetContainer) targetContainer = [self valueForKey:@"_wallpaperContainerView"];
+                if (targetContainer) {
+                    MountTendiesEngineToTarget(targetContainer);
+                }
             }
-        } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesRequestReparentToCoverSheet" object:nil];
-            });
-        }
+        });
     }
 }
 %end
+
 
 // ==========================================
 // 亮灭屏与锁屏状态同步 (未变动)
@@ -615,6 +605,7 @@ static TendiesRenderEngineView *GetSharedEngine() {
     }
 }
 %end
+
 
 %ctor {
     reloadPrefs();
