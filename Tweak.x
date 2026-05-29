@@ -11,25 +11,7 @@
 #endif
 
 // ==========================================
-// 统一的过渡上下文类型，避免 Logos 匿名结构体签名冲突
-// ==========================================
-typedef struct {
-    double value;
-    struct {
-        struct {
-            double value;
-            _Bool inclusive;
-        } start;
-        struct {
-            double value;
-            _Bool inclusive;
-        } end;
-    } interval;
-    long long mode;
-} TendiesTransitionContext;
-
-// ==========================================
-// 结构体与必要私有类声明
+// 私有类与结构体声明
 // ==========================================
 typedef struct {
     long long x0;
@@ -105,8 +87,6 @@ typedef struct {
 - (void)ambientPresentationController:(id)controller didUpdatePresented:(BOOL)presented;
 - (void)ambientPresentationControllerCancelledPossiblePresentation:(id)presentation;
 - (void)ambientPresentationControllerWillPossiblyPresent:(id)present;
-- (void)transitionSource:(id)source didUpdateTransitionWithContext:(TendiesTransitionContext)context;
-- (void)transitionSource:(id)source didEndWithContext:(TendiesTransitionContext)context;
 - (void)overlayController:(id)controller didChangePresentationProgress:(double)progress newPresentationProgress:(double)newProgress fromLeading:(_Bool)leading;
 - (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear;
 - (void)viewWillLayoutSubviews;
@@ -121,7 +101,7 @@ typedef struct {
 @end
 
 // ==========================================
-// 全局变量与配置管理
+// 全局变量与配置
 // ==========================================
 static NSString * GetTendiesStorageDir() {
     NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
@@ -141,7 +121,7 @@ static BOOL g_isUnlocked = NO;
 static BOOL g_isScreenOn = YES;
 static double g_lockProgress = 0.0;
 
-static void reloadPrefs() {
+static void reloadPrefs(void) {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
     CFPreferencesAppSynchronize(appID);
 
@@ -169,13 +149,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 static void EnsureEngineViewIsMounted(void);
 
 // ==========================================
+// 稳定性保护
+// ==========================================
+static BOOL g_isHidingNativeChrome = NO;
+static BOOL g_isMountingEngine = NO;
+
+// ==========================================
 // 工具函数
 // ==========================================
 static void TendiesHideLayerTree(CALayer *layer) {
     if (!layer) return;
     layer.hidden = YES;
     layer.opacity = 0.0;
-    layer.allowsGroupOpacity = YES;
     for (CALayer *sub in layer.sublayers) {
         TendiesHideLayerTree(sub);
     }
@@ -201,56 +186,6 @@ static id TendiesSafeValueForKey(id obj, NSString *key) {
     }
 }
 
-static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
-    if (!g_enabled || !vc) return;
-
-    @try {
-        id bgVC = TendiesSafeValueForKey(vc, @"_backgroundContentViewController");
-        if (bgVC && [bgVC respondsToSelector:@selector(view)]) {
-            UIView *view = [bgVC valueForKey:@"view"];
-            TendiesHideViewTree(view);
-        }
-    } @catch (__unused NSException *e) {}
-
-    @try {
-        UIView *floatingLayer = TendiesSafeValueForKey(vc, @"_floatingLayerView");
-        TendiesHideViewTree(floatingLayer);
-    } @catch (__unused NSException *e) {}
-
-    @try {
-        UIView *dimmingView = TendiesSafeValueForKey(vc, @"_dimmingView");
-        TendiesHideViewTree(dimmingView);
-    } @catch (__unused NSException *e) {}
-
-    @try {
-        UIView *dimmingLayerView = TendiesSafeValueForKey(vc, @"_dimmingLayerView");
-        TendiesHideViewTree(dimmingLayerView);
-    } @catch (__unused NSException *e) {}
-
-    @try {
-        if ([vc respondsToSelector:@selector(setHidesDimmingLayer:)]) {
-            [vc setHidesDimmingLayer:YES];
-        } else {
-            [vc setValue:@YES forKey:@"hidesDimmingLayer"];
-        }
-    } @catch (__unused NSException *e) {}
-
-    @try {
-        UIView *statusBarBg = TendiesSafeValueForKey(vc, @"_statusBarBackgroundView");
-        if (statusBarBg) {
-            statusBarBg.hidden = YES;
-            statusBarBg.alpha = 0.0;
-            statusBarBg.layer.opacity = 0.0;
-        }
-    } @catch (__unused NSException *e) {}
-}
-
-static void TendiesRefreshSystemChromeAndEngine(CSCoverSheetViewController *vc) {
-    if (!g_enabled) return;
-    EnsureEngineViewIsMounted();
-    TendiesHideCoverSheetChrome(vc);
-}
-
 static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     if (!layer || !name.length) return nil;
     if ([layer.name isEqualToString:name]) return layer;
@@ -259,6 +194,75 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
         if (found) return found;
     }
     return nil;
+}
+
+static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
+    if (!g_enabled || !vc) return;
+    if (g_isHidingNativeChrome) return;
+
+    g_isHidingNativeChrome = YES;
+    @try {
+        @try {
+            id bgVC = TendiesSafeValueForKey(vc, @"_backgroundContentViewController");
+            if (bgVC && [bgVC respondsToSelector:@selector(view)]) {
+                UIView *view = [bgVC valueForKey:@"view"];
+                TendiesHideViewTree(view);
+            }
+        } @catch (__unused NSException *e) {}
+
+        @try {
+            UIView *floatingLayer = TendiesSafeValueForKey(vc, @"_floatingLayerView");
+            TendiesHideViewTree(floatingLayer);
+        } @catch (__unused NSException *e) {}
+
+        @try {
+            UIView *dimmingView = TendiesSafeValueForKey(vc, @"_dimmingView");
+            TendiesHideViewTree(dimmingView);
+        } @catch (__unused NSException *e) {}
+
+        @try {
+            UIView *dimmingLayerView = TendiesSafeValueForKey(vc, @"_dimmingLayerView");
+            TendiesHideViewTree(dimmingLayerView);
+        } @catch (__unused NSException *e) {}
+
+        @try {
+            if ([vc respondsToSelector:@selector(setHidesDimmingLayer:)]) {
+                [vc setHidesDimmingLayer:YES];
+            } else {
+                [vc setValue:@YES forKey:@"hidesDimmingLayer"];
+            }
+        } @catch (__unused NSException *e) {}
+
+        @try {
+            UIView *statusBarBg = TendiesSafeValueForKey(vc, @"_statusBarBackgroundView");
+            if (statusBarBg) {
+                statusBarBg.hidden = YES;
+                statusBarBg.alpha = 0.0;
+                statusBarBg.layer.opacity = 0.0;
+            }
+        } @catch (__unused NSException *e) {}
+    } @finally {
+        g_isHidingNativeChrome = NO;
+    }
+}
+
+static void TendiesRefreshSystemChromeAndEngine(CSCoverSheetViewController *vc) {
+    if (!g_enabled) return;
+    TendiesHideCoverSheetChrome(vc);
+}
+
+static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
+    if (!g_enabled || !vc) return;
+
+    @try {
+        UIView *homeView = [vc homescreenWallpaperView];
+        TendiesHideViewTree(homeView);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *lockView = [vc lockscreenWallpaperView];
+        TendiesHideViewTree(lockView);
+    } @catch (__unused NSException *e) {}
 }
 
 // ==========================================
@@ -605,8 +609,6 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
             [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
             [CATransaction commit];
             [CATransaction flush];
-
-            EnsureEngineViewIsMounted();
         });
     });
 }
@@ -620,56 +622,48 @@ static char kGlobalTendiesEngineKey;
 
 static void EnsureEngineViewIsMounted(void) {
     if (!g_enabled) return;
+    if (g_isMountingEngine) return;
 
-    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-    if (!wallpaperController) return;
-
-    UIView *targetContainer = nil;
+    g_isMountingEngine = YES;
     @try {
-        targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
-    } @catch (__unused NSException *e) {}
-    if (!targetContainer) {
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        if (!wallpaperController) return;
+
+        UIView *targetContainer = nil;
         @try {
-            targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+            targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
         } @catch (__unused NSException *e) {}
-    }
-    if (!targetContainer) return;
+        if (!targetContainer) {
+            @try {
+                targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+            } @catch (__unused NSException *e) {}
+        }
+        if (!targetContainer) return;
 
-    TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, &kGlobalTendiesEngineKey);
-    if (!engineView) {
-        engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
-        objc_setAssociatedObject(wallpaperController, &kGlobalTendiesEngineKey, engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [targetContainer addSubview:engineView];
-        [engineView reloadWallpaperViews];
-    }
+        TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, &kGlobalTendiesEngineKey);
+        if (!engineView) {
+            engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
+            objc_setAssociatedObject(wallpaperController, &kGlobalTendiesEngineKey, engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [targetContainer addSubview:engineView];
+            [engineView reloadWallpaperViews];
+        }
 
-    if (engineView.superview != targetContainer) {
-        [engineView removeFromSuperview];
-        [targetContainer addSubview:engineView];
-    }
+        if (engineView.superview != targetContainer) {
+            [engineView removeFromSuperview];
+            [targetContainer addSubview:engineView];
+        }
 
-    engineView.frame = targetContainer.bounds;
-    engineView.layer.zPosition = CGFLOAT_MAX;
-    [targetContainer bringSubviewToFront:engineView];
+        engineView.frame = targetContainer.bounds;
+        engineView.layer.zPosition = CGFLOAT_MAX;
+        [targetContainer bringSubviewToFront:engineView];
+    } @finally {
+        g_isMountingEngine = NO;
+    }
 }
 
 // ==========================================
 // PBUIWallpaperViewController
 // ==========================================
-static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
-    if (!g_enabled || !vc) return;
-
-    @try {
-        UIView *homeView = [vc homescreenWallpaperView];
-        TendiesHideViewTree(homeView);
-    } @catch (__unused NSException *e) {}
-
-    @try {
-        UIView *lockView = [vc lockscreenWallpaperView];
-        TendiesHideViewTree(lockView);
-    } @catch (__unused NSException *e) {}
-}
-
 %hook PBUIWallpaperViewController
 
 - (void)viewWillLayoutSubviews {
@@ -731,175 +725,171 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
 // ==========================================
 // CSCoverSheetViewController
 // ==========================================
-static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
-    TendiesRefreshSystemChromeAndEngine(vc);
-}
-
 %hook CSCoverSheetViewController
 
 - (void)loadView {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewDidLoad {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateBackgroundContentView {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateBackground {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateWallpaperEffectView {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateForegroundView {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateContent {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateDimmingLayer {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateFullBleedContent {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateComplicationSidebar {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_updateAppearanceForTransitionToOrientation:(long long)orientation {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)updateAppearanceForController:(id)controller {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)updateAppearanceForController:(id)controller withAnimationSettings:(id)settings completion:(id /* block */)completion {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)updateBehaviorForController:(id)controller {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)updateFloatingLayerOrdering {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)updatePosterSwitcherPresentationWithProgress:(double)progress {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)updateInterstitialPresentationWithProgress:(double)progress {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)scrollPanGestureChanged:(id)changed {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)scrollPanGestureDidUpdate:(id)update {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_scrollPanGestureBegan:(id)began {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_scrollPanGestureChanged:(id)changed {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_scrollPanGestureEnded:(id)ended {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_setHasContentAboveCoverSheet:(BOOL)sheet {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_setHasContentAboveCoverSheet:(BOOL)sheet isSignificantUserInteraction:(BOOL)interaction {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
@@ -910,7 +900,7 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source {
@@ -921,7 +911,7 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)setDismissed:(BOOL)dismissed {
@@ -933,23 +923,23 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)_setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)setCoverSheetIsVisible:(BOOL)visible {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)setPartiallyOnScreen:(BOOL)screen {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)setHidesDimmingLayer:(BOOL)layer {
@@ -958,47 +948,37 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
     } else {
         %orig;
     }
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)requestIdleTimerResetForPoster {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)startObservingAmbientPresentationForController:(id)controller {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)ambientPresentationController:(id)controller didUpdatePresented:(BOOL)presented {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)ambientPresentationControllerCancelledPossiblePresentation:(id)presentation {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)ambientPresentationControllerWillPossiblyPresent:(id)present {
     %orig;
-    TendiesHideCSNativeLayers(self);
-}
-
-- (void)transitionSource:(id)source didUpdateTransitionWithContext:(TendiesTransitionContext)context {
-    %orig;
-    TendiesHideCSNativeLayers(self);
-}
-
-- (void)transitionSource:(id)source didEndWithContext:(TendiesTransitionContext)context {
-    %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 - (void)overlayController:(id)controller didChangePresentationProgress:(double)progress newPresentationProgress:(double)newProgress fromLeading:(_Bool)leading {
     %orig;
-    TendiesHideCSNativeLayers(self);
+    TendiesHideCoverSheetChrome(self);
 }
 
 %end
