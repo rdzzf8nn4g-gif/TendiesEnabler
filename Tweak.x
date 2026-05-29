@@ -164,20 +164,49 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self transitionToState:@"Sleep" animated:NO];
 }
 
+// 🎯 修复：恢复时间轴截获，实现完美的指尖进度跟踪
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     
-    // 手指只要滑动超过 5%，立刻利用 CAML 原生的 CASpringAnimation 触发阻尼进入桌面动画
-    if (progress > 0.05) {
+    if (progress > 0.01) {
         if (!self.isUnlocking) {
             self.isUnlocking = YES;
+            
+            // 1. 冻结时间轴，接管系统动画控制权
+            self.bgView.layer.speed = 0.0;
+            self.floatingView.layer.speed = 0.0;
+            self.fgView.layer.speed = 0.0;
+            
+            self.bgView.layer.beginTime = 0.0;
+            self.floatingView.layer.beginTime = 0.0;
+            self.fgView.layer.beginTime = 0.0;
+            
+            // 2. 下发解锁状态（因为 speed 为 0，动画不会自动播放）
             [self transitionToState:@"Unlock" animated:YES];
         }
+        
+        // 3. 核心：CAML 文件中定义的动画时长是 0.8 秒
+        // 我们将滑动进度 (0.0~1.0) 映射到这个 0.8 秒的时间轴上
+        CFTimeInterval offset = progress * 0.8;
+        self.bgView.layer.timeOffset = offset;
+        self.floatingView.layer.timeOffset = offset;
+        self.fgView.layer.timeOffset = offset;
+        
     } else {
-        // 退回锁屏时，恢复锁定状态的弹簧形变
         if (self.isUnlocking) {
             self.isUnlocking = NO;
+            
+            // 1. 手指松开退回锁屏时，恢复时间轴
+            self.bgView.layer.speed = 1.0;
+            self.floatingView.layer.speed = 1.0;
+            self.fgView.layer.speed = 1.0;
+            
+            self.bgView.layer.timeOffset = 0.0;
+            self.floatingView.layer.timeOffset = 0.0;
+            self.fgView.layer.timeOffset = 0.0;
+            
+            // 2. 触发退回锁定的阻尼动画
             [self transitionToState:@"Locked" animated:YES];
         }
     }
