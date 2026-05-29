@@ -50,6 +50,78 @@ typedef struct {
 @property (nonatomic) long long wallpaperStyle;
 @end
 
+@interface CSBackgroundContentViewController : UIViewController
+@property (readonly, nonatomic) UIView *backgroundContentView;
+@property (readonly, nonatomic) UIView *presentationView;
+@property (readonly, nonatomic) UIView *wallpaperView;
+@property (readonly, nonatomic) BOOL screenOff;
+- (BOOL)_canShowWhileLocked;
+- (void)_updateForegroundState;
+- (void)_updateUserInterfaceStyle;
+- (void)backlightLuminanceChangedForEnvironment:(id)environment previousTraitCollection:(id)collection;
+- (void)userInterfaceStyleChangedForEnvironment:(id)environment previousTraitCollection:(id)collection;
+- (void)loadView;
+- (void)viewWillAppear:(BOOL)animated;
+- (void)viewDidDisappear:(BOOL)animated;
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator;
+- (void)tapGestureRecognizerAction:(id)action;
+@end
+
+@interface CSBackgroundPresentationManager : NSObject
+- (id)createBackgroundViewControllerForDefinition:(id)definition;
+- (id)createBackgroundViewControllerForDefinition:(id)definition frame:(CGRect)frame;
+@end
+
+@interface CSScrollGestureController : NSObject
+@property (nonatomic) long long scrollingStrategy;
+- (void)_horizontalScrollFailureGestureRecognizerChanged:(id)changed;
+- (_Bool)_shouldAllowScrollForScrollingStrategy:(long long)strategy;
+- (_Bool)_shouldFailHorizontalSwipesForScrollingStrategy:(long long)strategy;
+- (void)_updateForScrollingStrategy:(long long)strategy fromScrollingStrategy:(long long)fromStrategy;
+- (void)setScrollingStrategy:(long long)strategy;
+@end
+
+@interface CSPosterSwitcherViewController : UIViewController
+@property (weak, nonatomic) UIView *coverSheetBackgroundView;
+@property (weak, nonatomic) UIView *coverSheetFloatingView;
+@property (weak, nonatomic) UIView *coverSheetWallpaperView;
+@property (nonatomic) BOOL coverSheetComplicationRowHidden;
+@property (nonatomic) BOOL coverSheetWallpaperFloatingLayerInlined;
+@property (readonly, nonatomic) UIView *scaleView;
+- (void)_applicationHosterDidInvalidate;
+- (void)_dismissEntirely;
+- (void)_dismissTier:(BOOL)tier;
+- (unsigned long long)_effectiveSceneClientLayoutMode;
+- (void)_evaluateInitialTouchTransferActuation;
+- (void)_evaluateInitialTransitionActivation;
+- (void)_transitionScene:(id)scene toLayoutMode:(unsigned long long)mode animated:(BOOL)animated;
+- (void)_updateAppearanceWithClientLayoutMode:(unsigned long long)mode previousLayoutMode:(unsigned long long)prevMode transitionContext:(id)context;
+- (void)_updateAppearanceWithoutAnimation;
+- (void)_updateComplicationRowHiddenForSceneSettings:(id)settings;
+- (void)_updateFloatingLayerInlinedForSceneSettings:(id)settings;
+- (void)_updateLiveContentViewSpecificationForSceneSettings:(id)settings;
+- (void)_updateLiveFloatingViewSpecificationForSceneSettings:(id)settings;
+- (void)_updateLockVibrancyConfigurationForSceneSettings:(id)settings;
+- (void)_updateOverlayViewSpecificationForSceneSettings:(id)settings;
+- (void)_updateTopButtonLayoutForSceneSettings:(id)settings;
+- (void)handleBottomEdgeGestureBegan:(id)began;
+- (void)handleBottomEdgeGestureChanged:(id)changed;
+- (void)handleBottomEdgeGestureEnded:(id)ended;
+- (_Bool)handleEvent:(id)event;
+- (void)sceneHandle:(id)handle didCreateScene:(id)scene;
+- (void)sceneHandle:(id)handle didDestroyScene:(id)scene;
+- (_Bool)sceneHandle:(id)handle didReceiveAction:(id)action;
+- (void)sceneHandle:(id)handle didUpdateClientSettingsWithDiff:(id)diff transitionContext:(id)context;
+- (void)sceneHandle:(id)handle didUpdateContentState:(long long)state;
+- (void)sceneHandle:(id)handle didUpdateSettingsWithDiff:(id)diff previousSettings:(id)settings;
+- (void)setCoverSheetBackgroundView:(id)view;
+- (void)setCoverSheetFloatingView:(id)view;
+- (void)setCoverSheetWallpaperView:(id)view;
+- (void)viewDidAppear:(BOOL)animated;
+- (void)viewDidDisappear:(BOOL)animated;
+- (void)loadView;
+@end
+
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode;
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source;
@@ -257,6 +329,56 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
     @try {
         UIView *lockView = [vc lockscreenWallpaperView];
         TendiesHideViewTree(lockView);
+    } @catch (__unused NSException *e) {}
+}
+
+static void TendiesHideBackgroundContentController(id vc) {
+    if (!g_enabled || !vc) return;
+
+    @try {
+        if ([vc respondsToSelector:@selector(view)]) {
+            UIView *root = [vc valueForKey:@"view"];
+            TendiesHideViewTree(root);
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *bg = [vc valueForKey:@"backgroundContentView"];
+        TendiesHideViewTree(bg);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *pv = [vc valueForKey:@"presentationView"];
+        TendiesHideViewTree(pv);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *wv = [vc valueForKey:@"wallpaperView"];
+        TendiesHideViewTree(wv);
+    } @catch (__unused NSException *e) {}
+}
+
+static void TendiesHidePosterSwitcherController(id vc) {
+    if (!g_enabled || !vc) return;
+
+    @try {
+        UIView *bg = [vc valueForKey:@"coverSheetBackgroundView"];
+        TendiesHideViewTree(bg);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *floatView = [vc valueForKey:@"coverSheetFloatingView"];
+        TendiesHideViewTree(floatView);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *wallpaperView = [vc valueForKey:@"coverSheetWallpaperView"];
+        TendiesHideViewTree(wallpaperView);
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        UIView *scaleView = [vc valueForKey:@"scaleView"];
+        TendiesHideViewTree(scaleView);
     } @catch (__unused NSException *e) {}
 }
 
@@ -699,20 +821,258 @@ static void EnsureEngineViewIsMounted(void) {
 %end
 
 // ==========================================
-// SBWallpaperEffectView
+// CSBackgroundContentViewController
 // ==========================================
-%hook SBWallpaperEffectView
+%hook CSBackgroundContentViewController
 
-- (void)layoutSubviews {
+- (void)loadView {
     %orig;
+    TendiesHideBackgroundContentController(self);
 }
 
-- (void)setAlpha:(double)alpha {
+- (void)viewWillAppear:(BOOL)animated {
     %orig;
+    TendiesHideBackgroundContentController(self);
 }
 
-- (void)setHidden:(BOOL)hidden {
+- (void)viewDidDisappear:(BOOL)animated {
     %orig;
+    TendiesHideBackgroundContentController(self);
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator {
+    %orig;
+    TendiesHideBackgroundContentController(self);
+}
+
+- (void)tapGestureRecognizerAction:(id)action {
+    %orig;
+    TendiesHideBackgroundContentController(self);
+}
+
+- (void)_updateForegroundState {
+    %orig;
+    TendiesHideBackgroundContentController(self);
+}
+
+- (void)_updateUserInterfaceStyle {
+    %orig;
+    TendiesHideBackgroundContentController(self);
+}
+
+- (void)backlightLuminanceChangedForEnvironment:(id)environment previousTraitCollection:(id)collection {
+    %orig;
+    TendiesHideBackgroundContentController(self);
+}
+
+- (void)userInterfaceStyleChangedForEnvironment:(id)environment previousTraitCollection:(id)collection {
+    %orig;
+    TendiesHideBackgroundContentController(self);
+}
+
+%end
+
+// ==========================================
+// CSBackgroundPresentationManager
+// ==========================================
+%hook CSBackgroundPresentationManager
+
+- (id)createBackgroundViewControllerForDefinition:(id)definition {
+    id vc = %orig;
+    TendiesHideBackgroundContentController(vc);
+    return vc;
+}
+
+- (id)createBackgroundViewControllerForDefinition:(id)definition frame:(CGRect)frame {
+    id vc = %orig;
+    TendiesHideBackgroundContentController(vc);
+    return vc;
+}
+
+%end
+
+// ==========================================
+// CSScrollGestureController
+// ==========================================
+%hook CSScrollGestureController
+
+- (void)setScrollingStrategy:(long long)strategy {
+    %orig;
+    EnsureEngineViewIsMounted();
+}
+
+- (void)_updateForScrollingStrategy:(long long)strategy fromScrollingStrategy:(long long)fromStrategy {
+    %orig;
+    EnsureEngineViewIsMounted();
+}
+
+- (void)_horizontalScrollFailureGestureRecognizerChanged:(id)changed {
+    %orig;
+    EnsureEngineViewIsMounted();
+}
+
+%end
+
+// ==========================================
+// CSPosterSwitcherViewController
+// ==========================================
+%hook CSPosterSwitcherViewController
+
+- (void)loadView {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_applicationHosterDidInvalidate {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_dismissEntirely {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_dismissTier:(BOOL)tier {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_evaluateInitialTouchTransferActuation {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_evaluateInitialTransitionActivation {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_transitionScene:(id)scene toLayoutMode:(unsigned long long)mode animated:(BOOL)animated {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateAppearanceWithClientLayoutMode:(unsigned long long)mode previousLayoutMode:(unsigned long long)prevMode transitionContext:(id)context {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateAppearanceWithoutAnimation {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateComplicationRowHiddenForSceneSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateFloatingLayerInlinedForSceneSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateLiveContentViewSpecificationForSceneSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateLiveFloatingViewSpecificationForSceneSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateLockVibrancyConfigurationForSceneSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateOverlayViewSpecificationForSceneSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)_updateTopButtonLayoutForSceneSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)handleBottomEdgeGestureBegan:(id)began {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)handleBottomEdgeGestureChanged:(id)changed {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)handleBottomEdgeGestureEnded:(id)ended {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (_Bool)handleEvent:(id)event {
+    _Bool ret = %orig;
+    TendiesHidePosterSwitcherController(self);
+    return ret;
+}
+
+- (void)sceneHandle:(id)handle didCreateScene:(id)scene {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)sceneHandle:(id)handle didDestroyScene:(id)scene {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (_Bool)sceneHandle:(id)handle didReceiveAction:(id)action {
+    _Bool ret = %orig;
+    TendiesHidePosterSwitcherController(self);
+    return ret;
+}
+
+- (void)sceneHandle:(id)handle didUpdateClientSettingsWithDiff:(id)diff transitionContext:(id)context {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)sceneHandle:(id)handle didUpdateContentState:(long long)state {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)sceneHandle:(id)handle didUpdateSettingsWithDiff:(id)diff previousSettings:(id)settings {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)setCoverSheetBackgroundView:(id)view {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)setCoverSheetFloatingView:(id)view {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
+}
+
+- (void)setCoverSheetWallpaperView:(id)view {
+    %orig;
+    TendiesHidePosterSwitcherController(self);
 }
 
 %end
@@ -1008,7 +1368,6 @@ static void EnsureEngineViewIsMounted(void) {
         });
         return;
     }
-
     %orig;
 }
 
