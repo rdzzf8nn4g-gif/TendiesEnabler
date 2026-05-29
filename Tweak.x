@@ -89,9 +89,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)reloadWallpaperViews;
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated;
-- (void)handleWakeUp;
-- (void)handleSleep;
-- (void)handleProgress:(double)progress;
+
+// 修复编译错误：确保接口名称与实现名称完全一致
+- (void)onWakeUp;
+- (void)onSleep;
+- (void)onProgress:(NSNotification *)note;
 @end
 
 @implementation TendiesRenderEngineView
