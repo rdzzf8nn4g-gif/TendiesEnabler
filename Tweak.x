@@ -225,7 +225,7 @@ static BOOL g_isHidingNativeChrome = NO;
 static BOOL g_isMountingEngine = NO;
 
 // ==========================================
-// 工具函数 (精准外科手术打击，保留系统模糊)
+// 工具函数 (智能过滤：只杀图像，不杀模糊)
 // ==========================================
 
 static id TendiesSafeValueForKey(id obj, NSString *key) {
@@ -247,10 +247,49 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     return nil;
 }
 
+// 核心智能隐藏算法：完美保留模糊，彻底击杀图像
+static void TendiesSmartHideWallpaper(UIView *view) {
+    if (!view || !g_enabled) return;
+    
+    // 主线程保护
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TendiesSmartHideWallpaper(view);
+        });
+        return;
+    }
+
+    NSString *className = NSStringFromClass([view class]);
+    
+    // 1. 白名单：保留所有模糊、特效、暗化遮罩层 (这是你下拉通知中心能看到模糊的关键)
+    if ([view isKindOfClass:[UIVisualEffectView class]] ||
+        [className containsString:@"EffectView"] ||
+        [className containsString:@"Backdrop"] ||
+        [className containsString:@"Dimming"] ||
+        [className containsString:@"Material"] ||
+        [view.layer isKindOfClass:NSClassFromString(@"CABackdropLayer")]) {
+        return; // 遇到模糊层，立刻放行，停止向下隐藏
+    }
+    
+    // 2. 黑名单：精准击杀系统壁纸原图、场景视图、快照 (这是你滑动时看到原壁纸闪现的元凶)
+    if ([className containsString:@"ScenePresentationView"] || 
+        [className containsString:@"PBUIWallpaperView"] ||
+        [className containsString:@"WallpaperImageView"] ||
+        [className containsString:@"Snapshot"]) {
+        view.hidden = YES;
+        view.alpha = 0.0;
+        return; // 已经隐藏了该容器，无需继续遍历其子视图
+    }
+
+    // 3. 继续向下层遍历寻找目标
+    for (UIView *subview in view.subviews) {
+        TendiesSmartHideWallpaper(subview);
+    }
+}
+
 static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
     if (!g_enabled || !vc) return;
     
-    // UI操作必须在主线程，防崩溃核心
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             TendiesHideCoverSheetChrome(vc);
@@ -261,9 +300,6 @@ static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
     if (g_isHidingNativeChrome) return;
     g_isHidingNativeChrome = YES;
     @try {
-        // [修复核心] 绝对不要碰 _dimmingView 和 _dimmingLayerView，保留下拉模糊
-        // [修复核心] 绝对不要把 _backgroundContentViewController.view 整体隐藏，它可能影响结构
-        
         // 仅仅隐藏海报的浮动层(包含景深小组件等)，防止遮挡我们的前景
         @try {
             UIView *floatingLayer = TendiesSafeValueForKey(vc, @"_floatingLayerView");
@@ -272,7 +308,6 @@ static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
                 floatingLayer.alpha = 0.0;
             }
         } @catch (__unused NSException *e) {}
-
     } @finally {
         g_isHidingNativeChrome = NO;
     }
@@ -289,34 +324,19 @@ static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
     }
 
     @try {
-        // 隐藏主屏幕的原生壁纸容器
+        // 使用智能隐藏，对主屏幕和锁屏底层容器进行排查清理
         UIView *homeView = [vc homescreenWallpaperView];
         if (homeView) {
-            homeView.hidden = YES;
-            homeView.alpha = 0.0;
+            TendiesSmartHideWallpaper(homeView);
         }
     } @catch (__unused NSException *e) {}
 
     @try {
         UIView *lockView = [vc lockscreenWallpaperView];
         if (lockView) {
-            lockView.hidden = YES;
-            lockView.alpha = 0.0;
+            TendiesSmartHideWallpaper(lockView);
         }
     } @catch (__unused NSException *e) {}
-}
-
-static void TendiesHideBackgroundContentController(id vc) {
-    if (!g_enabled || !vc) return;
-
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            TendiesHideBackgroundContentController(vc);
-        });
-        return;
-    }
-
-    // [修复核心] 我们直接利用底层 Hook 彻底压制 CSBackgroundContentView，此处无需再暴力隐藏
 }
 
 static void TendiesHidePosterSwitcherController(id vc) {
@@ -330,7 +350,7 @@ static void TendiesHidePosterSwitcherController(id vc) {
     }
 
     @try {
-        // 在编辑模式下，同样只隐藏直接影响视觉的容器，小心避开模糊
+        // 在编辑模式下，同样隐藏直接影响视觉的浮动容器
         UIView *floatView = [vc valueForKey:@"coverSheetFloatingView"];
         if (floatView) { floatView.hidden = YES; floatView.alpha = 0.0; }
     } @catch (__unused NSException *e) {}
@@ -694,7 +714,6 @@ static char kGlobalTendiesEngineKey;
 static void EnsureEngineViewIsMounted(void) {
     if (!g_enabled) return;
     
-    // UI操作必须在主线程，防崩溃核心
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             EnsureEngineViewIsMounted();
@@ -741,32 +760,23 @@ static void EnsureEngineViewIsMounted(void) {
 }
 
 // ==========================================
-// 强制压制锁屏原生壁纸显示（最高权限锁死容器）
-// 这里仅 Hook 锁屏图像的真实容器，不干涉模糊引擎
+// 强制过滤压制：仅针对负责渲染图像的视图
 // ==========================================
 
 %hook CSBackgroundContentView
 
-- (void)setHidden:(BOOL)hidden {
+- (void)layoutSubviews {
+    %orig;
     if (g_enabled) {
-        %orig(YES);  // 永远强制隐藏锁屏海报层
-    } else {
-        %orig;
-    }
-}
-
-- (void)setAlpha:(CGFloat)alpha {
-    if (g_enabled) {
-        %orig(0.0);  // 永远强制透明
-    } else {
-        %orig;
+        // 利用智能过滤，精确干掉视图中真正渲染壁纸的部分，而完全放过模糊特效
+        TendiesSmartHideWallpaper(self);
     }
 }
 
 %end
 
 // ==========================================
-// 手势期间的守护Hook
+// 手势期间的守护Hook (锁屏滑动关键拦截)
 // ==========================================
 %hook SBCoverSheetSlidingViewController
 
@@ -774,6 +784,8 @@ static void EnsureEngineViewIsMounted(void) {
     CGRect result = %orig;
     if (g_enabled) {
         EnsureEngineViewIsMounted();
+        // 在手势滑动过程中，如果系统创建了临时快照，利用智能过滤当场拦截
+        TendiesSmartHideWallpaper(self.view);
     }
     return result;
 }
@@ -782,6 +794,7 @@ static void EnsureEngineViewIsMounted(void) {
     CGRect result = %orig;
     if (g_enabled) {
         EnsureEngineViewIsMounted();
+        TendiesSmartHideWallpaper(self.view);
     }
     return result;
 }
@@ -852,265 +865,9 @@ static void EnsureEngineViewIsMounted(void) {
 %end
 
 // ==========================================
-// CSBackgroundContentViewController
+// CSCoverSheetViewController / Manager 等无需再干涉 _dimmingView
 // ==========================================
-%hook CSBackgroundContentViewController
 
-- (void)loadView {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)tapGestureRecognizerAction:(id)action {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)_updateForegroundState {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)_updateUserInterfaceStyle {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)backlightLuminanceChangedForEnvironment:(id)environment previousTraitCollection:(id)collection {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-- (void)userInterfaceStyleChangedForEnvironment:(id)environment previousTraitCollection:(id)collection {
-    %orig;
-    TendiesHideBackgroundContentController(self);
-}
-
-%end
-
-// ==========================================
-// CSBackgroundPresentationManager
-// ==========================================
-%hook CSBackgroundPresentationManager
-
-- (id)createBackgroundViewControllerForDefinition:(id)definition {
-    id vc = %orig;
-    TendiesHideBackgroundContentController(vc);
-    return vc;
-}
-
-- (id)createBackgroundViewControllerForDefinition:(id)definition frame:(CGRect)frame {
-    id vc = %orig;
-    TendiesHideBackgroundContentController(vc);
-    return vc;
-}
-
-%end
-
-// ==========================================
-// CSScrollGestureController
-// ==========================================
-%hook CSScrollGestureController
-
-- (void)setScrollingStrategy:(long long)strategy {
-    %orig;
-    EnsureEngineViewIsMounted();
-}
-
-- (void)_updateForScrollingStrategy:(long long)strategy fromScrollingStrategy:(long long)fromStrategy {
-    %orig;
-    EnsureEngineViewIsMounted();
-}
-
-- (void)_horizontalScrollFailureGestureRecognizerChanged:(id)changed {
-    %orig;
-    EnsureEngineViewIsMounted();
-}
-
-%end
-
-// ==========================================
-// CSPosterSwitcherViewController
-// ==========================================
-%hook CSPosterSwitcherViewController
-
-- (void)loadView {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_applicationHosterDidInvalidate {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_dismissEntirely {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_dismissTier:(BOOL)tier {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_evaluateInitialTouchTransferActuation {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_evaluateInitialTransitionActivation {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_transitionScene:(id)scene toLayoutMode:(unsigned long long)mode animated:(BOOL)animated {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateAppearanceWithClientLayoutMode:(unsigned long long)mode previousLayoutMode:(unsigned long long)prevMode transitionContext:(id)context {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateAppearanceWithoutAnimation {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateComplicationRowHiddenForSceneSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateFloatingLayerInlinedForSceneSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateLiveContentViewSpecificationForSceneSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateLiveFloatingViewSpecificationForSceneSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateLockVibrancyConfigurationForSceneSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateOverlayViewSpecificationForSceneSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)_updateTopButtonLayoutForSceneSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)handleBottomEdgeGestureBegan:(id)began {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)handleBottomEdgeGestureChanged:(id)changed {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)handleBottomEdgeGestureEnded:(id)ended {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (_Bool)handleEvent:(id)event {
-    _Bool ret = %orig;
-    TendiesHidePosterSwitcherController(self);
-    return ret;
-}
-
-- (void)sceneHandle:(id)handle didCreateScene:(id)scene {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)sceneHandle:(id)handle didDestroyScene:(id)scene {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (_Bool)sceneHandle:(id)handle didReceiveAction:(id)action {
-    _Bool ret = %orig;
-    TendiesHidePosterSwitcherController(self);
-    return ret;
-}
-
-- (void)sceneHandle:(id)handle didUpdateClientSettingsWithDiff:(id)diff transitionContext:(id)context {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)sceneHandle:(id)handle didUpdateContentState:(long long)state {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)sceneHandle:(id)handle didUpdateSettingsWithDiff:(id)diff previousSettings:(id)settings {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)setCoverSheetBackgroundView:(id)view {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)setCoverSheetFloatingView:(id)view {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-- (void)setCoverSheetWallpaperView:(id)view {
-    %orig;
-    TendiesHidePosterSwitcherController(self);
-}
-
-%end
-
-// ==========================================
-// CSCoverSheetViewController
-// ==========================================
 %hook CSCoverSheetViewController
 
 - (void)loadView {
@@ -1163,121 +920,6 @@ static void EnsureEngineViewIsMounted(void) {
     TendiesHideCoverSheetChrome(self);
 }
 
-- (void)_updateBackgroundContentView {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateBackground {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateWallpaperEffectView {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateWallpaperFloatingLayerContainerView {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateForegroundView {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateContent {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateDimmingLayer {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateFullBleedContent {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateComplicationSidebar {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_updateAppearanceForTransitionToOrientation:(long long)orientation {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)updateAppearanceForController:(id)controller {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)updateAppearanceForController:(id)controller withAnimationSettings:(id)settings completion:(id /* block */)completion {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)updateBehaviorForController:(id)controller {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)updateFloatingLayerOrdering {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)updatePosterSwitcherPresentationWithProgress:(double)progress {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)updateInterstitialPresentationWithProgress:(double)progress {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)scrollPanGestureChanged:(id)changed {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)scrollPanGestureDidUpdate:(id)update {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_scrollPanGestureBegan:(id)began {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_scrollPanGestureChanged:(id)changed {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_scrollPanGestureEnded:(id)ended {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_setHasContentAboveCoverSheet:(BOOL)sheet {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)_setHasContentAboveCoverSheet:(BOOL)sheet isSignificantUserInteraction:(BOOL)interaction {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
@@ -1315,46 +957,6 @@ static void EnsureEngineViewIsMounted(void) {
 - (void)_setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)setCoverSheetIsVisible:(BOOL)visible {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)setPartiallyOnScreen:(BOOL)screen {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)requestIdleTimerResetForPoster {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)startObservingAmbientPresentationForController:(id)controller {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)ambientPresentationController:(id)controller didUpdatePresented:(BOOL)presented {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)ambientPresentationControllerCancelledPossiblePresentation:(id)presentation {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)ambientPresentationControllerWillPossiblyPresent:(id)present {
-    %orig;
-    TendiesHideCoverSheetChrome(self);
-}
-
-- (void)overlayController:(id)controller didChangePresentationProgress:(double)progress newPresentationProgress:(double)newProgress fromLeading:(_Bool)leading {
-    %orig;
     TendiesHideCoverSheetChrome(self);
 }
 
@@ -1402,7 +1004,6 @@ static void EnsureEngineViewIsMounted(void) {
 
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
-
     if (g_enabled) {
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
@@ -1422,7 +1023,6 @@ static void EnsureEngineViewIsMounted(void) {
 
 - (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
-
     if (g_enabled) {
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
@@ -1440,6 +1040,21 @@ static void EnsureEngineViewIsMounted(void) {
     }
 }
 
+%end
+
+// ==========================================
+// 辅助路由和控制器 (缩减到核心逻辑)
+// ==========================================
+%hook CSPosterSwitcherViewController
+- (void)loadView { %orig; TendiesHidePosterSwitcherController(self); }
+- (void)viewDidAppear:(BOOL)animated { %orig; TendiesHidePosterSwitcherController(self); }
+- (void)viewDidLayoutSubviews { %orig; TendiesHidePosterSwitcherController(self); }
+%end
+
+%hook CSScrollGestureController
+- (void)setScrollingStrategy:(long long)strategy { %orig; EnsureEngineViewIsMounted(); }
+- (void)_updateForScrollingStrategy:(long long)strategy fromScrollingStrategy:(long long)fromStrategy { %orig; EnsureEngineViewIsMounted(); }
+- (void)_horizontalScrollFailureGestureRecognizerChanged:(id)changed { %orig; EnsureEngineViewIsMounted(); }
 %end
 
 %ctor {
