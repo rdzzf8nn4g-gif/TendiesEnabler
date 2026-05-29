@@ -45,7 +45,22 @@ typedef struct {
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode;
 - (void)setDismissed:(BOOL)dismissed;
-- (void)tendies_forceHideNativeWallpaperLayers;
+- (void)updateInterstitialPresentationWithProgress:(double)progress;
+- (void)scrollPanGestureChanged:(id)changed;
+- (void)scrollPanGestureDidUpdate:(id)update;
+- (void)_scrollPanGestureBegan:(id)began;
+- (void)_scrollPanGestureChanged:(id)changed;
+- (void)_scrollPanGestureEnded:(id)ended;
+- (void)_updateBackground;
+- (void)_updateBackgroundContentView;
+- (void)_updateWallpaperEffectView;
+- (void)_updateWallpaper;
+- (void)updateFloatingLayerOrdering;
+- (void)viewWillAppear:(BOOL)animated;
+- (void)viewDidAppear:(BOOL)animated;
+- (void)viewWillLayoutSubviews;
+- (void)viewDidLayoutSubviews;
+- (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear;
 @end
 
 @interface SBWallpaperEffectView : UIView
@@ -89,6 +104,28 @@ static void reloadPrefs() {
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
     [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineInternalReload" object:nil];
+}
+
+// ==========================================
+// 工具函数
+// ==========================================
+static void TendiesHideViewTree(UIView *view) {
+    if (!view) return;
+    view.hidden = YES;
+    view.alpha = 0.0;
+    view.layer.opacity = 0.0;
+    for (UIView *sub in view.subviews) {
+        TendiesHideViewTree(sub);
+    }
+}
+
+static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
+    if ([layer.name isEqualToString:name]) return layer;
+    for (CALayer *sub in layer.sublayers) {
+        CALayer *found = TendiesFindLayerByName(sub, name);
+        if (found) return found;
+    }
+    return nil;
 }
 
 // ==========================================
@@ -155,25 +192,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 @end
-
-static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
-    if ([layer.name isEqualToString:name]) return layer;
-    for (CALayer *sub in layer.sublayers) {
-        CALayer *found = TendiesFindLayerByName(sub, name);
-        if (found) return found;
-    }
-    return nil;
-}
-
-static void TendiesHideViewTree(UIView *view) {
-    if (!view) return;
-    view.hidden = YES;
-    view.alpha = 0.0;
-    view.layer.opacity = 0.0;
-    for (UIView *sub in view.subviews) {
-        TendiesHideViewTree(sub);
-    }
-}
 
 // ==========================================
 // 核心渲染引擎视图
@@ -364,6 +382,7 @@ static void TendiesHideViewTree(UIView *view) {
             });
             return;
         }
+
         NSFileManager *fm = [NSFileManager defaultManager];
         if (!g_tendiesPath || ![fm fileExistsAtPath:g_tendiesPath]) return;
 
@@ -467,43 +486,42 @@ static void EnsureEngineViewIsMounted() {
 }
 
 // ==========================================
-// 1. 壁纸控制器
+// PBUIWallpaperViewController
 // ==========================================
-%hook PBUIWallpaperViewController
-
-%new
-- (void)tendies_hideNativeWallpaperViews {
-    if (!g_enabled) return;
+static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
+    if (!g_enabled || !vc) return;
 
     @try {
-        UIView *homeView = [self homescreenWallpaperView];
+        UIView *homeView = [vc homescreenWallpaperView];
         TendiesHideViewTree(homeView);
     } @catch (NSException *e) {}
 
     @try {
-        UIView *lockView = [self lockscreenWallpaperView];
+        UIView *lockView = [vc lockscreenWallpaperView];
         TendiesHideViewTree(lockView);
     } @catch (NSException *e) {}
 }
 
+%hook PBUIWallpaperViewController
+
 - (void)viewWillLayoutSubviews {
     %orig;
-    [self tendies_hideNativeWallpaperViews];
+    TendiesHidePBWallpaperViews(self);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    [self tendies_hideNativeWallpaperViews];
+    TendiesHidePBWallpaperViews(self);
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    [self tendies_hideNativeWallpaperViews];
+    TendiesHidePBWallpaperViews(self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    [self tendies_hideNativeWallpaperViews];
+    TendiesHidePBWallpaperViews(self);
 }
 
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
@@ -519,7 +537,7 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 2. 不动系统磨砂层
+// SBWallpaperEffectView
 // ==========================================
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
@@ -534,26 +552,27 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 3. CoverSheet 锁屏层
+// CSCoverSheetViewController
 // ==========================================
-%hook CSCoverSheetViewController
-
-%new
-- (void)tendies_forceHideNativeWallpaperLayers {
-    if (!g_enabled) return;
-
-    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-    if (bgVC && bgVC.view) {
-        TendiesHideViewTree(bgVC.view);
-    }
-
-    UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-    if (floatingLayer) {
-        TendiesHideViewTree(floatingLayer);
-    }
+static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
+    if (!g_enabled || !vc) return;
 
     @try {
-        UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
+        UIViewController *bgVC = [vc valueForKey:@"_backgroundContentViewController"];
+        if (bgVC && bgVC.view) {
+            TendiesHideViewTree(bgVC.view);
+        }
+    } @catch (NSException *e) {}
+
+    @try {
+        UIView *floatingLayer = [vc valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) {
+            TendiesHideViewTree(floatingLayer);
+        }
+    } @catch (NSException *e) {}
+
+    @try {
+        UIView *dimmingLayer = [vc valueForKey:@"_dimmingView"];
         if (dimmingLayer) {
             dimmingLayer.hidden = YES;
             dimmingLayer.alpha = 0.0;
@@ -562,40 +581,87 @@ static void EnsureEngineViewIsMounted() {
     } @catch (NSException *e) {}
 }
 
+%hook CSCoverSheetViewController
+
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted();
-    [self tendies_forceHideNativeWallpaperLayers];
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    [self tendies_forceHideNativeWallpaperLayers];
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    [self tendies_forceHideNativeWallpaperLayers];
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    [self tendies_forceHideNativeWallpaperLayers];
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_updateBackgroundContentView {
+    %orig;
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)_updateBackground {
     %orig;
-    [self tendies_forceHideNativeWallpaperLayers];
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)_updateWallpaperEffectView {
     %orig;
-    [self tendies_forceHideNativeWallpaperLayers];
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)_updateWallpaper {
     %orig;
-    [self tendies_forceHideNativeWallpaperLayers];
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)updateFloatingLayerOrdering {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)updateInterstitialPresentationWithProgress:(double)progress {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)scrollPanGestureChanged:(id)changed {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)scrollPanGestureDidUpdate:(id)update {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_scrollPanGestureBegan:(id)began {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_scrollPanGestureChanged:(id)changed {
+    %orig;
+    TendiesHideCSNativeLayers(self);
+}
+
+- (void)_scrollPanGestureEnded:(id)ended {
+    %orig;
+    TendiesHideCSNativeLayers(self);
 }
 
 - (void)updatePosterSwitcherSnapshots {
@@ -627,7 +693,7 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 4. 动画进度
+// SBWallpaperController
 // ==========================================
 %hook SBWallpaperController
 
@@ -660,10 +726,9 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 5. 亮灭屏与锁屏状态同步
+// SBBacklightController
 // ==========================================
 %hook SBBacklightController
-
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
     if (g_enabled) {
@@ -682,7 +747,6 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
-
 - (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
@@ -701,7 +765,6 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
-
 %end
 
 %ctor {
