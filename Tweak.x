@@ -43,6 +43,15 @@ typedef struct {
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
+@interface SBWallpaperController : NSObject
++ (id)sharedInstance;
+- (void)updateWallpaperAnimationWithProgress:(double)progress;
+@end
+
+// 声明背景控制器
+@interface CSBackgroundContentViewController : UIViewController
+@end
+
 static NSString * GetTendiesStorageDir() {
     NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
 #if __has_include(<roothide.h>)
@@ -338,7 +347,7 @@ static void MountEngineToView(UIView *targetView, NSString *type) {
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        // iOS 16+ 的锁屏海报就是这个 Controller 负责的，把它作为 Lock 引擎的挂载点
+        // iOS 16+ 的锁屏海报是挂在 CSCoverSheetViewController 下的 CSBackgroundContentViewController 里的
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
             MountEngineToView(bgVC.view, @"Lock");
@@ -351,15 +360,37 @@ static void MountEngineToView(UIView *targetView, NSString *type) {
         }
     }
 }
+
+- (void)setInScreenOffMode:(BOOL)mode {
+    %orig;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
+
+- (void)setDismissed:(BOOL)dismissed {
+    %orig;
+    g_isUnlocked = dismissed;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
 %end
 
-// 顺带清理掉锁屏背景原本的显示行为
+// 💡 修复Theos编译报错的关键点：强制转换成 UIViewController 去访问 .view 属性
 %hook CSBackgroundContentViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
         // 保留视图用于挂载，但把自带的海报彻底隐身
-        for (UIView *sub in self.view.subviews) {
+        UIView *bgView = ((UIViewController *)self).view;
+        for (UIView *sub in bgView.subviews) {
             if (![sub isKindOfClass:[TendiesRenderEngineView class]]) {
                 sub.alpha = 0.0;
             }
@@ -373,6 +404,7 @@ static void MountEngineToView(UIView *targetView, NSString *type) {
 // 拦截系统底层截图 (防露馅)
 // ==========================================
 %hook SBWallpaperController
+
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
         if (arg5) { void (^cb)(void) = arg5; cb(); }
@@ -388,6 +420,7 @@ static void MountEngineToView(UIView *targetView, NSString *type) {
     }
     %orig;
 }
+
 %end
 
 
