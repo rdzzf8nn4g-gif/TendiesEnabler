@@ -52,6 +52,7 @@ typedef struct {
 
 @interface SBWallpaperEffectView : UIView
 @property (nonatomic) long long wallpaperStyle;
+@property (nonatomic) BOOL fullscreen; 
 @end
 
 // ==========================================
@@ -73,7 +74,7 @@ static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
-static __weak CSCoverSheetViewController *g_coverSheetVC = nil; // 用于随时获取锁屏实例
+static __weak CSCoverSheetViewController *g_coverSheetVC = nil; // 弱引用锁屏控制器
 
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
@@ -94,7 +95,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心：CAML 逐帧解析器
+// 核心：CAML 逐帧解析器 (保持你的原版)
 // ==========================================
 @interface TendiesCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -159,7 +160,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
-// 核心渲染引擎视图 (纯正单实例结构)
+// 核心渲染引擎视图 (保持你的原版)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -186,7 +187,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor clearColor]; 
+        self.backgroundColor = [UIColor blackColor]; 
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -360,7 +361,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 
 // ==========================================
-// 极致纯粹版挂载 (基于你原始未修改的代码：死死钉在绝对底层)
+// 完美回滚到你的纯净单引擎，绝对不移位！
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
@@ -373,7 +374,7 @@ static void EnsureEngineViewIsMounted() {
     
     TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
     if (!engineView) {
-        engineView = [[TendiesRenderEngineView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
         objc_setAssociatedObject(wallpaperController, "GlobalTendiesEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [targetContainer addSubview:engineView];
         [engineView reloadWallpaperViews];
@@ -388,7 +389,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 完全恢复你的原始 Hook，强杀系统壁纸
+// 1. 干掉原生的系统海报壁纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -413,24 +414,29 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 完全恢复你的原始 Hook，隐藏所有系统原生的 SBWallpaperEffectView 模糊
+
+// ===============================================
+// 🔥恢复原生模糊🔥：去掉了你原来让所有模糊透明的代码
+// 现在系统所有的 Dock、文件夹、下拉原生磨砂都会保留！
+// ===============================================
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
-    if (g_enabled) {
+    // 只处理全屏的壁纸视图，保留原生局部的透明模糊效果
+    if (g_enabled && [self respondsToSelector:@selector(fullscreen)] && self.fullscreen) {
         self.hidden = YES;
         self.alpha = 0.0;
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) {
+    if (g_enabled && [self respondsToSelector:@selector(fullscreen)] && self.fullscreen) {
         %orig(0.0);
     } else {
-        %orig;
+        %orig; // 恢复原生模糊层的透视度
     }
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
+    if (g_enabled && [self respondsToSelector:@selector(fullscreen)] && self.fullscreen) {
         %orig(YES);
     } else {
         %orig;
@@ -439,17 +445,33 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 
-// 3. 拦截锁屏控制器，并注入【自定义渐变模糊层】
+// 3. 锁屏事件：注入你指定的 0.5 进度动态模糊层！
 %hook CSCoverSheetViewController
 
 - (void)viewDidLoad {
     %orig;
     g_coverSheetVC = self;
+    
+    // 🔥按照你的要求，在这里注入一个跟屏幕原生的模糊层🔥
+    if (g_enabled) {
+        UIView *customBlur = [self.view viewWithTag:7777];
+        if (!customBlur) {
+            UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]; // 深色原生毛玻璃
+            customBlur = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
+            customBlur.tag = 7777;
+            customBlur.frame = self.view.bounds;
+            customBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            customBlur.userInteractionEnabled = NO; // 绝对不能挡住滑动交互
+            
+            // 插入在锁屏的最底层，盖住桌面
+            [self.view insertSubview:customBlur atIndex:0];
+        }
+    }
 }
 
 %new
 - (void)tendies_forceHideNativeWallpaperLayers {
-    // 原始强力隐藏原生海报（防止滑动时原壁纸闪出）
+    // 保留原始的强制隐藏原生锁屏海报（防止默认壁纸乱入闪烁）
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
     if (bgVC && bgVC.view) {
         bgVC.view.alpha = 0.0;
@@ -459,24 +481,6 @@ static void EnsureEngineViewIsMounted() {
     if (floatingLayer) {
         floatingLayer.alpha = 0.0;
         floatingLayer.hidden = YES;
-    }
-    
-    // ===============================================
-    // 🔥核心：根据你的需求注入自定义高斯模糊层🔥
-    // ===============================================
-    UIView *customBlur = [self.view viewWithTag:8888];
-    if (!customBlur) {
-        // 创建深色毛玻璃
-        UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
-        customBlur = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
-        customBlur.tag = 8888;
-        customBlur.frame = self.view.bounds;
-        customBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        customBlur.userInteractionEnabled = NO; // 不阻挡交互
-        customBlur.alpha = 0.0; 
-        
-        // 插入在锁屏最底层 (正好覆盖桌面，并在壁纸之下提供遮挡)
-        [self.view insertSubview:customBlur atIndex:0]; 
     }
 }
 
@@ -533,7 +537,8 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 4. 动画进度及快照拦截（联动自定义模糊层的透明度计算）
+
+// 4. 动画进度拦截：完美实现 0.5 进度动态褪去模糊
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
@@ -549,30 +554,26 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) return;
     %orig;
 }
+
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     EnsureEngineViewIsMounted(); 
     if (g_enabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            // 抛出交互进度给你的引擎
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
             
             // ===============================================
-            // 🔥核心：根据你的计算公式完美控制模糊层透明度🔥
+            // 🔥核心逻辑：滑到一半前完全挡住桌面，一半后模糊慢慢显示桌面🔥
             // ===============================================
             if (g_coverSheetVC && g_coverSheetVC.view) {
-                UIView *customBlur = [g_coverSheetVC.view viewWithTag:8888];
+                UIView *customBlur = [g_coverSheetVC.view viewWithTag:7777];
                 if (customBlur) {
-                    double blurAlpha = 0.0;
-                    
-                    // Progress 0.0 (锁屏状态) -> 1.0 (解锁到桌面状态)
-                    if (progress <= 0.5) {
-                        // "滑到一半前是完全看不到桌面的"
-                        blurAlpha = 1.0; 
-                    } else {
-                        // "超过一半后会模糊慢慢显示桌面" (0.5 -> 1.0 期间，Alpha 从 1.0 渐变到 0.0)
+                    double blurAlpha = 1.0;
+                    if (progress > 0.5) {
+                        // 进度从 0.5 走到 1.0 时，Alpha 从 1.0 平滑渐变到 0.0
                         blurAlpha = 1.0 - ((progress - 0.5) * 2.0);
                     }
-                    
                     customBlur.alpha = blurAlpha;
                 }
             }
@@ -583,7 +584,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步 (未变动)
+// 亮灭屏与锁屏状态同步 (完全未变动)
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
@@ -623,7 +624,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
-
 
 %ctor {
     reloadPrefs();
