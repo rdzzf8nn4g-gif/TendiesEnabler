@@ -20,6 +20,8 @@ typedef struct {
 } PBUIWallpaperTransitionState;
 
 @interface PBUIWallpaperViewController : UIViewController
+@property (retain, nonatomic) UIView *homescreenWallpaperView;
+@property (retain, nonatomic) UIView *lockscreenWallpaperView;
 @end
 
 @interface BSUICAPackageView : UIView
