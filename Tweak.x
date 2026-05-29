@@ -82,12 +82,6 @@ typedef struct {
 @end
 
 @interface CSPosterSwitcherViewController : UIViewController
-@property (weak, nonatomic) UIView *coverSheetBackgroundView;
-@property (weak, nonatomic) UIView *coverSheetFloatingView;
-@property (weak, nonatomic) UIView *coverSheetWallpaperView;
-@property (nonatomic) BOOL coverSheetComplicationRowHidden;
-@property (nonatomic) BOOL coverSheetWallpaperFloatingLayerInlined;
-@property (readonly, nonatomic) UIView *scaleView;
 - (void)_applicationHosterDidInvalidate;
 - (void)_dismissEntirely;
 - (void)_dismissTier:(BOOL)tier;
