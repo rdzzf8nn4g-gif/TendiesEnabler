@@ -246,11 +246,6 @@ static void TendiesHideCoverSheetChrome(CSCoverSheetViewController *vc) {
     }
 }
 
-static void TendiesRefreshSystemChromeAndEngine(CSCoverSheetViewController *vc) {
-    if (!g_enabled) return;
-    TendiesHideCoverSheetChrome(vc);
-}
-
 static void TendiesHidePBWallpaperViews(PBUIWallpaperViewController *vc) {
     if (!g_enabled || !vc) return;
 
