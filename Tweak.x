@@ -34,11 +34,6 @@ static NSString * GetTendiesStorageDir() {
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
-// 核心：iOS 16/17+ 壁纸视图
-@interface PBUIWallpaperView : UIView
-@property (nonatomic, readonly) long long variant; // 0 = 锁屏(LockScreen), 1 = 桌面(HomeScreen)
-@end
-
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source; 
@@ -48,6 +43,11 @@ static NSString * GetTendiesStorageDir() {
 @interface SBBacklightController : NSObject
 + (id)sharedInstance;
 @property (readonly, nonatomic) long long backlightState;
+@end
+
+// 核心：iOS 全局壁纸控制器
+@interface SBWallpaperController : NSObject
++ (id)sharedInstance;
 @end
 
 // ==========================================
@@ -79,7 +79,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 4. 统一渲染引擎 (支持强力破除假死)
+// 4. 统一渲染引擎 (加入强制 GPU 刷新破除假死)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -131,18 +131,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (state) [self transitionToState:state];
 }
 
-// 🚀 破除假死核心逻辑：强制唤醒 Render Server
+// 🚀 核心修复：强制打断系统休眠，重新派发 CA 动画，免触摸唤醒！
 - (void)wakeUpAnimations {
     if (!g_enabled || !g_isScreenOn) return;
     
-    // 强制把自身和父视图的时间轴恢复（防止 SpringBoard 息屏时将 speed 设为 0）
+    // 强制时间轴恢复，粉碎系统的限制
     if (self.superview) self.superview.layer.speed = 1.0;
     self.layer.speed = 1.0;
     self.bgView.layer.speed = 1.0;
     self.floatingView.layer.speed = 1.0;
     self.fgView.layer.speed = 1.0;
 
-    // 立刻执行状态转移，并通过 CATransaction flush 直接推送到 GPU！
+    // 立刻执行状态转移，并通过 CATransaction flush 直接推送到底层渲染服务！
     [CATransaction begin];
     NSString *correctState = g_isUnlocked ? @"Unlock" : @"Locked";
     [self transitionToState:correctState];
@@ -227,6 +227,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled) return;
     self.currentState = [stateName copy];
     
+    // 强制调用动画重置，让引擎内的组件根据主线状态重新排布
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:YES];
         [self.floatingView setState:stateName animated:YES];
@@ -241,36 +242,47 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 5. 🎯 精准挂载 (彻底修复桌面与后台卡片错乱 Bug)
+// 5. 🎯 终极注入：劫持全局壁纸司令部 (直指 _wallpaperContainerView)
 // ==========================================
-%hook PBUIWallpaperView
+%hook CSCoverSheetViewController
 
-- (void)layoutSubviews {
+// CSCoverSheetViewController 的 layout 极其频繁且可靠
+// 我们利用它来确保我们的引擎始终在 SpringBoard 全局壁纸容器的最顶层
+- (void)viewWillLayoutSubviews {
     %orig;
     if (!g_enabled) return;
     
-    // 🔥 核心修正：判断如果当前变体是 1（桌面/HomeScreen），直接放行，什么都不做！
-    // 这样系统去截取桌面快照（后台卡片）、或者生成桌面高斯模糊时，都会正常执行原生逻辑。
-    if ([self respondsToSelector:@selector(variant)] && [self variant] != 0) {
-        return; 
-    }
+    // 1. 获取 SBWallpaperController 单例
+    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+    if (!wallpaperController) return;
     
-    // 以下逻辑仅在 variant == 0（锁屏/LockScreen）时执行
-    TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesEngineSubView");
+    // 2. 利用 KVC 直接拿到包含所有海报和壁纸的真·终极根视图
+    UIView *container = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+    if (!container) return;
+    
+    // 3. 将单例渲染引擎绑定到 WallpaperController 上
+    TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
     if (!engineView) {
-        engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.bounds];
-        objc_setAssociatedObject(self, "TendiesEngineSubView", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [self addSubview:engineView];
+        engineView = [[TendiesRenderEngineView alloc] initWithFrame:container.bounds];
+        objc_setAssociatedObject(wallpaperController, "GlobalTendiesEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [container addSubview:engineView];
         [engineView reloadWallpaperViews];
     }
     
-    engineView.frame = self.bounds;
-    [self bringSubviewToFront:engineView];
+    // 4. 确保引擎还在容器里，并且在最顶层
+    if (engineView.superview != container) {
+        [engineView removeFromSuperview];
+        [container addSubview:engineView];
+    }
+    engineView.frame = container.bounds;
+    [container bringSubviewToFront:engineView];
     
-    // 只在锁屏隐藏系统原生的底层视图，保证 CA 动画不被打扰
-    for (UIView *sub in self.subviews) {
+    // 5. 将系统原生生成的海报（PosterBoard 场景）彻底隐藏！
+    // 因为这已经是根容器了，我们隐藏它们不仅能节约性能，还不会影响任何前景图标
+    for (UIView *sub in container.subviews) {
         if (sub != engineView) {
             sub.hidden = YES;
+            sub.alpha = 0.0;
         }
     }
 }
@@ -279,7 +291,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 
 // ==========================================
-// 6. 背光监听器，解决“必须触摸才亮”的 Bug
+// 6. 背光监听器，精准发送唤醒信号
 // ==========================================
 %hook SBBacklightController
 
@@ -290,7 +302,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             if (g_isScreenOn) {
-                // 延迟极短的时间发送唤醒广播，确保系统 UI 树已准备就绪
+                // 延迟极短时间发送，确保 UI 树已经在内存中就绪
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineWakeUp" object:nil];
                 });
@@ -303,7 +315,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 适配 iOS 16/17+ 新版背光 API 签名
+// 兼容新版签名
 - (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
