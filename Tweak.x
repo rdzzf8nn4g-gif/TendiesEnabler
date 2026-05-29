@@ -22,8 +22,6 @@ typedef struct {
 @interface PBUIWallpaperViewController : UIViewController
 @property (retain, nonatomic) UIView *homescreenWallpaperView;
 @property (retain, nonatomic) UIView *lockscreenWallpaperView;
-- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
-- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -47,12 +45,10 @@ typedef struct {
 - (BOOL)dismissed;                            
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
-- (void)tendies_forceHideNativeWallpaperLayers; 
 @end
 
-@interface SBWallpaperEffectView : UIView
-@property (nonatomic) long long wallpaperStyle;
-@property (nonatomic) BOOL fullscreen; 
+// 滑动控制器声明，用于帧级压制
+@interface SBCoverSheetSlidingViewController : UIViewController
 @end
 
 // ==========================================
@@ -74,7 +70,7 @@ static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
-static __weak CSCoverSheetViewController *g_coverSheetVC = nil; // 弱引用锁屏控制器
+static __weak CSCoverSheetViewController *g_coverSheetVC = nil;
 
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
@@ -94,8 +90,51 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineInternalReload" object:nil];
 }
 
+
 // ==========================================
-// 核心：CAML 逐帧解析器 (保持你的原版)
+// 🔥终极武器：暴力帧级压制原生壁纸🔥
+// ==========================================
+static void NukeNativeWallpapers() {
+    if (!g_enabled) return;
+    
+    // 1. 压制锁屏新版海报 (PosterBoard)
+    if (g_coverSheetVC) {
+        @try {
+            UIViewController *bgVC = [g_coverSheetVC valueForKey:@"_backgroundContentViewController"];
+            if (bgVC && bgVC.view) {
+                bgVC.view.alpha = 0.0;
+                bgVC.view.hidden = YES;
+            }
+            UIView *floatingLayer = [g_coverSheetVC valueForKey:@"_floatingLayerView"];
+            if (floatingLayer) {
+                floatingLayer.alpha = 0.0;
+                floatingLayer.hidden = YES;
+            }
+        } @catch(NSException *e) {}
+    }
+    
+    // 2. 压制系统级底层原生壁纸
+    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+    if (wallpaperController) {
+        @try {
+            id pbuiVC = [wallpaperController valueForKey:@"_wallpaperViewController"];
+            if (pbuiVC) {
+                if ([pbuiVC respondsToSelector:@selector(homescreenWallpaperView)]) {
+                    UIView *home = [pbuiVC homescreenWallpaperView];
+                    if (home) { home.alpha = 0.0; home.hidden = YES; }
+                }
+                if ([pbuiVC respondsToSelector:@selector(lockscreenWallpaperView)]) {
+                    UIView *lock = [pbuiVC lockscreenWallpaperView];
+                    if (lock) { lock.alpha = 0.0; lock.hidden = YES; }
+                }
+            }
+        } @catch(NSException *e) {}
+    }
+}
+
+
+// ==========================================
+// 核心：CAML 逐帧解析器 (保持不变)
 // ==========================================
 @interface TendiesCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -160,7 +199,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
-// 核心渲染引擎视图 (保持你的原版)
+// 核心渲染引擎视图 (保持不变)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -187,7 +226,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor blackColor]; 
+        self.backgroundColor = [UIColor clearColor]; // 纯透明，融入原生过渡
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -361,7 +400,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 
 // ==========================================
-// 完美回滚到你的纯净单引擎，绝对不移位！
+// 绝对底层的唯一引擎挂载点
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
@@ -389,133 +428,45 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 干掉原生的系统海报壁纸
+// 1. 系统底层壁纸拦截
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
-    if (g_enabled) {
-        if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
-            UIView *homeView = [self homescreenWallpaperView];
-            if (homeView) homeView.alpha = 0.0;
-        }
-        if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
-            UIView *lockView = [self lockscreenWallpaperView];
-            if (lockView) lockView.alpha = 0.0;
-        }
-    }
+    if (g_enabled) NukeNativeWallpapers();
 }
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
 }
-- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
-    if (g_enabled) return NO;
-    return %orig;
-}
 %end
 
 
-// ===============================================
-// 🔥恢复原生模糊🔥：去掉了你原来让所有模糊透明的代码
-// 现在系统所有的 Dock、文件夹、下拉原生磨砂都会保留！
-// ===============================================
-%hook SBWallpaperEffectView
-- (void)layoutSubviews {
+// 2. 锁屏内容宿主拦截
+%hook CSBackgroundContentViewController
+- (void)viewWillLayoutSubviews {
     %orig;
-    // 只处理全屏的壁纸视图，保留原生局部的透明模糊效果
-    if (g_enabled && [self respondsToSelector:@selector(fullscreen)] && self.fullscreen) {
-        self.hidden = YES;
-        self.alpha = 0.0;
-    }
-}
-- (void)setAlpha:(double)alpha {
-    if (g_enabled && [self respondsToSelector:@selector(fullscreen)] && self.fullscreen) {
-        %orig(0.0);
-    } else {
-        %orig; // 恢复原生模糊层的透视度
-    }
-}
-- (void)setHidden:(BOOL)hidden {
-    if (g_enabled && [self respondsToSelector:@selector(fullscreen)] && self.fullscreen) {
-        %orig(YES);
-    } else {
-        %orig;
-    }
+    if (g_enabled) NukeNativeWallpapers();
 }
 %end
 
 
-// 3. 锁屏事件：注入你指定的 0.5 进度动态模糊层！
+// 3. 锁屏 CoverSheet 核心逻辑
 %hook CSCoverSheetViewController
-
 - (void)viewDidLoad {
     %orig;
     g_coverSheetVC = self;
-    
-    // 🔥按照你的要求，在这里注入一个跟屏幕原生的模糊层🔥
-    if (g_enabled) {
-        UIView *customBlur = [self.view viewWithTag:7777];
-        if (!customBlur) {
-            UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]; // 深色原生毛玻璃
-            customBlur = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
-            customBlur.tag = 7777;
-            customBlur.frame = self.view.bounds;
-            customBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            customBlur.userInteractionEnabled = NO; // 绝对不能挡住滑动交互
-            
-            // 插入在锁屏的最底层，盖住桌面
-            [self.view insertSubview:customBlur atIndex:0];
-        }
-    }
 }
-
-%new
-- (void)tendies_forceHideNativeWallpaperLayers {
-    // 保留原始的强制隐藏原生锁屏海报（防止默认壁纸乱入闪烁）
-    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-    if (bgVC && bgVC.view) {
-        bgVC.view.alpha = 0.0;
-        bgVC.view.hidden = YES;
-    }
-    UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-    if (floatingLayer) {
-        floatingLayer.alpha = 0.0;
-        floatingLayer.hidden = YES;
-    }
-}
-
 - (void)viewWillLayoutSubviews {
     %orig;
     g_coverSheetVC = self;
     EnsureEngineViewIsMounted();
-    if (g_enabled) {
-        [self tendies_forceHideNativeWallpaperLayers];
-    }
+    if (g_enabled) NukeNativeWallpapers();
 }
-
 - (void)viewDidLayoutSubviews {
     %orig;
-    if (g_enabled) {
-        [self tendies_forceHideNativeWallpaperLayers];
-    }
+    if (g_enabled) NukeNativeWallpapers();
 }
 
-- (void)_updateBackgroundContentView {
-    %orig;
-    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
-}
-- (void)_updateWallpaperEffectView {
-    %orig;
-    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
-}
-- (void)_updateWallpaper {
-    %orig;
-    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
-}
-- (void)updatePosterSwitcherSnapshots {
-    if (g_enabled) return;
-    %orig;
-}
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
@@ -538,14 +489,34 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 
-// 4. 动画进度拦截：完美实现 0.5 进度动态褪去模糊
+// ==========================================
+// 🔥滑动锁屏手势 帧级拦截🔥
+// 这一步彻底根除了你“滑动时原壁纸闪烁出现”的 Bug
+// ==========================================
+%hook SBCoverSheetSlidingViewController
+// iOS 16 手势推进
+- (struct CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
+    if (g_enabled) NukeNativeWallpapers();
+    return %orig;
+}
+// iOS 17 手势推进
+- (struct CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    if (g_enabled) NukeNativeWallpapers();
+    return %orig;
+}
+// 滑动反弹系统动画
+- (struct CGRect)_animationTickedWithProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    if (g_enabled) NukeNativeWallpapers();
+    return %orig;
+}
+%end
+
+
+// 5. 动画进度拦截
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
-        if (arg5) {
-            void (^completionBlock)(void) = arg5;
-            completionBlock();
-        }
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
         return; 
     }
     %orig;
@@ -554,29 +525,13 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) return;
     %orig;
 }
-
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     EnsureEngineViewIsMounted(); 
     if (g_enabled) {
+        NukeNativeWallpapers(); // 最后一层保险，确保解锁动画期间也是死的
         dispatch_async(dispatch_get_main_queue(), ^{
-            // 抛出交互进度给你的引擎
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-            
-            // ===============================================
-            // 🔥核心逻辑：滑到一半前完全挡住桌面，一半后模糊慢慢显示桌面🔥
-            // ===============================================
-            if (g_coverSheetVC && g_coverSheetVC.view) {
-                UIView *customBlur = [g_coverSheetVC.view viewWithTag:7777];
-                if (customBlur) {
-                    double blurAlpha = 1.0;
-                    if (progress > 0.5) {
-                        // 进度从 0.5 走到 1.0 时，Alpha 从 1.0 平滑渐变到 0.0
-                        blurAlpha = 1.0 - ((progress - 0.5) * 2.0);
-                    }
-                    customBlur.alpha = blurAlpha;
-                }
-            }
         });
     }
 }
@@ -584,7 +539,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步 (完全未变动)
+// 亮灭屏与锁屏状态同步
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
@@ -624,6 +579,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
+
 
 %ctor {
     reloadPrefs();
