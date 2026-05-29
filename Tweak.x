@@ -11,6 +11,24 @@
 #endif
 
 // ==========================================
+// 统一的过渡上下文类型，避免 Logos 匿名结构体签名冲突
+// ==========================================
+typedef struct {
+    double value;
+    struct {
+        struct {
+            double value;
+            _Bool inclusive;
+        } start;
+        struct {
+            double value;
+            _Bool inclusive;
+        } end;
+    } interval;
+    long long mode;
+} TendiesTransitionContext;
+
+// ==========================================
 // 结构体与必要私有类声明
 // ==========================================
 typedef struct {
@@ -87,8 +105,8 @@ typedef struct {
 - (void)ambientPresentationController:(id)controller didUpdatePresented:(BOOL)presented;
 - (void)ambientPresentationControllerCancelledPossiblePresentation:(id)presentation;
 - (void)ambientPresentationControllerWillPossiblyPresent:(id)present;
-- (void)transitionSource:(id)source didUpdateTransitionWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context;
-- (void)transitionSource:(id)source didEndWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context;
+- (void)transitionSource:(id)source didUpdateTransitionWithContext:(TendiesTransitionContext)context;
+- (void)transitionSource:(id)source didEndWithContext:(TendiesTransitionContext)context;
 - (void)overlayController:(id)controller didChangePresentationProgress:(double)progress newPresentationProgress:(double)newProgress fromLeading:(_Bool)leading;
 - (void)viewDidMoveToWindow:(id)window shouldAppearOrDisappear:(BOOL)disappear;
 - (void)viewWillLayoutSubviews;
@@ -143,6 +161,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     reloadPrefs();
     [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineInternalReload" object:nil];
 }
+
+// ==========================================
+// 前向声明
+// ==========================================
+@class TendiesRenderEngineView;
+static void EnsureEngineViewIsMounted(void);
 
 // ==========================================
 // 工具函数
@@ -594,7 +618,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 // ==========================================
 static char kGlobalTendiesEngineKey;
 
-static void EnsureEngineViewIsMounted() {
+static void EnsureEngineViewIsMounted(void) {
     if (!g_enabled) return;
 
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
@@ -962,12 +986,12 @@ static void TendiesHideCSNativeLayers(CSCoverSheetViewController *vc) {
     TendiesHideCSNativeLayers(self);
 }
 
-- (void)transitionSource:(id)source didUpdateTransitionWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context {
+- (void)transitionSource:(id)source didUpdateTransitionWithContext:(TendiesTransitionContext)context {
     %orig;
     TendiesHideCSNativeLayers(self);
 }
 
-- (void)transitionSource:(id)source didEndWithContext:(struct { double x0; struct { struct { double x0; _Bool x1; } x0; struct { double x0; _Bool x1; } x1; } x1; long long x2; })context {
+- (void)transitionSource:(id)source didEndWithContext:(TendiesTransitionContext)context {
     %orig;
     TendiesHideCSNativeLayers(self);
 }
