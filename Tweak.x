@@ -33,24 +33,23 @@ static NSString * GetTendiesStorageDir() {
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
-@interface PBUIWallpaperView : UIView
-- (UIView *)contentView; 
-- (long long)variant; // 0: 锁屏/通知中心, 1: 桌面主屏幕
+@interface UIViewController (Private)
+- (UIView *)wallpaperContainerView;
 @end
 
 @interface CSCoverSheetViewController : UIViewController
-@property (nonatomic) double backlightLevel; // 捕获原生息屏/亮屏的渐变等级
-- (void)setBacklightLevel:(double)level;
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source; 
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
 // ==========================================
-// 3. 动态配置全局变量
+// 3. 动态配置全局变量与状态同步
 // ==========================================
 static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
+// 核心状态锁：记录当前是否已解锁进入桌面
+static BOOL g_isUnlocked = NO; 
 
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
@@ -73,13 +72,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 4. 渲染引擎视图 (防透视与背光映射)
+// 4. 统一渲染引擎 (Unify Rendering Architecture)
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
 @property (nonatomic, strong) BSUICAPackageView *floatingView;
 @property (nonatomic, strong) BSUICAPackageView *fgView;
-@property (nonatomic, assign) long long wallpaperVariant; 
 @property (nonatomic, strong) NSString *currentState;     
 
 @property (nonatomic, strong) NSString *cachedBgPath;
@@ -96,15 +94,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
+        self.backgroundColor = [UIColor clearColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
-        self.wallpaperVariant = 0;
         self.currentState = @"Locked";
         self.isPathCached = NO;
         
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(forceReload) name:@"TendiesEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleStateChange:) name:@"TendiesEngineStateChange" object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleBacklightChange:) name:@"TendiesBacklightChange" object:nil];
     }
     return self;
 }
@@ -121,35 +118,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self reloadWallpaperViews];
 }
 
-// 🚀 修复 1：背光映射。完美解决“触摸才亮”和“看到桌面透视”的问题！
-- (void)handleBacklightChange:(NSNotification *)note {
-    if (self.wallpaperVariant == 0) { // 只有锁屏跟随背光渐亮
-        NSNumber *levelNum = note.userInfo[@"level"];
-        if (levelNum) {
-            CGFloat level = [levelNum doubleValue];
-            // 只渐变图层，引擎本身保持黑色底色阻挡桌面透视！
-            self.bgView.alpha = level;
-            self.floatingView.alpha = level;
-            self.fgView.alpha = level;
-        }
-    }
-}
-
-// 🚀 修复 2：状态机校准。确保桌面和锁屏的状态动画完全分离
 - (void)handleStateChange:(NSNotification *)note {
     NSString *state = note.userInfo[@"state"];
-    if (!state) return;
-
-    if (self.wallpaperVariant == 0) {
-        [self transitionToState:state];
-    } else if (self.wallpaperVariant == 1) {
-        if ([state isEqualToString:@"Sleep"]) {
-            [self transitionToState:@"Sleep"];
-        } else {
-            // 只要屏幕点亮或解锁，桌面永远保持 Unlock 动画状态
-            [self transitionToState:@"Unlock"];
-        }
-    }
+    if (state) [self transitionToState:state];
 }
 
 - (void)layoutSubviews {
@@ -165,7 +136,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
                 self.bgView = nil; self.floatingView = nil; self.fgView = nil;
-                self.backgroundColor = [UIColor clearColor];
             });
             return;
         }
@@ -175,7 +145,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         @synchronized(self) {
             if (!self.isPathCached) {
-                // 深度遍历：无视层级嵌套，直接捞出 .ca 文件（解决单一结构问题）
+                // 深度遍历，无视文件夹名称，直接捞出核心 .ca 文件！
                 NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_tendiesPath] includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil];
                 
                 for (NSURL *fileURL in dirEnum) {
@@ -196,13 +166,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
             self.bgView = nil; self.floatingView = nil; self.fgView = nil;
-            
-            // 锁屏防透视：给锁屏变体加上纯黑底色，防止渐亮时看到背后的桌面
-            if (self.wallpaperVariant == 0) {
-                self.backgroundColor = [UIColor blackColor];
-            } else {
-                self.backgroundColor = [UIColor clearColor];
-            }
             
             void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             if (!handle) return; 
@@ -225,6 +188,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 [self addSubview:self.fgView];
             }
             [self setNeedsLayout];
+            
+            // 恢复之前记录的全局锁屏/解锁状态
+            self.currentState = g_isUnlocked ? @"Unlock" : @"Locked";
             [self transitionToState:self.currentState];
         });
     });
@@ -234,7 +200,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled) return;
     self.currentState = [stateName copy];
     
-    // 强制激流动效过渡
+    // 强制调用带 animated 的方法，完美触发 main.caml 里的解锁互动形变！
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:YES];
         [self.floatingView setState:stateName animated:YES];
@@ -248,92 +214,103 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @end
 
 // ==========================================
-// 5. 核心画布注入 (防卡片污染 + 精准隐藏)
+// 5. 最高权柄 Hook：接管壁纸司令部 (支持 iOS 15 - 17)
 // ==========================================
-%hook PBUIWallpaperView
+%hook PBUIWallpaperViewController
 
-- (void)layoutSubviews {
-    %orig; 
+- (void)viewDidLoad {
+    %orig;
     if (!g_enabled) return;
+    
+    // 我们在这里创建全系统唯一的一个 Tendies 视图！
+    TendiesRenderEngineView *engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
+    objc_setAssociatedObject(self, "TendiesEngineRoot", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    
+    [self.view insertSubview:engineView atIndex:0];
+    [engineView reloadWallpaperViews];
+}
 
-    // 🚀 修复 3：强力拦截后台卡片污染！
-    UIWindow *window = self.window;
-    if (window) {
-        NSString *wClass = NSStringFromClass([window class]);
-        if ([wClass containsString:@"Hosted"] || 
-            [wClass containsString:@"Snapshot"] || 
-            [wClass containsString:@"Switcher"] || 
-            [wClass containsString:@"SecureApp"]) {
-            return; // 发现多任务卡片/快照，立刻退出！
-        }
-    }
-    // 尺寸异常也视为预览快照
-    if (self.bounds.size.width < 200) return; 
-
-    long long currentVariant = [self respondsToSelector:@selector(variant)] ? [self variant] : 0;
+- (void)viewWillLayoutSubviews {
+    %orig;
+    if (!g_enabled) return;
     
-    UIView *cv = [self respondsToSelector:@selector(contentView)] ? [self contentView] : self;
-    if (!cv) cv = self;
+    TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesEngineRoot");
+    if (!engineView) return;
     
-    TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesRenderEngineKey");
-    
-    if (!engineView) {
-        engineView = [[TendiesRenderEngineView alloc] initWithFrame:cv.bounds];
-        engineView.wallpaperVariant = currentVariant;
-        engineView.currentState = (currentVariant == 1) ? @"Unlock" : @"Locked";
-        
-        objc_setAssociatedObject(self, "TendiesRenderEngineKey", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [cv addSubview:engineView];
-        [engineView reloadWallpaperViews];
+    // 🚀 核心 1：获取原生唤醒容器！把我们塞进系统专门管“渐亮/渐暗”的容器里，免去必须触摸才亮的 Bug！
+    UIView *container = nil;
+    if ([self respondsToSelector:@selector(wallpaperContainerView)]) {
+        container = [self performSelector:@selector(wallpaperContainerView)];
     } else {
-        // 防止系统回收复用视图导致锁屏变成桌面
-        if (engineView.wallpaperVariant != currentVariant) {
-            engineView.wallpaperVariant = currentVariant;
-            NSString *targetState = (currentVariant == 1) ? @"Unlock" : @"Locked";
-            [engineView transitionToState:targetState];
-        }
+        container = [self valueForKey:@"_wallpaperContainerView"];
     }
     
-    engineView.frame = cv.bounds;
-    engineView.hidden = NO;
-    [cv bringSubviewToFront:engineView];
+    if (!container) container = self.view; // 降级备用
     
-    // 🚀 修复 4：只打击静态图和远端海报，保留原生容器。确保桌面完美显示！
-    for (UIView *sub in cv.subviews) {
-        if (sub == engineView) continue;
-        
-        NSString *cName = NSStringFromClass([sub class]);
-        if ([cName containsString:@"Scene"] || 
-            [cName containsString:@"UIImageView"] || 
-            [cName containsString:@"Video"] || 
-            [cName containsString:@"Poster"]) {
+    engineView.frame = container.bounds;
+    if (engineView.superview != container) {
+        [engineView removeFromSuperview];
+        [container addSubview:engineView];
+    }
+    
+    // 强制提到最高层
+    [container bringSubviewToFront:engineView];
+    
+    // 🚀 核心 2：精准灭杀原生 PosterBoard 图层，让 GPU 只渲染我们的壁纸！
+    for (UIView *sub in container.subviews) {
+        if (sub != engineView) {
             sub.hidden = YES;
             sub.alpha = 0.0;
         }
     }
 }
+
 %end
 
-// ==========================================
-// 6. 锁屏控制器状态发射器
-// ==========================================
-%hook CSCoverSheetViewController
+// 为了防一手 iOS 14 老架构，也加上这一个（Theos 会自动判断是否存在）
+%hook SBWallpaperViewController
 
-// 拦截原生唤醒的硬件级 Alpha 过渡
-- (void)setBacklightLevel:(double)level {
+- (void)viewDidLoad {
     %orig;
-    if (g_enabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesBacklightChange" object:nil userInfo:@{@"level": @(level)}];
-        });
+    if (!g_enabled) return;
+    TendiesRenderEngineView *engineView = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
+    objc_setAssociatedObject(self, "TendiesEngineRoot", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [self.view insertSubview:engineView atIndex:0];
+    [engineView reloadWallpaperViews];
+}
+
+- (void)viewWillLayoutSubviews {
+    %orig;
+    if (!g_enabled) return;
+    TendiesRenderEngineView *engineView = objc_getAssociatedObject(self, "TendiesEngineRoot");
+    if (!engineView) return;
+    
+    UIView *container = [self valueForKey:@"_wallpaperContainerView"] ?: self.view;
+    engineView.frame = container.bounds;
+    if (engineView.superview != container) {
+        [engineView removeFromSuperview];
+        [container addSubview:engineView];
+    }
+    [container bringSubviewToFront:engineView];
+    for (UIView *sub in container.subviews) {
+        if (sub != engineView) { sub.hidden = YES; sub.alpha = 0.0; }
     }
 }
 
-// 拦截息屏/锁屏状态
+%end
+
+// ==========================================
+// 6. 锁屏控制器：只负责下发状态机指令
+// ==========================================
+%hook CSCoverSheetViewController
+
+// 当手机息屏或点亮但未解锁时：
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
-        NSString *state = mode ? @"Sleep" : @"Locked";
+        // mode=YES 息屏 -> Sleep
+        // mode=NO 亮屏 -> 依据当前解锁状态判定是 Locked 还是 Unlock
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
@@ -343,17 +320,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)setInScreenOffMode:(BOOL)mode forAutoUnlock:(BOOL)unlock fromUnlockSource:(int)source {
     %orig;
     if (g_enabled) {
-        NSString *state = mode ? @"Sleep" : @"Locked";
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
 }
 
-// 拦截滑开进桌面的解锁状态
+// 当用户划开锁屏进入桌面（或下拉通知中心）时：
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
+    g_isUnlocked = dismissed; // 记录全局解锁状态
     if (g_enabled) {
+        // dismissed=YES 进桌面 -> Unlock，dismissed=NO 下拉通知中心 -> Locked
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineStateChange" object:nil userInfo:@{@"state": state}];
