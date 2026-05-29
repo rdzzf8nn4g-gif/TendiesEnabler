@@ -156,7 +156,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
-// 核心渲染引擎视图 (纯正单实例结构)
+// 核心渲染引擎视图
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -245,7 +245,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
-// 核心插值方法：彻底解决以前只显示过渡动画（假死/渐变）的问题
+// 核心插值方法
 - (void)applyProgress:(double)progress parser:(TendiesCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     [CATransaction begin]; 
@@ -359,7 +359,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 
 
 // ==========================================
-// 完美回滚到你第一版发给我的纯净原始 Hook (保证壁纸绝对显示)
+// 修复后：桌面底层的全局渲染引擎
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
@@ -374,20 +374,21 @@ static void EnsureEngineViewIsMounted() {
     if (!engineView) {
         engineView = [[TendiesRenderEngineView alloc] initWithFrame:targetContainer.bounds];
         objc_setAssociatedObject(wallpaperController, "GlobalTendiesEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [targetContainer addSubview:engineView];
+        // 关键：插入到最底层，避免覆盖可能存在的系统手势层
+        [targetContainer insertSubview:engineView atIndex:0];
         [engineView reloadWallpaperViews];
     }
     
     if (engineView.superview != targetContainer) {
         [engineView removeFromSuperview];
-        [targetContainer addSubview:engineView];
+        [targetContainer insertSubview:engineView atIndex:0];
     }
     engineView.frame = targetContainer.bounds;
-    [targetContainer bringSubviewToFront:engineView];
+    [targetContainer sendSubviewToBack:engineView];
 }
 
 
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -412,7 +413,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层 (完全恢复你的初版)
+// 2. 干掉滑动时的系统高斯模糊过渡层
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -437,8 +438,9 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 3. 暴力拦截 CoverSheet (锁屏) 的所有后台视图滚动刷新事件 (完全恢复你的初版)
+// 3. 修复后：暴力拦截 CoverSheet (锁屏) 的残留层，并注入第二个同步引擎解决透视
 %hook CSCoverSheetViewController
+
 %new
 - (void)tendies_forceHideNativeWallpaperLayers {
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
@@ -462,10 +464,40 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
+// 在控制器初始化时，直接注入锁屏专属引擎
+- (void)viewDidLoad {
+    %orig;
+    if (g_enabled) {
+        TendiesRenderEngineView *csEngine = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
+        // 关联对象绑定到锁屏控制器
+        objc_setAssociatedObject(self, "CSEngine", csEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self.view insertSubview:csEngine atIndex:0]; // 插入到 CoverSheet 的绝对最底层
+        [csEngine reloadWallpaperViews];
+    }
+}
+
 - (void)viewWillLayoutSubviews {
     %orig;
-    EnsureEngineViewIsMounted();
+    // 依然保证桌面底层的引擎存活
+    EnsureEngineViewIsMounted(); 
+    
     if (g_enabled) {
+        // 维护锁屏专属引擎
+        TendiesRenderEngineView *csEngine = objc_getAssociatedObject(self, "CSEngine");
+        if (!csEngine) {
+            csEngine = [[TendiesRenderEngineView alloc] initWithFrame:self.view.bounds];
+            objc_setAssociatedObject(self, "CSEngine", csEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [self.view insertSubview:csEngine atIndex:0];
+            [csEngine reloadWallpaperViews];
+        }
+        if (csEngine.superview != self.view) {
+            [csEngine removeFromSuperview];
+            [self.view insertSubview:csEngine atIndex:0];
+        }
+        csEngine.frame = self.view.bounds;
+        [self.view sendSubviewToBack:csEngine];
+        
+        // 暴力抹除自带的壁纸残留
         [self tendies_forceHideNativeWallpaperLayers];
     }
 }
@@ -515,7 +547,7 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 动画进度获取及快照拦截 (完全恢复你的初版，仅仅通过通知抛给 Parser 运算)
+// 动画进度获取及快照拦截
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -545,7 +577,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步 (未变动)
+// 亮灭屏与锁屏状态同步
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
