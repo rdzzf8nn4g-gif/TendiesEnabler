@@ -24,9 +24,19 @@
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
 @end
 
+// 💡 修复关键点：全局声明具名结构体，防止 Logos 将匿名 struct 判定为两个冲突的类型
+typedef struct {
+    long long x0;
+    long long x1;
+    double x2;
+} PBUIWallpaperTransitionState;
+
 @interface PBUIWallpaperViewController : UIViewController
 @property (retain, nonatomic) UIView *homescreenWallpaperView;
 @property (retain, nonatomic) UIView *lockscreenWallpaperView;
+// 使用具名结构体
+- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
+- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
 
 @interface SBBacklightController : NSObject
@@ -99,7 +109,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor blackColor]; 
+        self.backgroundColor = [UIColor clearColor]; // 这里可以用 clearColor，以免黑屏
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -293,7 +303,8 @@ static void EnsureEngineViewIsMounted() {
 }
 
 // 拦截系统强行生成过渡期的模糊/快照视图
-- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(struct { long long x0; long long x1; double x2; })state {
+// 💡 这里我们使用上方刚刚声明的具名结构体 PBUIWallpaperTransitionState
+- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled) return nil;
     return %orig;
 }
