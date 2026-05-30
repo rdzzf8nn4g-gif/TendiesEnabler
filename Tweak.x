@@ -317,21 +317,43 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         }
         NSFileManager *fm = [NSFileManager defaultManager];
         if (!g_zonePath || ![fm fileExistsAtPath:g_zonePath]) return;
+        
         @synchronized(self) {
             if (!self.isPathCached) {
-                NSDirectoryEnumerator *dirEnum = [fm enumeratorAtURL:[NSURL fileURLWithPath:g_zonePath] includingPropertiesForKeys:nil options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil];
-                for (NSURL *fileURL in dirEnum) {
-                    NSString *pathString = fileURL.path; NSString *fileName = fileURL.lastPathComponent;
-                    if ([pathString hasSuffix:@"/"]) pathString = [pathString substringToIndex:pathString.length - 1];
-                    if ([[[pathString pathExtension] lowercaseString] isEqualToString:@"ca"] || [pathString hasSuffix:@".ca"]) {
-                        if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) self.cachedBgPath = [pathString copy];
-                        else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) self.cachedFloatPath = [pathString copy];
-                        else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) self.cachedFgPath = [pathString copy];
+                // 🌟 新增深搜兜底逻辑：无视目录嵌套层数，自动向深层遍历
+                NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
+                NSString *subPath;
+                while ((subPath = [dirEnum nextObject])) {
+                    // 过滤 __MACOSX 垃圾文件夹
+                    if ([subPath containsString:@"__MACOSX"]) {
+                        [dirEnum skipDescendants];
+                        continue;
+                    }
+                    
+                    NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
+                    NSString *fileName = [subPath lastPathComponent];
+                    
+                    BOOL isDir = NO;
+                    // 判断必须是文件夹且以 .ca 结尾
+                    if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
+                        if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
+                            if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) {
+                                self.cachedBgPath = [fullPath copy];
+                            } else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) {
+                                self.cachedFloatPath = [fullPath copy];
+                            } else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) {
+                                self.cachedFgPath = [fullPath copy];
+                            }
+                            
+                            // 找到目标 .ca 文件夹后，直接跳过其内部的资源文件遍历，提升扫描性能
+                            [dirEnum skipDescendants];
+                        }
                     }
                 }
                 self.isPathCached = YES;
             }
         }
+        
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
             self.bgView = nil; self.floatingView = nil; self.fgView = nil;
