@@ -90,7 +90,8 @@ static void reloadPrefs() {
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
         g_zonePath = [(__bridge NSString *)pathRef copy];
     } else {
-        g_zonePath = [GetZoneStorageDir() stringByAppendingPathComponent:@"ActiveZone"];
+        // 如果没有则置为空，不默认加载，等待用户点击
+        g_zonePath = nil; 
     }
 }
 
@@ -165,18 +166,17 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
-// 核心渲染引擎视图
+// 核心渲染引擎视图 (附带工业级防漏抗压设计)
 // ==========================================
 @interface ZoneRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
 @property (nonatomic, strong) BSUICAPackageView *floatingView;
 @property (nonatomic, strong) BSUICAPackageView *fgView;
-@property (nonatomic, assign) BOOL isPathCached;
 @property (nonatomic, assign) BOOL isUnlocking; 
-@property (nonatomic, strong) NSString *cachedBgPath;
-@property (nonatomic, strong) NSString *cachedFloatPath;
-@property (nonatomic, strong) NSString *cachedFgPath;
 @property (nonatomic, strong) NSString *currentState;
+
+// 代次校验：防止快速切换壁纸时回调覆盖导致的严重内存泄漏和UI卡死
+@property (nonatomic, assign) NSInteger reloadGeneration; 
 
 @property (nonatomic, strong) ZoneCAMLParser *bgParser;
 @property (nonatomic, strong) ZoneCAMLParser *floatParser;
@@ -195,11 +195,15 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         self.backgroundColor = [UIColor clearColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
-        self.isPathCached = NO;
         self.isUnlocking = NO;
         self.currentState = @"Init";
+        self.reloadGeneration = 0;
         
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(forceReload) name:@"ZoneEngineInternalReload" object:nil];
+        self.bgLayerMap = [NSMutableDictionary dictionary];
+        self.floatLayerMap = [NSMutableDictionary dictionary];
+        self.fgLayerMap = [NSMutableDictionary dictionary];
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadWallpaperViews) name:@"ZoneEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
@@ -211,11 +215,6 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (void)forceReload {
-    self.isPathCached = NO; self.cachedBgPath = nil; self.cachedFloatPath = nil; self.cachedFgPath = nil;
-    [self reloadWallpaperViews];
-}
-
 - (void)layoutSubviews {
     [super layoutSubviews];
     if (self.bgView) self.bgView.frame = self.bounds;
@@ -224,13 +223,13 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 - (void)onWakeUp {
-    if (!g_enabled) return;
+    if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
 }
 
 - (void)onSleep {
-    if (!g_enabled) return;
+    if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:NO];
 }
@@ -275,7 +274,7 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 - (void)onProgress:(NSNotification *)note {
-    if (!g_enabled) return;
+    if (!g_enabled || !self.bgView) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
@@ -290,7 +289,7 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
-    if (!g_enabled) return;
+    if (!g_enabled || !self.bgView) return;
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
@@ -307,77 +306,107 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     }
 }
 
+// 内存清理方法独立封装，必须在主线程被调用
+- (void)clearCurrentViewsSafely {
+    [self.bgView removeFromSuperview]; self.bgView = nil;
+    [self.floatingView removeFromSuperview]; self.floatingView = nil;
+    [self.fgView removeFromSuperview]; self.fgView = nil;
+    
+    [self.bgLayerMap removeAllObjects];
+    [self.floatLayerMap removeAllObjects];
+    [self.fgLayerMap removeAllObjects];
+    
+    self.bgParser = nil; 
+    self.floatParser = nil; 
+    self.fgParser = nil;
+}
+
+// 采用严苛的异步预处理 + 同步阻断丢弃方案防漏抗压
 - (void)reloadWallpaperViews {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        if (!g_enabled) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
-                self.bgView = nil; self.floatingView = nil; self.fgView = nil;
-            }); return;
-        }
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if (!g_zonePath || ![fm fileExistsAtPath:g_zonePath]) return;
+    self.reloadGeneration++;
+    NSInteger currentGen = self.reloadGeneration;
+    
+    // 把繁重的 IO 深搜读写扔去后台
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         
-        @synchronized(self) {
-            if (!self.isPathCached) {
-                // 🌟 新增深搜兜底逻辑：无视目录嵌套层数，自动向深层遍历
-                NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
-                NSString *subPath;
-                while ((subPath = [dirEnum nextObject])) {
-                    // 过滤 __MACOSX 垃圾文件夹
-                    if ([subPath containsString:@"__MACOSX"]) {
-                        [dirEnum skipDescendants];
-                        continue;
-                    }
-                    
-                    NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
-                    NSString *fileName = [subPath lastPathComponent];
-                    
-                    BOOL isDir = NO;
-                    // 判断必须是文件夹且以 .ca 结尾
-                    if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-                        if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
-                            if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) {
-                                self.cachedBgPath = [fullPath copy];
-                            } else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) {
-                                self.cachedFloatPath = [fullPath copy];
-                            } else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) {
-                                self.cachedFgPath = [fullPath copy];
-                            }
-                            
-                            // 找到目标 .ca 文件夹后，直接跳过其内部的资源文件遍历，提升扫描性能
-                            [dirEnum skipDescendants];
-                        }
-                    }
+        if (!g_enabled || !g_zonePath || ![[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (currentGen != self.reloadGeneration) return; // 代次过期，自动废弃
+                [self clearCurrentViewsSafely];
+            });
+            return;
+        }
+        
+        NSFileManager *fm = [NSFileManager defaultManager];
+        __block NSString *foundBg = nil;
+        __block NSString *foundFloat = nil;
+        __block NSString *foundFg = nil;
+        
+        // 执行你要求的兜底超深搜逻辑
+        NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
+        NSString *subPath;
+        while ((subPath = [dirEnum nextObject])) {
+            // 过滤系统垃圾缓存文件夹
+            if ([subPath containsString:@"__MACOSX"]) {
+                [dirEnum skipDescendants];
+                continue;
+            }
+            
+            NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
+            NSString *fileName = [subPath lastPathComponent];
+            BOOL isDir = NO;
+            
+            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
+                if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
+                    if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) foundBg = fullPath;
+                    else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) foundFloat = fullPath;
+                    else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) foundFg = fullPath;
+                    [dirEnum skipDescendants]; // 找到了目标后缀直接切断内层徒劳下潜
                 }
-                self.isPathCached = YES;
             }
         }
         
+        if (currentGen != self.reloadGeneration) return; // IO结束如果被新点击覆盖，立即掐断丢弃
+        
+        // IO结束，主线程组装图层树
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.bgView removeFromSuperview]; [self.floatingView removeFromSuperview]; [self.fgView removeFromSuperview];
-            self.bgView = nil; self.floatingView = nil; self.fgView = nil;
-            self.bgLayerMap = [NSMutableDictionary dictionary]; self.floatLayerMap = [NSMutableDictionary dictionary]; self.fgLayerMap = [NSMutableDictionary dictionary];
-            self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
+            if (currentGen != self.reloadGeneration) return; // 回到主线程的最终拦截
+            
+            [self clearCurrentViewsSafely]; // 拆卸旧装甲，绝对不留内存残留
+            
             void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             if (!handle) return; 
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             if (!PackageViewClass) return;
-            if (self.cachedBgPath) {
-                self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedBgPath]];
-                [self addSubview:self.bgView];
-                self.bgParser = [ZoneCAMLParser new]; [self.bgParser parseFile:[self.cachedBgPath stringByAppendingPathComponent:@"main.caml"]];
+            
+            // 使用极速的 autoreleasepool 防止瞬时内存飙升
+            @autoreleasepool {
+                if (foundBg) {
+                    self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundBg]];
+                    if (self.bgView) {
+                        [self addSubview:self.bgView];
+                        self.bgParser = [ZoneCAMLParser new]; 
+                        [self.bgParser parseFile:[foundBg stringByAppendingPathComponent:@"main.caml"]];
+                    }
+                }
+                if (foundFloat) {
+                    self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFloat]];
+                    if (self.floatingView) {
+                        [self addSubview:self.floatingView];
+                        self.floatParser = [ZoneCAMLParser new]; 
+                        [self.floatParser parseFile:[foundFloat stringByAppendingPathComponent:@"main.caml"]];
+                    }
+                }
+                if (foundFg) {
+                    self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFg]];
+                    if (self.fgView) {
+                        [self addSubview:self.fgView];
+                        self.fgParser = [ZoneCAMLParser new]; 
+                        [self.fgParser parseFile:[foundFg stringByAppendingPathComponent:@"main.caml"]];
+                    }
+                }
             }
-            if (self.cachedFloatPath) {
-                self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFloatPath]];
-                [self addSubview:self.floatingView];
-                self.floatParser = [ZoneCAMLParser new]; [self.floatParser parseFile:[self.cachedFloatPath stringByAppendingPathComponent:@"main.caml"]];
-            }
-            if (self.cachedFgPath) {
-                self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:self.cachedFgPath]];
-                [self addSubview:self.fgView];
-                self.fgParser = [ZoneCAMLParser new]; [self.fgParser parseFile:[self.cachedFgPath stringByAppendingPathComponent:@"main.caml"]];
-            }
+            
             [self setNeedsLayout];
             self.currentState = @"Init";
             [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
