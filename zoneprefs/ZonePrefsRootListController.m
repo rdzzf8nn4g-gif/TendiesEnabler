@@ -80,9 +80,10 @@ static NSString * GetPrefsPlistPath() {
     [super viewDidLoad];
     
     // =======================================
-    // 极致完美的居中排版布局 (UIStackView)
+    // 极致完美的排版布局 (修改为：图左名右居中，文字左对齐块居中，缩小下巴留白)
     // =======================================
-    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 220)];
+    // 将高度从220缩小到160，从而让下面的 Cell 整体上移
+    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     
     // 1. 图标
@@ -100,32 +101,38 @@ static NSString * GetPrefsPlistPath() {
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = @"Zone";
     titleLabel.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
-    titleLabel.textAlignment = NSTextAlignmentCenter;
+    titleLabel.textAlignment = NSTextAlignmentLeft; // 配合横向Stack改为左对齐
     
-    // 3. 作者信息及频道 (使用 UITextView 实现多行居中+链接可直接点击)
+    // 2.5 将图标和标题打包成一个水平的 StackView（图左、字右）
+    UIStackView *topHorizontalStack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel]];
+    topHorizontalStack.axis = UILayoutConstraintAxisHorizontal;
+    topHorizontalStack.alignment = UIStackViewAlignmentCenter;
+    topHorizontalStack.spacing = 15; // 图标和文字的左右间距
+    
+    // 3. 作者信息及频道 (使用 UITextView 实现多行，内部左对齐，外部Stack保证整体居中)
     UITextView *creditsView = [[UITextView alloc] init];
     creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
     creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     creditsView.textColor = [UIColor secondaryLabelColor];
-    creditsView.textAlignment = NSTextAlignmentCenter;
+    creditsView.textAlignment = NSTextAlignmentLeft; // 内部文字开头对齐（左对齐）
     creditsView.editable = NO;
     creditsView.scrollEnabled = NO;
     creditsView.backgroundColor = [UIColor clearColor];
     creditsView.dataDetectorTypes = UIDataDetectorTypeLink; // 开启自动识别超链接
     
-    // 4. 打包进弹性容器 (自动完美居中)
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel, creditsView]];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.alignment = UIStackViewAlignmentCenter;
-    stack.spacing = 8;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    // 4. 打包进最终的主垂直弹性容器 (整体依然完美居中)
+    UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsView]];
+    mainVerticalStack.axis = UILayoutConstraintAxisVertical;
+    mainVerticalStack.alignment = UIStackViewAlignmentCenter; // 确保横向块和文字块作为一个整体居中
+    mainVerticalStack.spacing = 10; // 上下区域的间距
+    mainVerticalStack.translatesAutoresizingMaskIntoConstraints = NO;
     
-    [headerView addSubview:stack];
+    [headerView addSubview:mainVerticalStack];
     
     // 设置弹性容器在头部居中
     [NSLayoutConstraint activateConstraints:@[
-        [stack.centerXAnchor constraintEqualToAnchor:headerView.centerXAnchor],
-        [stack.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor]
+        [mainVerticalStack.centerXAnchor constraintEqualToAnchor:headerView.centerXAnchor],
+        [mainVerticalStack.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor]
     ]];
     
     if ([self respondsToSelector:@selector(table)]) {
