@@ -651,21 +651,23 @@ static void EnsureEngineViewIsMounted() {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
             
-            // 🚨 修正后准确的渐变公式（主线程安全）：
+            // 🚨 修正后精准的三段式渐变公式（主线程安全）：
             // progress = 1.0 (桌面解锁), progress = 0.0 (锁屏完全覆盖)
-            // 下滑时，1.0 -> 0.0。
-            // 修改为 70% (0.7) 时开始显示，并在 60% (0.6) 开始渐渐流畅显示，避免突然出现
             if (g_portalView) {
                 double alpha = 0.0;
                 
-                if (progress <= 0.7) {
-                    if (progress > 0.6) {
-                        // 0.7 到 0.6 区间作微小缓冲，从 0 渐变到 0.1
-                        alpha = (0.7 - progress) * 1.0; 
-                    } else {
-                        // 0.6 到 0.0 区间开始主要且流畅的渐变，从 0.1 渐变到 1.0
-                        alpha = 0.1 + ((0.6 - progress) / 0.6) * 0.9;
-                    }
+                if (progress > 0.7) {
+                    // 1.0 -> 0.7 (前 0~30% 下滑)：
+                    // 给予一个极其微弱的渐变 (0.0 -> 0.05)，让手势刚开始时就能隐约看到壁纸，打破纯透明
+                    alpha = (1.0 - progress) * (0.05 / 0.3);
+                } else if (progress > 0.6) {
+                    // 0.7 -> 0.6 (30~40% 下滑)：
+                    // 缓冲期，从 0.05 平滑拉升到 0.15
+                    alpha = 0.05 + (0.7 - progress) * 1.0; 
+                } else {
+                    // 0.6 -> 0.0 (40~100% 下滑)：
+                    // 主发力期，从 0.15 稳步推升到 1.0，彻底覆盖应用界面
+                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
                 }
                 
                 alpha = MAX(0.0, MIN(1.0, alpha));
