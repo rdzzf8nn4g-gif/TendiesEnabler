@@ -42,8 +42,8 @@ typedef struct {
 @property (readonly, nonatomic) long long backlightState;
 @end
 
+// 🌟 修复点：删除了重写的 @property view 声明，避免与父类 UIViewController 冲突
 @interface CSCoverSheetViewController : UIViewController
-@property (readonly, nonatomic) UIView *view;
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 @end
@@ -183,7 +183,6 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        // 🌟 必须设为 clearColor！这样才能透视到底下原生的模糊层
         self.backgroundColor = [UIColor clearColor]; 
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
