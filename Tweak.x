@@ -221,12 +221,30 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.fgView) self.fgView.frame = self.bounds;
 }
 
-// 控制时间流速，冻结 CA 动画以实现“壁纸动画”开关
+// 1. 新增递归方法：深入图层树，彻底拔除所有自发闲置动画
+- (void)stripAllAnimations:(CALayer *)layer {
+    if (!layer) return;
+    [layer removeAllAnimations];
+    for (CALayer *sub in layer.sublayers) {
+        [self stripAllAnimations:sub];
+    }
+}
+
+// 2. 替换原有的 updateAnimationSpeed 方法
 - (void)updateAnimationSpeed {
-    float speed = g_wallpaper_animation ? 1.0 : 0.0;
-    if (self.bgView) self.bgView.layer.speed = speed;
-    if (self.floatingView) self.floatingView.layer.speed = speed;
-    if (self.fgView) self.fgView.layer.speed = speed;
+    if (!g_wallpaper_animation) {
+        // 第一重绞杀：立即剥离当前存在的动画
+        [self stripAllAnimations:self.bgView.layer];
+        [self stripAllAnimations:self.floatingView.layer];
+        [self stripAllAnimations:self.fgView.layer];
+        
+        // 第二重兜底防漏：应对由于系统 CAML 状态机在下一帧延迟附加的顽固动画
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self stripAllAnimations:self.bgView.layer];
+            [self stripAllAnimations:self.floatingView.layer];
+            [self stripAllAnimations:self.fgView.layer];
+        });
+    }
 }
 
 - (void)onWakeUp {
@@ -608,12 +626,30 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 控制时间流速，冻结 CA 动画以实现“壁纸动画”开关
+// 1. 新增递归方法：深入图层树，彻底拔除所有自发闲置动画
+- (void)stripAllAnimations:(CALayer *)layer {
+    if (!layer) return;
+    [layer removeAllAnimations];
+    for (CALayer *sub in layer.sublayers) {
+        [self stripAllAnimations:sub];
+    }
+}
+
+// 2. 替换原有的 updateAnimationSpeed 方法
 - (void)updateAnimationSpeed {
-    float speed = g_wallpaper_animation ? 1.0 : 0.0;
-    if (self.bgView) self.bgView.layer.speed = speed;
-    if (self.floatingView) self.floatingView.layer.speed = speed;
-    if (self.fgView) self.fgView.layer.speed = speed;
+    if (!g_wallpaper_animation) {
+        // 第一重绞杀：立即剥离当前存在的动画
+        [self stripAllAnimations:self.bgView.layer];
+        [self stripAllAnimations:self.floatingView.layer];
+        [self stripAllAnimations:self.fgView.layer];
+        
+        // 第二重兜底防漏：应对由于系统 CAML 状态机在下一帧延迟附加的顽固动画
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self stripAllAnimations:self.bgView.layer];
+            [self stripAllAnimations:self.floatingView.layer];
+            [self stripAllAnimations:self.fgView.layer];
+        });
+    }
 }
 
 - (void)onWakeUp {
