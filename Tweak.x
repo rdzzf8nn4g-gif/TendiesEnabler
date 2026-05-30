@@ -51,7 +51,6 @@ typedef struct {
 @property (nonatomic) long long wallpaperStyle;
 @end
 
-// 🌟 声明苹果官方的零损耗镜像视图，用于把桌面壁纸投影到锁屏
 @interface _UIPortalView : UIView
 @property (nonatomic, weak) UIView *sourceView;
 @property (nonatomic, assign) BOOL hidesSourceView;
@@ -191,7 +190,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor clearColor]; // 必须透明以透视原生模糊
+        self.backgroundColor = [UIColor clearColor]; 
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -393,7 +392,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -418,7 +417,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层 (完全恢复你的初版)
+// 2. 干掉滑动时的系统高斯模糊过渡层
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -435,57 +434,123 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 3. 🌟 锁屏拦截核心修复：利用 Portal 镜像投影到模糊层之上！
+// 3. 🌟 终极锁屏拦截：软件内强制覆盖 + 进度动态穿梭 + 背景防透视！
 %hook CSCoverSheetViewController
+
+%new
+- (void)tendies_handleProgress:(NSNotification *)note {
+    if (!g_enabled) return;
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    objc_setAssociatedObject(self, "TendiesSwipeProgress", @(progress), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
+    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+
+    if (portalView && bgVC && bgVC.view) {
+        
+        // 🌟 新增判断：当前是否在软件内？(桌面图标不在顶部即为软件内)
+        BOOL isInsideApp = NO;
+        @try {
+            id iconController = [%c(SBIconController) sharedInstance];
+            UIView *iconView = [iconController valueForKey:@"contentView"];
+            if (!iconView) iconView = [iconController valueForKey:@"view"];
+            if (iconView && iconView.window) {
+                // 如果桌面窗口不可见或者被遮挡，说明用户打开了软件
+                if (iconView.window.isHidden || iconView.window.alpha < 0.1) {
+                    isInsideApp = YES;
+                }
+            }
+        } @catch (NSException *e) {}
+
+        // 如果在软件里，或者滑动过了一半 -> 强制在最外层霸占视线，背景纯黑！
+        if (isInsideApp || progress > 0.5) {
+            if (portalView.superview != self.view) {
+                [portalView removeFromSuperview];
+                [self.view insertSubview:portalView aboveSubview:bgVC.view];
+                portalView.frame = self.view.bounds;
+            }
+            // 🚨 终极防透视：过了一半，直接将背景涂黑，彻底阻断图标/软件透视！
+            self.view.backgroundColor = [UIColor blackColor]; 
+        } 
+        // 在桌面，且没过一半 -> 老实呆在模糊层里 1:1 滑动，维持原生模糊！
+        else {
+            if (portalView.superview != bgVC.view) {
+                [portalView removeFromSuperview];
+                [bgVC.view addSubview:portalView];
+                [bgVC.view bringSubviewToFront:portalView];
+                portalView.frame = bgVC.view.bounds;
+            }
+            // 恢复透明，让原生模糊生效
+            self.view.backgroundColor = [UIColor clearColor];
+        }
+    }
+}
+
+- (void)viewDidLoad {
+    %orig;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(tendies_handleProgress:) name:@"TendiesEngineProgress" object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    %orig;
+}
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    EnsureEngineViewIsMounted(); // 1. 确保引擎老老实实呆在桌面底层
+    EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
-        // 2. 获取原生的模糊层背景
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
-            // 🚨 绝对保持模糊层可见！
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
-        }
-        
-        // 3. 召唤传送门：把桌面的壁纸“镜像”一份到锁屏模糊层之上！
-        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-        TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
-        
-        if (engineView) {
-            _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
-            if (!portalView) {
-                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-                portalView.sourceView = engineView; // 镜像源：桌面的真实引擎
-                portalView.hidesSourceView = NO;    // 核心：绝对不隐藏桌面引擎，保证桌面正常！
-                portalView.matchesAlpha = YES;
-                portalView.matchesPosition = YES;
-                portalView.matchesTransform = YES;
-                portalView.userInteractionEnabled = NO;
-                objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-
-            if (portalView.superview != self.view) {
-                [portalView removeFromSuperview];
-                if (bgVC && bgVC.view && bgVC.view.superview == self.view) {
-                    // 完美插入到模糊层的正上方！遮住所有底层应用和图标！
-                    [self.view insertSubview:portalView aboveSubview:bgVC.view];
-                } else {
-                    [self.view insertSubview:portalView atIndex:0];
+            bgVC.view.clipsToBounds = YES; 
+            
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
+            
+            if (engineView) {
+                _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
+                if (!portalView) {
+                    portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:bgVC.view.bounds];
+                    portalView.sourceView = engineView; 
+                    portalView.hidesSourceView = NO;    
+                    portalView.matchesAlpha = YES;
+                    portalView.matchesPosition = YES;
+                    portalView.matchesTransform = YES;
+                    portalView.userInteractionEnabled = NO;
+                    portalView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                    objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 }
-            }
-            portalView.frame = self.view.bounds;
-        }
 
-        // 4. 清理锁屏原生多余图层
-        if (bgVC && bgVC.view) {
-            for (UIView *sub in bgVC.view.subviews) {
-                if (![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
-                    sub.alpha = 0.0;
-                    sub.hidden = YES;
+                NSNumber *progressNum = objc_getAssociatedObject(self, "TendiesSwipeProgress");
+                double progress = progressNum ? [progressNum doubleValue] : (g_isUnlocked ? 0.0 : 1.0);
+
+                // 首次布局：强制判定一次
+                if (progress > 0.5) {
+                    if (portalView.superview != self.view) {
+                        [portalView removeFromSuperview];
+                        [self.view insertSubview:portalView aboveSubview:bgVC.view];
+                    }
+                    portalView.frame = self.view.bounds;
+                    self.view.backgroundColor = [UIColor blackColor];
+                } else {
+                    if (portalView.superview != bgVC.view) {
+                        [portalView removeFromSuperview];
+                        [bgVC.view addSubview:portalView];
+                        [bgVC.view bringSubviewToFront:portalView];
+                    }
+                    portalView.frame = bgVC.view.bounds;
+                    self.view.backgroundColor = [UIColor clearColor];
+                }
+                
+                // 隐藏原生多余图层
+                for (UIView *sub in bgVC.view.subviews) {
+                    if (sub != portalView && ![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    }
                 }
             }
         }
@@ -537,7 +602,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 动画进度获取及快照拦截 (完全恢复你的初版)
+// 动画进度获取及快照拦截
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -569,7 +634,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步 (未变动)
+// 亮灭屏与锁屏状态同步
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
