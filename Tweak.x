@@ -97,10 +97,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @interface ZoneCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
+@property (nonatomic, strong) NSMutableSet *availableStates;
 @property (nonatomic, copy) NSString *currentParsingState;
 @property (nonatomic, copy) NSString *currentParsingTargetId;
 @property (nonatomic, copy) NSString *currentParsingKeyPath;
+
+// --- 根图层环境数据 ---
+@property (nonatomic, assign) BOOL rootParsed;
+@property (nonatomic, strong) UIColor *rootBackgroundColor;
+@property (nonatomic, assign) CGSize rootSize;
+@property (nonatomic, assign) BOOL isGeometryFlipped;
+
 - (void)parseFile:(NSString *)path;
+- (NSString *)resolveRealStateNameFor:(NSString *)logicalState;
 @end
 
 @implementation ZoneCAMLParser
@@ -108,9 +117,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self = [super init]) {
         _idToNameMap = [NSMutableDictionary new];
         _statesData = [NSMutableDictionary new];
+        _availableStates = [NSMutableSet new];
     }
     return self;
 }
+
 - (void)parseFile:(NSString *)path {
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
     NSData *data = [NSData dataWithContentsOfFile:path];
@@ -118,32 +129,105 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     parser.delegate = self;
     [parser parse];
 }
+
+- (UIColor *)parseColorString:(NSString *)val opacity:(NSString *)opacityStr {
+    NSArray *comps = [val componentsSeparatedByString:@" "];
+    if (comps.count >= 3) {
+        CGFloat r = [comps[0] doubleValue];
+        CGFloat g = [comps[1] doubleValue];
+        CGFloat b = [comps[2] doubleValue];
+        // 兼容 <backgroundColor opacity="x"> 与 backgroundColor="r g b a"
+        CGFloat a = opacityStr ? [opacityStr doubleValue] : (comps.count >= 4 ? [comps[3] doubleValue] : 1.0);
+        return [UIColor colorWithRed:r green:g blue:b alpha:a];
+    }
+    return nil;
+}
+
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
+    
+    // 萃取根图层信息 (背景色、翻转、原始尺寸)
     if ([elementName isEqualToString:@"CALayer"]) {
+        if (!self.rootParsed) {
+            self.rootParsed = YES;
+            if (attributeDict[@"backgroundColor"]) {
+                self.rootBackgroundColor = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
+            }
+            if (attributeDict[@"bounds"]) {
+                NSArray *comps = [attributeDict[@"bounds"] componentsSeparatedByString:@" "];
+                if (comps.count == 4) self.rootSize = CGSizeMake([comps[2] doubleValue], [comps[3] doubleValue]);
+            }
+            if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
+        }
+        
         NSString *layerId = attributeDict[@"id"];
         NSString *layerName = attributeDict[@"name"];
         if (layerId && layerName) self.idToNameMap[layerId] = layerName;
+        
+    } else if ([elementName isEqualToString:@"backgroundColor"] && !self.rootBackgroundColor) {
+        // 兼容子标签写法 (如 HarmonyOSEmoji)
+        if (attributeDict[@"value"]) {
+            self.rootBackgroundColor = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
+        }
     } else if ([elementName isEqualToString:@"LKState"]) {
         self.currentParsingState = attributeDict[@"name"];
+        if (self.currentParsingState) [self.availableStates addObject:self.currentParsingState];
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
         self.currentParsingTargetId = attributeDict[@"targetId"];
         self.currentParsingKeyPath = attributeDict[@"keyPath"];
     } else if ([elementName isEqualToString:@"value"]) {
         if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
             NSString *valStr = attributeDict[@"value"];
+            NSString *typeStr = attributeDict[@"type"];
+            
             if (valStr) {
-                NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
-                if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
-                NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
-                if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[self.currentParsingState] = stateDict; }
-                stateDict[self.currentParsingKeyPath] = @([valStr doubleValue]);
+                id finalValue = nil;
+                // 拯救由于 CGPoint 类型强转 double 导致动画崩溃的问题
+                if ([typeStr isEqualToString:@"CGPoint"]) {
+                    NSArray *comps = [valStr componentsSeparatedByString:@" "];
+                    if (comps.count == 2) {
+                        finalValue = [NSValue valueWithCGPoint:CGPointMake([comps[0] doubleValue], [comps[1] doubleValue])];
+                    }
+                } else {
+                    finalValue = @([valStr doubleValue]);
+                }
+                
+                if (finalValue) {
+                    NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
+                    if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
+                    NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
+                    if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[self.currentParsingState] = stateDict; }
+                    stateDict[self.currentParsingKeyPath] = finalValue;
+                }
             }
         }
     }
 }
+
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
     if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
     else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
+}
+
+// 智能状态映射树 (兼容任意乱写的状态名)
+- (NSString *)resolveRealStateNameFor:(NSString *)logicalState {
+    if ([self.availableStates containsObject:logicalState]) return logicalState;
+    
+    NSString *keyword = logicalState;
+    if ([logicalState isEqualToString:@"Unlock"]) keyword = @"Home"; 
+    if ([logicalState isEqualToString:@"Locked"]) keyword = @"Lock";
+    
+    NSMutableArray *candidates = [NSMutableArray array];
+    for (NSString *state in self.availableStates) {
+        if ([state localizedCaseInsensitiveContainsString:logicalState] || [state localizedCaseInsensitiveContainsString:keyword]) {
+            [candidates addObject:state];
+        }
+    }
+    if (candidates.count == 0) return logicalState;
+    
+    for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"] && [s containsString:@"Light"]) return s; }
+    for (NSString *s in candidates) { if ([s containsString:@"Light"]) return s; }
+    for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"]) return s; }
+    return candidates.firstObject; 
 }
 @end
 
@@ -208,9 +292,42 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (self.bgView) self.bgView.frame = self.bounds;
-    if (self.floatingView) self.floatingView.frame = self.bounds;
-    if (self.fgView) self.fgView.frame = self.bounds;
+    CGRect bounds = self.bounds;
+    
+    BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
+    ZoneCAMLParser *parsers[] = {self.bgParser, self.floatParser, self.fgParser};
+    
+    for (int i = 0; i < 3; i++) {
+        BSUICAPackageView *v = views[i];
+        ZoneCAMLParser *p = parsers[i];
+        if (!v) continue;
+        
+        v.frame = bounds;
+        
+        // 注入从 CAML 抓取的背景色，干掉系统透明行为
+        if (p && p.rootBackgroundColor) {
+            v.backgroundColor = p.rootBackgroundColor;
+        } else {
+            v.backgroundColor = [UIColor clearColor];
+        }
+        
+        CALayer *rootLayer = [v.layer.sublayers firstObject];
+        if (rootLayer) {
+            // 纠正 macOS/iOS 坐标系分歧
+            v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
+            
+            // 等比例缩放矩阵 (Auto Aspect-Fill)
+            CGSize originalSize = p ? p.rootSize : CGSizeZero;
+            if (originalSize.width > 0 && originalSize.height > 0 && !CGRectEqualToRect(rootLayer.bounds, CGRectZero)) {
+                CGFloat scaleX = bounds.size.width / originalSize.width;
+                CGFloat scaleY = bounds.size.height / originalSize.height;
+                CGFloat scale = MAX(scaleX, scaleY);
+                
+                CATransform3D transform = CATransform3DMakeScale(scale, scale, 1.0);
+                v.layer.sublayerTransform = transform;
+            }
+        }
+    }
 }
 
 - (void)onWakeUp {
@@ -246,18 +363,38 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 
 - (void)applyProgress:(double)progress parser:(ZoneCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
+    
+    NSString *realLockedState = [parser resolveRealStateNameFor:@"Locked"];
+    NSString *realUnlockState = [parser resolveRealStateNameFor:@"Unlock"];
+    
     [CATransaction begin]; 
     [CATransaction setDisableActions:YES]; 
     for (NSString *targetId in parser.statesData) {
         CALayer *layer = layerMap[targetId]; if (!layer) continue;
         NSDictionary *states = parser.statesData[targetId];
-        NSDictionary *lockedVals = states[@"Locked"]; NSDictionary *unlockVals = states[@"Unlock"];
+        
+        NSDictionary *lockedVals = states[realLockedState]; 
+        NSDictionary *unlockVals = states[realUnlockState];
         if (!lockedVals || !unlockVals) continue;
+        
         for (NSString *keyPath in lockedVals) {
-            NSNumber *lockNum = lockedVals[keyPath]; NSNumber *unlockNum = unlockVals[keyPath];
-            if (lockNum && unlockNum) {
-                double currentVal = [lockNum doubleValue] + ([unlockNum doubleValue] - [lockNum doubleValue]) * progress;
-                @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch (NSException *e) {}
+            id lockVal = lockedVals[keyPath]; 
+            id unlockVal = unlockVals[keyPath];
+            
+            if (lockVal && unlockVal) {
+                @try {
+                    if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
+                        double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
+                        [layer setValue:@(currentVal) forKeyPath:keyPath];
+                    } 
+                    else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
+                        CGPoint lockPt = [lockVal CGPointValue];
+                        CGPoint unlockPt = [unlockVal CGPointValue];
+                        CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
+                                                        lockPt.y + (unlockPt.y - lockPt.y) * progress);
+                        [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
+                    }
+                } @catch (NSException *e) {}
             }
         }
     }
@@ -285,15 +422,29 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     self.currentState = [stateName copy];
     
     if ([stateName isEqualToString:@"Unlock"]) {
-        [self ensureAllLayerMaps]; [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        [self ensureAllLayerMaps]; 
+        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
     } else if ([stateName isEqualToString:@"Locked"]) {
-        [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        [self ensureAllLayerMaps]; 
+        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
     }
     
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName] ?: stateName;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName] ?: stateName;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName] ?: stateName;
+    
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:stateName animated:animated]; [self.floatingView setState:stateName animated:animated]; [self.fgView setState:stateName animated:animated];
+        [self.bgView setState:realBgState animated:animated]; 
+        [self.floatingView setState:realFloatState animated:animated]; 
+        [self.fgView setState:realFgState animated:animated];
     } else {
-        [self.bgView setState:stateName]; [self.floatingView setState:stateName]; [self.fgView setState:stateName];
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
     }
 }
 
