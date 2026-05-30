@@ -556,7 +556,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来与应用内精准判断
+// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -584,20 +584,32 @@ static void EnsureEngineViewIsMounted() {
                 double p = progress;
                 double alpha = 0.0;
                 
-                // 🌟 核心：精准判断当前是否在应用内
+                // 🌟 核心：精准判断当前是否在应用内 (最强双保险方案)
                 BOOL isAppOpen = NO;
                 @try {
-                    id sceneManager = [%c(SBMainDisplaySceneManager) sharedInstance];
-                    if (sceneManager) {
-                        id layoutState = [sceneManager valueForKey:@"layoutState"];
-                        // unlockedEnvironmentMode: 1 是桌面, 2 是应用内, 3 是多任务后台
-                        long long mode = [[layoutState valueForKey:@"unlockedEnvironmentMode"] longLongValue];
-                        if (mode != 1) { 
+                    // 方法1：通过 SpringBoard 检查前台是否有活跃应用
+                    id sb = [%c(SpringBoard) sharedApplication];
+                    SEL sel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
+                    if ([sb respondsToSelector:sel]) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        id frontApp = [sb performSelector:sel];
+                        #pragma clang diagnostic pop
+                        if (frontApp != nil) {
                             isAppOpen = YES;
                         }
                     }
+                    
+                    // 方法2 (绝对纠错)：通过桌面控制器检查是否真正在桌面
+                    id iconController = [%c(SBIconController) sharedInstance];
+                    if (iconController && [iconController respondsToSelector:@selector(isHomeScreenVisible)]) {
+                        BOOL isHome = [[iconController valueForKey:@"isHomeScreenVisible"] boolValue];
+                        if (isHome) {
+                            isAppOpen = NO; 
+                        }
+                    }
                 } @catch(NSException *e) {
-                    // 异常兜底，防止意外
+                    // 异常兜底，防止意外崩溃
                 }
                 
                 if (isAppOpen) {
@@ -666,6 +678,88 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+
+// ==========================================
+// 🌟 锁屏下拉滑动进度拦截 (兼容 iOS 16 & 17)
+// ==========================================
+%hook SBCoverSheetSlidingViewController
+
+// 适配 iOS 16
+- (struct CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
+    struct CGRect rect = %orig;
+    if (g_enabled) {
+        [self _tendies_updatePortalAlphaWithProgress:progress];
+    }
+    return rect;
+}
+
+// 适配 iOS 17
+- (struct CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    struct CGRect rect = %orig;
+    if (g_enabled) {
+        [self _tendies_updatePortalAlphaWithProgress:progress];
+    }
+    return rect;
+}
+
+%new
+- (void)_tendies_updatePortalAlphaWithProgress:(double)progress {
+    // 🚨 线程安全：强制派发到 Main Queue 同步视觉进度
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_portalView) {
+            double p = progress;
+            double alpha = 0.0;
+            
+            // 🌟 核心：精准判断当前是否在应用内 (最强双保险方案)
+            BOOL isAppOpen = NO;
+            @try {
+                // 方法1：通过 SpringBoard 检查前台是否有活跃应用
+                id sb = [%c(SpringBoard) sharedApplication];
+                SEL sel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
+                if ([sb respondsToSelector:sel]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    id frontApp = [sb performSelector:sel];
+                    #pragma clang diagnostic pop
+                    if (frontApp != nil) {
+                        isAppOpen = YES;
+                    }
+                }
+                
+                // 方法2 (绝对纠错)：通过桌面控制器检查是否真正在桌面
+                id iconController = [%c(SBIconController) sharedInstance];
+                if (iconController && [iconController respondsToSelector:@selector(isHomeScreenVisible)]) {
+                    BOOL isHome = [[iconController valueForKey:@"isHomeScreenVisible"] boolValue];
+                    if (isHome) {
+                        isAppOpen = NO; 
+                    }
+                }
+            } @catch(NSException *e) {
+                // 异常兜底，防止任何意外崩溃
+            }
+            
+            if (isAppOpen) {
+                // 🚀 在应用内：无视 50% 限制，直接平滑线性渐变出来
+                // (progress 从 1.0 降到 0.0 时，alpha 从 0.0 升到 1.0)
+                alpha = 1.0 - p;
+            } else {
+                // 🏠 在桌面：保留 50% 限制，让原生模糊先挡住桌面图标
+                if (p <= 0.5) {
+                    alpha = (0.5 - p) * 2.0; 
+                }
+            }
+            
+            alpha = MAX(0.0, MIN(1.0, alpha));
+            
+            // 隐式事务关闭，防止动画撕裂
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            g_portalView.alpha = alpha;
+            [CATransaction commit];
+        }
+    });
+}
+%end
 
 %ctor {
     reloadPrefs();
