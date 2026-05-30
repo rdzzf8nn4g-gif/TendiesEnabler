@@ -399,26 +399,8 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
             }
             
             [self setNeedsLayout];
-            [self layoutIfNeeded]; // 强制催促 UIKit 构建新视图
-            
             self.currentState = @"Init";
-            
-            // 【核心修复】将应用状态的逻辑推迟到下一个 RunLoop 帧，确保 CoreAnimation 图层树 100% 挂载完成
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (currentGen != self.reloadGeneration) return;
-                
-                [CATransaction begin]; 
-                [CATransaction setDisableActions:YES];
-                [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; 
-                [CATransaction commit]; 
-                [CATransaction flush];
-                
-                // 强制向系统注入 Progress 更新，一并解决锁屏虚化层可能未同步的问题
-                id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-                if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                    [wallpaperController updateWallpaperAnimationWithProgress:g_isUnlocked ? 1.0 : 0.0];
-                }
-            });
+            [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
         });
     });
 }
