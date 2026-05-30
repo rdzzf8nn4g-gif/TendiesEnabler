@@ -75,7 +75,8 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 // 全局变量与配置管理
 // ==========================================
 static BOOL g_enabled = NO;
-static BOOL g_enhanced_engine = NO; // 新增：增强引擎全局控制
+static BOOL g_enhanced_engine = NO;
+static BOOL g_wallpaper_animation = YES; // 新增：壁纸自发动画开关
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
@@ -91,6 +92,7 @@ static void reloadPrefs() {
     
     g_enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &valid) ? valid : NO;
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
+    g_wallpaper_animation = CFPreferencesGetAppBooleanValue(CFSTR("WallpaperAnimation"), appID, &valid) ? valid : YES;
     
     CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), appID);
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
@@ -103,7 +105,6 @@ static void reloadPrefs() {
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 设置变更后，强制检测并执行热切换引擎
         Class wc = NSClassFromString(@"SBWallpaperController");
         if ([wc respondsToSelector:@selector(sharedInstance)] && [wc sharedInstance]) {
             EnsureEngineViewIsMounted();
@@ -185,6 +186,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
+- (void)updateAnimationSpeed;
 @end
 
 @implementation ZoneRenderEngineLegacy
@@ -217,6 +219,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.bgView) self.bgView.frame = self.bounds;
     if (self.floatingView) self.floatingView.frame = self.bounds;
     if (self.fgView) self.fgView.frame = self.bounds;
+}
+
+// 控制时间流速，冻结 CA 动画以实现“壁纸动画”开关
+- (void)updateAnimationSpeed {
+    float speed = g_wallpaper_animation ? 1.0 : 0.0;
+    if (self.bgView) self.bgView.layer.speed = speed;
+    if (self.floatingView) self.floatingView.layer.speed = speed;
+    if (self.fgView) self.fgView.layer.speed = speed;
 }
 
 - (void)onWakeUp {
@@ -301,6 +311,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } else {
         [self.bgView setState:stateName]; [self.floatingView setState:stateName]; [self.fgView setState:stateName];
     }
+    
+    [self updateAnimationSpeed]; // 状态切换后强制同步时间流速
 }
 
 - (void)clearCurrentViewsSafely {
@@ -385,6 +397,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self setNeedsLayout];
             self.currentState = @"Init";
             [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+            [self updateAnimationSpeed]; // 渲染完成后应用时间流速
         });
     });
 }
@@ -532,6 +545,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
+- (void)updateAnimationSpeed;
 @end
 
 @implementation ZoneRenderEngineEnhanced
@@ -594,6 +608,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
+// 控制时间流速，冻结 CA 动画以实现“壁纸动画”开关
+- (void)updateAnimationSpeed {
+    float speed = g_wallpaper_animation ? 1.0 : 0.0;
+    if (self.bgView) self.bgView.layer.speed = speed;
+    if (self.floatingView) self.floatingView.layer.speed = speed;
+    if (self.fgView) self.fgView.layer.speed = speed;
+}
+
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
@@ -646,7 +668,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             id unlockVal = unlockVals[keyPath];
             
             if (lockVal && unlockVal) {
-                [layer removeAnimationForKey:keyPath];
+                [layer removeAnimationForKey:keyPath]; // 剔除原生动画绑定以支持交互
                 @try {
                     if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
                         double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
@@ -711,6 +733,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:realFloatState]; 
         [self.fgView setState:realFgState];
     }
+    
+    [self updateAnimationSpeed]; // 状态切换后强制同步时间流速
 }
 
 - (void)clearCurrentViewsSafely {
@@ -814,6 +838,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self setNeedsLayout];
             self.currentState = @"Init";
             [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+            [self updateAnimationSpeed]; // 渲染完成后应用时间流速
         });
     });
 }
