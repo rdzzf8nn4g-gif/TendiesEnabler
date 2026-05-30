@@ -1,12 +1,8 @@
-#import "ZonePrefsRootListController.h"
-#import <Preferences/PSSpecifier.h>
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <spawn.h>
-#include <sys/wait.h>
-
-extern char **environ;
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <dlfcn.h>
+#import <QuartzCore/QuartzCore.h>
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -14,360 +10,796 @@ extern char **environ;
 #define jbroot(path) path
 #endif
 
-// --------------------------------------------------------
-// 工业级解压引擎：直接调用底层 posix_spawn，防卡顿防泄漏
-// --------------------------------------------------------
-static BOOL industrialUnzip(NSString *source, NSString *destination) {
-    pid_t pid;
-    int status;
-    NSString *unzipBin = @"/usr/bin/unzip";
-#if __has_include(<roothide.h>)
-    unzipBin = jbroot(unzipBin);
-#else
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/unzip"]) {
-        unzipBin = @"/var/jb/usr/bin/unzip";
-    }
-#endif
+// ==========================================
+// 结构体与系统头文件声明
+// ==========================================
+typedef struct {
+    long long x0;
+    long long x1;
+    double x2;
+} PBUIWallpaperTransitionState;
 
-    // 使用底层参数传递，-o: 覆盖, -q: 静默提速
-    const char *argv[] = {"unzip", "-o", "-q", [source UTF8String], "-d", [destination UTF8String], NULL};
-    
-    // posix_spawn 是 iOS 底层最高效的进程拉起方式，完美规避 NSTask 的所有缺陷
-    if (posix_spawn(&pid, [unzipBin UTF8String], NULL, NULL, (char *const *)argv, environ) == 0) {
-        if (waitpid(pid, &status, 0) != -1) {
-            // 返回 0 是成功，返回 1 通常是警告（比如内部有 macosx 缓存也会报 1，同样视为成功）
-            return WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 1);
+@interface PBUIWallpaperViewController : UIViewController
+@property (retain, nonatomic) UIView *homescreenWallpaperView;
+@property (retain, nonatomic) UIView *lockscreenWallpaperView;
+- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
+- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
+@end
+
+@interface BSUICAPackageView : UIView
+- (id)initWithURL:(NSURL *)url;
+- (BOOL)setState:(NSString *)state;
+- (BOOL)setState:(NSString *)state animated:(BOOL)animated;
+@end
+
+@interface SBWallpaperController : NSObject
++ (id)sharedInstance;
+- (void)updateWallpaperAnimationWithProgress:(double)progress;
+@end
+
+@interface SBBacklightController : NSObject
++ (id)sharedInstance;
+@property (readonly, nonatomic) long long backlightState;
+@end
+
+@interface CSCoverSheetViewController : UIViewController
+- (void)setInScreenOffMode:(BOOL)mode; 
+- (void)setDismissed:(BOOL)dismissed;
+@end
+
+@interface SBWallpaperEffectView : UIView
+@property (nonatomic) long long wallpaperStyle;
+@end
+
+@interface _UIPortalView : UIView
+@property (nonatomic, weak) UIView *sourceView;
+@property (nonatomic, assign) BOOL hidesSourceView;
+@property (nonatomic, assign) BOOL matchesAlpha;
+@property (nonatomic, assign) BOOL matchesTransform;
+@property (nonatomic, assign) BOOL matchesPosition;
+@end
+
+@interface CSBackgroundContentView : UIView
+@end
+
+// ==========================================
+// 全局变量与配置管理
+// ==========================================
+static BOOL g_enabled = NO;
+static NSString *g_zonePath = nil;
+static BOOL g_isUnlocked = NO; 
+static BOOL g_isScreenOn = YES;
+
+static __weak _UIPortalView *g_portalView = nil;
+
+static void reloadPrefs() {
+    CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
+    CFPreferencesAppSynchronize(appID);
+    Boolean valid;
+    g_enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &valid) ? valid : NO;
+    CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), appID);
+    if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
+        g_zonePath = [(__bridge NSString *)pathRef copy];
+    } else {
+        // 如果没有选中壁纸则置为空，不默认加载，等待用户在设置中点击
+        g_zonePath = nil; 
+    }
+}
+
+static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    reloadPrefs();
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineInternalReload" object:nil];
+}
+
+// ==========================================
+// 核心：CAML 逐帧解析器
+// ==========================================
+@interface ZoneCAMLParser : NSObject <NSXMLParserDelegate>
+@property (nonatomic, strong) NSMutableDictionary *idToNameMap;
+@property (nonatomic, strong) NSMutableDictionary *statesData;
+@property (nonatomic, copy) NSString *currentParsingState;
+@property (nonatomic, copy) NSString *currentParsingTargetId;
+@property (nonatomic, copy) NSString *currentParsingKeyPath;
+- (void)parseFile:(NSString *)path;
+@end
+
+@implementation ZoneCAMLParser
+- (instancetype)init {
+    if (self = [super init]) {
+        _idToNameMap = [NSMutableDictionary new];
+        _statesData = [NSMutableDictionary new];
+    }
+    return self;
+}
+- (void)parseFile:(NSString *)path {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
+    parser.delegate = self;
+    [parser parse];
+}
+- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
+    if ([elementName isEqualToString:@"CALayer"]) {
+        NSString *layerId = attributeDict[@"id"];
+        NSString *layerName = attributeDict[@"name"];
+        if (layerId && layerName) self.idToNameMap[layerId] = layerName;
+    } else if ([elementName isEqualToString:@"LKState"]) {
+        self.currentParsingState = attributeDict[@"name"];
+    } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
+        self.currentParsingTargetId = attributeDict[@"targetId"];
+        self.currentParsingKeyPath = attributeDict[@"keyPath"];
+    } else if ([elementName isEqualToString:@"value"]) {
+        if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
+            NSString *valStr = attributeDict[@"value"];
+            if (valStr) {
+                NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
+                if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
+                NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
+                if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[self.currentParsingState] = stateDict; }
+                stateDict[self.currentParsingKeyPath] = @([valStr doubleValue]);
+            }
         }
     }
-    return NO;
 }
+- (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
+    if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
+    else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
+}
+@end
 
-// --------------------------------------------------------
-// 路径管理
-// --------------------------------------------------------
-static NSString * GetZoneStorageDir() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zone.media";
-#if __has_include(<roothide.h>)
-    return jbroot(base);
-#else
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
-        return [@"/var/jb" stringByAppendingPathComponent:base];
+static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
+    if ([layer.name isEqualToString:name]) return layer;
+    for (CALayer *sub in layer.sublayers) {
+        CALayer *found = ZoneFindLayerByName(sub, name);
+        if (found) return found;
     }
-    return base;
-#endif
+    return nil;
 }
 
-static NSString * GetWallpapersDir() {
-    return [GetZoneStorageDir() stringByAppendingPathComponent:@"Wallpapers"];
-}
+// ==========================================
+// 核心渲染引擎视图 (附带工业级防漏抗压设计)
+// ==========================================
+@interface ZoneRenderEngineView : UIView
+@property (nonatomic, strong) BSUICAPackageView *bgView;
+@property (nonatomic, strong) BSUICAPackageView *floatingView;
+@property (nonatomic, strong) BSUICAPackageView *fgView;
+@property (nonatomic, assign) BOOL isUnlocking; 
+@property (nonatomic, strong) NSString *currentState;
 
-static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zoneprefs.plist";
-#if __has_include(<roothide.h>)
-    return jbroot(base);
-#else
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
-        return [@"/var/jb" stringByAppendingPathComponent:base];
-    }
-    return base;
-#endif
-}
+// 代次校验：防止快速切换壁纸时回调覆盖导致的严重内存泄漏和UI卡死
+@property (nonatomic, assign) NSInteger reloadGeneration; 
 
+@property (nonatomic, strong) ZoneCAMLParser *bgParser;
+@property (nonatomic, strong) ZoneCAMLParser *floatParser;
+@property (nonatomic, strong) ZoneCAMLParser *fgParser;
+@property (nonatomic, strong) NSMutableDictionary *bgLayerMap;
+@property (nonatomic, strong) NSMutableDictionary *floatLayerMap;
+@property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 
-@implementation ZonePrefsRootListController
+- (void)reloadWallpaperViews;
+@end
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    
-    // =======================================
-    // 极致完美的排版布局 (修改为：图左名右居中，文字左对齐块居中，缩小下巴留白)
-    // =======================================
-    // 将高度从220缩小到160，从而让下面的 Cell 整体上移
-    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
-    headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    
-    // 1. 图标
-    UIImageView *iconView = [[UIImageView alloc] init];
-    NSBundle *bundle = [NSBundle bundleForClass:[self class]];
-    UIImage *icon = [UIImage imageNamed:@"icon" inBundle:bundle compatibleWithTraitCollection:nil];
-    if (!icon) icon = [UIImage imageNamed:@"icon@3x" inBundle:bundle compatibleWithTraitCollection:nil];
-    iconView.image = icon;
-    iconView.layer.cornerRadius = 14;
-    iconView.layer.masksToBounds = YES;
-    [iconView.widthAnchor constraintEqualToConstant:60].active = YES;
-    [iconView.heightAnchor constraintEqualToConstant:60].active = YES;
-    
-    // 2. 标题
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = @"Zone";
-    titleLabel.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
-    titleLabel.textAlignment = NSTextAlignmentLeft; // 配合横向Stack改为左对齐
-    
-    // 2.5 将图标和标题打包成一个水平的 StackView（图左、字右）
-    UIStackView *topHorizontalStack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel]];
-    topHorizontalStack.axis = UILayoutConstraintAxisHorizontal;
-    topHorizontalStack.alignment = UIStackViewAlignmentCenter;
-    topHorizontalStack.spacing = 15; // 图标和文字的左右间距
-    
-    // 3. 作者信息及频道 (使用 UITextView 实现多行，内部左对齐，外部Stack保证整体居中)
-    UITextView *creditsView = [[UITextView alloc] init];
-    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
-    creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    creditsView.textColor = [UIColor secondaryLabelColor];
-    creditsView.textAlignment = NSTextAlignmentLeft; // 内部文字开头对齐（左对齐）
-    creditsView.editable = NO;
-    creditsView.scrollEnabled = NO;
-    creditsView.backgroundColor = [UIColor clearColor];
-    creditsView.dataDetectorTypes = UIDataDetectorTypeLink; // 开启自动识别超链接
-    
-    // 4. 打包进最终的主垂直弹性容器 (整体依然完美居中)
-    UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsView]];
-    mainVerticalStack.axis = UILayoutConstraintAxisVertical;
-    mainVerticalStack.alignment = UIStackViewAlignmentCenter; // 确保横向块和文字块作为一个整体居中
-    mainVerticalStack.spacing = 10; // 上下区域的间距
-    mainVerticalStack.translatesAutoresizingMaskIntoConstraints = NO;
-    
-    [headerView addSubview:mainVerticalStack];
-    
-    // 设置弹性容器在头部居中
-    [NSLayoutConstraint activateConstraints:@[
-        [mainVerticalStack.centerXAnchor constraintEqualToAnchor:headerView.centerXAnchor],
-        [mainVerticalStack.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor]
-    ]];
-    
-    if ([self respondsToSelector:@selector(table)]) {
-        UITableView *tableView = [self performSelector:@selector(table)];
-        [tableView setTableHeaderView:headerView];
-    }
-}
-
-// 动态追加列表
-- (NSMutableArray *)specifiers {
-    if (!_specifiers) {
-        NSMutableArray *specs = [[self loadSpecifiersFromPlistName:@"Root" target:self] mutableCopy];
+@implementation ZoneRenderEngineView
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor clearColor];
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.userInteractionEnabled = NO; 
+        self.isUnlocking = NO;
+        self.currentState = @"Init";
+        self.reloadGeneration = 0;
         
-        PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [group setProperty:@"点击切换壁纸，实时生效。向左滑动可删除不再需要的壁纸。" forKey:@"footerText"];
-        [specs addObject:group];
+        self.bgLayerMap = [NSMutableDictionary dictionary];
+        self.floatLayerMap = [NSMutableDictionary dictionary];
+        self.fgLayerMap = [NSMutableDictionary dictionary];
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadWallpaperViews) name:@"ZoneEngineInternalReload" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.bgView) self.bgView.frame = self.bounds;
+    if (self.floatingView) self.floatingView.frame = self.bounds;
+    if (self.fgView) self.fgView.frame = self.bounds;
+}
+
+- (void)onWakeUp {
+    if (!g_enabled || !self.bgView) return;
+    self.isUnlocking = NO;
+    [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+}
+
+- (void)onSleep {
+    if (!g_enabled || !self.bgView) return;
+    self.isUnlocking = NO;
+    [self transitionToState:@"Sleep" animated:NO];
+}
+
+- (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParser *)parser packageView:(BSUICAPackageView *)pkgView {
+    if (!pkgView || !pkgView.layer || !parser) return;
+    if (layerMap.count == 0 && parser.statesData.count > 0) {
+        for (NSString *targetId in parser.statesData) {
+            NSString *name = parser.idToNameMap[targetId];
+            if (name) {
+                CALayer *found = ZoneFindLayerByName(pkgView.layer, name);
+                if (found) layerMap[targetId] = found;
+            }
+        }
+    }
+}
+
+- (void)ensureAllLayerMaps {
+    [self ensureLayerMap:self.bgLayerMap parser:self.bgParser packageView:self.bgView];
+    [self ensureLayerMap:self.floatLayerMap parser:self.floatParser packageView:self.floatingView];
+    [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
+}
+
+- (void)applyProgress:(double)progress parser:(ZoneCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
+    if (layerMap.count == 0 || !parser) return;
+    [CATransaction begin]; 
+    [CATransaction setDisableActions:YES]; 
+    for (NSString *targetId in parser.statesData) {
+        CALayer *layer = layerMap[targetId]; if (!layer) continue;
+        NSDictionary *states = parser.statesData[targetId];
+        NSDictionary *lockedVals = states[@"Locked"]; NSDictionary *unlockVals = states[@"Unlock"];
+        if (!lockedVals || !unlockVals) continue;
+        for (NSString *keyPath in lockedVals) {
+            NSNumber *lockNum = lockedVals[keyPath]; NSNumber *unlockNum = unlockVals[keyPath];
+            if (lockNum && unlockNum) {
+                double currentVal = [lockNum doubleValue] + ([unlockNum doubleValue] - [lockNum doubleValue]) * progress;
+                @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch (NSException *e) {}
+            }
+        }
+    }
+    [CATransaction commit];
+}
+
+- (void)onProgress:(NSNotification *)note {
+    if (!g_enabled || !self.bgView) return;
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    progress = MAX(0.0, MIN(1.0, progress));
+    
+    [self ensureAllLayerMaps];
+    [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
+    [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
+    [self applyProgress:progress parser:self.fgParser layerMap:self.fgLayerMap];
+    
+    if (progress > 0.95) { self.currentState = @"Unlock"; self.isUnlocking = NO; }
+    else if (progress < 0.05) { self.currentState = @"Locked"; self.isUnlocking = NO; }
+    else { self.isUnlocking = YES; self.currentState = @"Scrubbing"; }
+}
+
+- (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
+    if (!g_enabled || !self.bgView) return;
+    if ([self.currentState isEqualToString:stateName]) return;
+    self.currentState = [stateName copy];
+    
+    if ([stateName isEqualToString:@"Unlock"]) {
+        [self ensureAllLayerMaps]; [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    } else if ([stateName isEqualToString:@"Locked"]) {
+        [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    }
+    
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:stateName animated:animated]; [self.floatingView setState:stateName animated:animated]; [self.fgView setState:stateName animated:animated];
+    } else {
+        [self.bgView setState:stateName]; [self.floatingView setState:stateName]; [self.fgView setState:stateName];
+    }
+}
+
+// 内存清理方法独立封装，必须在主线程被调用
+- (void)clearCurrentViewsSafely {
+    [self.bgView removeFromSuperview]; self.bgView = nil;
+    [self.floatingView removeFromSuperview]; self.floatingView = nil;
+    [self.fgView removeFromSuperview]; self.fgView = nil;
+    
+    [self.bgLayerMap removeAllObjects];
+    [self.floatLayerMap removeAllObjects];
+    [self.fgLayerMap removeAllObjects];
+    
+    self.bgParser = nil; 
+    self.floatParser = nil; 
+    self.fgParser = nil;
+}
+
+// 采用严苛的异步预处理 + 同步阻断丢弃方案防漏抗压
+- (void)reloadWallpaperViews {
+    self.reloadGeneration++;
+    NSInteger currentGen = self.reloadGeneration;
+    
+    // 把繁重的 IO 深搜读写扔去后台
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        
+        if (!g_enabled || !g_zonePath || ![[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (currentGen != self.reloadGeneration) return; // 代次过期，自动废弃
+                [self clearCurrentViewsSafely];
+            });
+            return;
+        }
         
         NSFileManager *fm = [NSFileManager defaultManager];
-        NSString *wpDir = GetWallpapersDir();
-        if ([fm fileExistsAtPath:wpDir]) {
-            NSArray *contents = [fm contentsOfDirectoryAtPath:wpDir error:nil];
-            
-            NSString *currentPath = nil;
-            CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
-            if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
-                currentPath = (__bridge NSString *)pathRef;
-                CFRelease(pathRef);
+        __block NSString *foundBg = nil;
+        __block NSString *foundFloat = nil;
+        __block NSString *foundFg = nil;
+        
+        // 执行你要求的兜底超深搜逻辑
+        NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
+        NSString *subPath;
+        while ((subPath = [dirEnum nextObject])) {
+            // 过滤系统垃圾缓存文件夹
+            if ([subPath containsString:@"__MACOSX"]) {
+                [dirEnum skipDescendants];
+                continue;
             }
-
-            for (NSString *name in contents) {
-                if ([name hasPrefix:@"."]) continue; 
-                BOOL isDir;
-                if ([fm fileExistsAtPath:[wpDir stringByAppendingPathComponent:name] isDirectory:&isDir] && isDir) {
-                    
-                    PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-                    spec->action = @selector(selectWallpaper:);
-                    [spec setProperty:name forKey:@"WallpaperName"];
-                    [spec setProperty:@YES forKey:@"IsWallpaperCell"]; 
-                    
-                    NSString *fullWpPath = [wpDir stringByAppendingPathComponent:name];
-                    if ([currentPath isEqualToString:fullWpPath]) {
-                        spec.name = [NSString stringWithFormat:@"%@  ✓", name];
-                    }
-                    
-                    [specs addObject:spec];
+            
+            NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
+            NSString *fileName = [subPath lastPathComponent];
+            BOOL isDir = NO;
+            
+            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
+                if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
+                    if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) foundBg = fullPath;
+                    else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) foundFloat = fullPath;
+                    else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) foundFg = fullPath;
+                    [dirEnum skipDescendants]; // 找到了目标后缀直接切断内层徒劳下潜
                 }
             }
         }
-        _specifiers = specs;
-    }
-    return _specifiers;
-}
-
-- (void)importZone:(PSSpecifier *)spec {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (@available(iOS 14.0, *)) {
-            UTType *itemType = [UTType typeWithIdentifier:@"public.item"];
-            UTType *folderType = [UTType typeWithIdentifier:@"public.folder"];
-            UTType *dataType = [UTType typeWithIdentifier:@"public.data"];
+        
+        if (currentGen != self.reloadGeneration) return; // IO结束如果被新点击覆盖，立即掐断丢弃
+        
+        // IO结束，主线程组装图层树
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (currentGen != self.reloadGeneration) return; // 回到主线程的最终拦截
             
-            UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[itemType, folderType, dataType]];
-            picker.delegate = self;
-            picker.allowsMultipleSelection = YES; 
+            [self clearCurrentViewsSafely]; // 拆卸旧装甲，绝对不留内存残留
             
-            UIViewController *topVC = self.view.window.rootViewController;
-            if (!topVC) topVC = self;
-            while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+            void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
+            if (!handle) return; 
+            Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
+            if (!PackageViewClass) return;
             
-            [topVC presentViewController:picker animated:YES completion:nil];
-        }
+            // 使用极速的 autoreleasepool 防止瞬时内存飙升
+            @autoreleasepool {
+                if (foundBg) {
+                    self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundBg]];
+                    if (self.bgView) {
+                        [self addSubview:self.bgView];
+                        self.bgParser = [ZoneCAMLParser new]; 
+                        [self.bgParser parseFile:[foundBg stringByAppendingPathComponent:@"main.caml"]];
+                    }
+                }
+                if (foundFloat) {
+                    self.floatingView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFloat]];
+                    if (self.floatingView) {
+                        [self addSubview:self.floatingView];
+                        self.floatParser = [ZoneCAMLParser new]; 
+                        [self.floatParser parseFile:[foundFloat stringByAppendingPathComponent:@"main.caml"]];
+                    }
+                }
+                if (foundFg) {
+                    self.fgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFg]];
+                    if (self.fgView) {
+                        [self addSubview:self.fgView];
+                        self.fgParser = [ZoneCAMLParser new]; 
+                        [self.fgParser parseFile:[foundFg stringByAppendingPathComponent:@"main.caml"]];
+                    }
+                }
+            }
+            
+            [self setNeedsLayout];
+            self.currentState = @"Init";
+            [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+        });
     });
 }
+@end
 
-- (void)forceOwnershipToMobile:(NSString *)path {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
-    NSString *subpath;
-    chown(path.UTF8String, 501, 501);
-    chmod(path.UTF8String, 0777);
-    while ((subpath = [enumerator nextObject])) {
-        NSString *fullPath = [path stringByAppendingPathComponent:subpath];
-        chown(fullPath.UTF8String, 501, 501);
-        chmod(fullPath.UTF8String, 0777);
+static void EnsureEngineViewIsMounted() {
+    if (!g_enabled) return;
+    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+    if (!wallpaperController) return;
+    
+    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
+    if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+    if (!targetContainer) return;
+    
+    ZoneRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
+    if (!engineView) {
+        engineView = [[ZoneRenderEngineView alloc] initWithFrame:targetContainer.bounds];
+        objc_setAssociatedObject(wallpaperController, "GlobalZoneEngine", engineView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [targetContainer addSubview:engineView];
+        [engineView reloadWallpaperViews];
+    }
+    
+    if (engineView.superview != targetContainer) {
+        [engineView removeFromSuperview];
+        [targetContainer addSubview:engineView];
+    }
+    engineView.frame = targetContainer.bounds;
+    [targetContainer bringSubviewToFront:engineView];
+}
+
+%hook PBUIWallpaperViewController
+- (void)viewWillLayoutSubviews {
+    %orig;
+    if (g_enabled) {
+        if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
+            UIView *homeView = [self homescreenWallpaperView];
+            if (homeView) homeView.alpha = 0.0;
+        }
+        if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
+            UIView *lockView = [self lockscreenWallpaperView];
+            if (lockView) lockView.alpha = 0.0;
+        }
+    }
+}
+- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
+    if (g_enabled) return nil;
+    return %orig;
+}
+- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
+    if (g_enabled) return NO;
+    return %orig;
+}
+%end
+
+%hook SBWallpaperEffectView
+
+- (void)didMoveToSuperview {
+    %orig;
+    if (g_enabled && self.superview) {
+        UIView *view = self;
+        BOOL isCoverSheetRelated = NO;
+        
+        while (view) {
+            NSString *name = NSStringFromClass([view class]);
+            if ([name containsString:@"Wallpaper"] || 
+                [name containsString:@"CoverSheet"] || 
+                [name containsString:@"CS"]) {
+                isCoverSheetRelated = YES;
+                break;
+            }
+            view = view.superview;
+        }
+        
+        if (isCoverSheetRelated) {
+            self.hidden = YES;
+            self.alpha = 0.0;
+        }
     }
 }
 
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    if (urls.count == 0) return;
+- (void)layoutSubviews {
+    %orig;
+    if (g_enabled) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
+            self.hidden = YES;
+            self.alpha = 0.0;
+        }
+    }
+}
+- (void)setAlpha:(double)alpha {
+    if (g_enabled) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
+            %orig(0.0);
+            return;
+        }
+    }
+    %orig;
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
+            %orig(YES);
+            return;
+        }
+    }
+    %orig;
+}
+%end
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
-    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-    spinner.center = CGPointMake(135.0, 65.5);
-    [spinner startAnimating];
-    [loadingAlert.view addSubview:spinner];
+%hook CSCoverSheetViewController
+
+- (void)_scrollPanGestureBegan:(id)arg1 {
+    %orig;
+    if (g_enabled) {
+        [self viewWillLayoutSubviews];
+    }
+}
+
+- (void)_scrollPanGestureChanged:(id)arg1 {
+    %orig;
+    if (g_enabled) {
+        [self viewWillLayoutSubviews];
+    }
+}
+
+- (void)_scrollPanGestureEnded:(id)arg1 {
+    %orig;
+    if (g_enabled) {
+        [self viewWillLayoutSubviews];
+    }
+}
+
+- (void)viewWillLayoutSubviews {
+    %orig;
+    EnsureEngineViewIsMounted(); 
     
-    UIViewController *topVC = self.view.window.rootViewController;
-    if (!topVC) topVC = self;
-    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-    
-    [topVC presentViewController:loadingAlert animated:YES completion:^{
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-            NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *wpDir = GetWallpapersDir();
-            
-            if (![fm fileExistsAtPath:wpDir]) {
-                [fm createDirectoryAtPath:wpDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
+    if (g_enabled) {
+        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        if (bgVC && bgVC.view) {
+            bgVC.view.alpha = 1.0;
+            bgVC.view.hidden = NO;
+        }
+        
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        ZoneRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
+        
+        if (engineView) {
+            _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
+            if (!portalView) {
+                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
+                portalView.sourceView = engineView;
+                portalView.hidesSourceView = NO;
+                portalView.matchesAlpha = NO; 
+                portalView.alpha = 0.0; 
+                portalView.matchesPosition = YES;
+                portalView.matchesTransform = YES;
+                portalView.userInteractionEnabled = NO;
+                objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                g_portalView = portalView;
+            }
+
+            if (bgVC && bgVC.view) {
+                if (portalView.superview != bgVC.view) {
+                    [portalView removeFromSuperview];
+                    [bgVC.view addSubview:portalView];
+                }
+                portalView.frame = bgVC.view.bounds;
+                
+                for (UIView *sub in bgVC.view.subviews) {
+                    if (sub != portalView) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    }
+                }
+            } else {
+                if (portalView.superview != self.view) {
+                    [self.view insertSubview:portalView atIndex:0];
+                }
+                portalView.frame = self.view.bounds;
+                [self.view sendSubviewToBack:portalView];
             }
             
-            BOOL anySuccess = NO;
-            for (NSURL *sourceURL in urls) {
-                BOOL isAccessing = [sourceURL startAccessingSecurityScopedResource];
-                NSString *fileName = [[sourceURL lastPathComponent] stringByDeletingPathExtension];
-                NSString *unzipDir = [wpDir stringByAppendingPathComponent:fileName];
+            @try {
+                UIView *dimmingView = [self valueForKey:@"_dimmingView"];
+                if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
                 
-                [fm removeItemAtPath:unzipDir error:nil];
-                [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
+                UIView *tintingView = [self valueForKey:@"_tintingView"];
+                if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
+            } @catch(NSException* e) {}
+        }
+        
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) { 
+            floatingLayer.alpha = 0.0; 
+            floatingLayer.hidden = YES; 
+        }
+    }
+}
+
+- (void)_updateWallpaperFloatingLayerContainerView {
+    %orig;
+    if (g_enabled) {
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
+    }
+}
+
+- (void)_updateFloatingLayerOrdering {
+    %orig;
+    if (g_enabled) {
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (g_enabled) {
+        [self viewWillLayoutSubviews];
+    }
+}
+
+- (void)_updateBackgroundContentView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
+
+- (void)_prepareForPosterSwitcherPresentation {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = YES;
+        g_portalView.alpha = 0.0;
+    }
+}
+
+- (void)_dismissPosterSwitcherViewController {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+
+- (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+
+- (void)setInScreenOffMode:(BOOL)mode {
+    %orig;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
+
+- (void)setDismissed:(BOOL)dismissed {
+    %orig;
+    g_isUnlocked = dismissed;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
+%end
+
+%hook CSBackgroundContentView
+- (void)layoutSubviews {
+    %orig;
+    if (g_enabled) {
+        UIView *presentationView = [self valueForKey:@"presentationView"];
+        if (presentationView) {
+            presentationView.hidden = YES;
+            presentationView.alpha = 0.0;
+        }
+    }
+}
+%end
+
+%hook SBWallpaperController
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
+    %orig;
+}
+
+- (void)updatePosterSwitcherSnapshots {
+    if (g_enabled) return;
+    %orig;
+}
+
+- (void)updateWallpaperAnimationWithProgress:(double)progress {
+    %orig;
+    EnsureEngineViewIsMounted();
+    if (g_enabled) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+            
+            if (g_portalView) {
+                double alpha = 0.0;
                 
-                BOOL processSuccess = NO;
-                BOOL isDirectory = NO;
-                [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
-                
-                if (isDirectory) {
-                    NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
-                    processSuccess = YES;
-                    for (NSString *item in contents) {
-                        NSString *srcPath = [sourceURL.path stringByAppendingPathComponent:item];
-                        NSString *destPath = [unzipDir stringByAppendingPathComponent:item];
-                        if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
-                    }
+                if (progress > 0.7) {
+                    alpha = (1.0 - progress) * (0.05 / 0.3);
+                } else if (progress > 0.6) {
+                    alpha = 0.05 + (0.7 - progress) * 1.0; 
                 } else {
-                    // 调用强大的底层 C 语言原生解压引擎
-                    processSuccess = industrialUnzip(sourceURL.path, unzipDir);
+                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
                 }
                 
-                if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
-                if (processSuccess) anySuccess = YES;
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
             }
-            
-            if (anySuccess) {
-                [self forceOwnershipToMobile:wpDir];
+        });
+    }
+}
+%end
+
+%hook SBBacklightController
+- (void)setBacklightState:(long long)state source:(long long)source {
+    %orig;
+    if (g_enabled) {
+        BOOL screenOn = (state != 0);
+        if (screenOn != g_isScreenOn) {
+            g_isScreenOn = screenOn;
+            if (g_isScreenOn) {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        [self reloadSpecifiers]; 
-                    }];
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
                 });
             } else {
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"无效的壁纸文件或已损坏。" preferredStyle:UIAlertControllerStyleAlert];
-                        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                        [topVC presentViewController:alert animated:YES completion:nil];
-                    }];
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
                 });
             }
-        });
-    }];
-}
-
-- (void)selectWallpaper:(PSSpecifier *)spec {
-    NSString *name = [spec propertyForKey:@"WallpaperName"];
-    if (!name) return;
-    
-    NSString *fullPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
-    
-    CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
-    CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)fullPath, appID);
-    CFPreferencesAppSynchronize(appID);
-    
-    NSString *plistPath = GetPrefsPlistPath();
-    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-    prefs[@"ZonePath"] = fullPath;
-    [prefs writeToFile:plistPath atomically:YES];
-    [self forceOwnershipToMobile:plistPath];
-    
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    
-    [self reloadSpecifiers];
-}
-
-- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
-    if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) return YES;
-    return NO;
-}
-
-- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (editingStyle == UITableViewCellEditingStyleDelete) {
-        PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
-        NSString *name = [spec propertyForKey:@"WallpaperName"];
-        if (name) {
-            NSString *path = [GetWallpapersDir() stringByAppendingPathComponent:name];
-            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-            
-            CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
-            if (pathRef) {
-                NSString *currentPath = (__bridge NSString *)pathRef;
-                if ([currentPath isEqualToString:path]) {
-                    CFPreferencesSetAppValue(CFSTR("ZonePath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-                    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-                }
-                CFRelease(pathRef);
-            }
-            [self removeSpecifier:spec animated:YES];
         }
     }
 }
-
-- (void)openFilzaPath:(PSSpecifier *)spec {
-    NSString *targetDir = GetZoneStorageDir();
-    NSString *filzaURLString = [NSString stringWithFormat:@"filza://%@", targetDir];
-    NSURL *filzaURL = [NSURL URLWithString:[filzaURLString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-    if ([[UIApplication sharedApplication] canOpenURL:filzaURL]) {
-        [[UIApplication sharedApplication] openURL:filzaURL options:@{} completionHandler:nil];
-    } else {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"设备未安装 Filza。" preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
+- (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
+    %orig;
+    if (g_enabled) {
+        BOOL screenOn = (state != 0);
+        if (screenOn != g_isScreenOn) {
+            g_isScreenOn = screenOn;
+            if (g_isScreenOn) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+                });
+            } else {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+                });
+            }
+        }
     }
 }
+%end
 
-- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
-    [super setPreferenceValue:value specifier:specifier];
-    CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
-    if ([specifier.identifier isEqualToString:@"Enabled"]) {
-        CFPreferencesSetAppValue(CFSTR("Enabled"), (__bridge CFPropertyListRef)value, appID);
-        CFPreferencesAppSynchronize(appID);
-        
-        NSString *plistPath = GetPrefsPlistPath();
-        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-        prefs[@"Enabled"] = value;
-        [prefs writeToFile:plistPath atomically:YES];
-        [self forceOwnershipToMobile:plistPath];
-        
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    }
+%ctor {
+    reloadPrefs();
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
 }
-@end
