@@ -420,21 +420,50 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层
+// 2. [安全版本] 干掉滑动时的系统高斯模糊过渡层
 %hook SBWallpaperEffectView
+
 - (void)layoutSubviews {
     %orig;
     if (g_enabled) {
-        self.hidden = YES;
-        self.alpha = 0.0;
+        // 关键过滤：仅当它的父视图属于壁纸容器或锁屏时，才将其透明化
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
+            
+            self.hidden = YES;
+            self.alpha = 0.0;
+        }
     }
 }
+
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) { %orig(0.0); } else { %orig; }
+    if (g_enabled) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
+            %orig(0.0);
+            return;
+        }
+    }
+    %orig;
 }
+
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) { %orig(YES); } else { %orig; }
+    if (g_enabled) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
+            %orig(YES);
+            return;
+        }
+    }
+    %orig;
 }
+
 %end
 
 
