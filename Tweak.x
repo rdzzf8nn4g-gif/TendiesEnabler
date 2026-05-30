@@ -22,6 +22,8 @@ typedef struct {
 @interface PBUIWallpaperViewController : UIViewController
 @property (retain, nonatomic) UIView *homescreenWallpaperView;
 @property (retain, nonatomic) UIView *lockscreenWallpaperView;
+- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
+- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -45,7 +47,16 @@ typedef struct {
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
-// 🌟 声明苹果官方的零损耗镜像视图
+// 🌟 新增：锁屏滑动容器声明，用于拦截下滑进度
+@interface SBCoverSheetSlidingViewController : UIViewController
+- (UIViewController *)contentViewController;
+@end
+
+@interface SBWallpaperEffectView : UIView
+@property (nonatomic) long long wallpaperStyle;
+@end
+
+// 🌟 声明苹果官方的零损耗镜像视图，用于把桌面壁纸投影到锁屏
 @interface _UIPortalView : UIView
 @property (nonatomic, weak) UIView *sourceView;
 @property (nonatomic, assign) BOOL hidesSourceView;
@@ -93,7 +104,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 // ==========================================
-// 核心：CAML 逐帧解析器 (未变动)
+// 核心：CAML 逐帧解析器
 // ==========================================
 @interface TendiesCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -158,7 +169,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
-// 核心渲染引擎视图 (未变动)
+// 核心渲染引擎视图
 // ==========================================
 @interface TendiesRenderEngineView : UIView
 @property (nonatomic, strong) BSUICAPackageView *bgView;
@@ -185,7 +196,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor clearColor];
+        self.backgroundColor = [UIColor clearColor]; // 必须透明以透视原生模糊
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -357,8 +368,9 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 @end
 
+
 // ==========================================
-// 🌟 核心：确保真实引擎始终挂载在桌面最底层
+// 🌟 核心：确保真实引擎始终挂载在桌面最底层！
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
@@ -386,7 +398,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 只负责隐藏原生桌面壁纸的图像层
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -401,46 +413,50 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
+- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
+    if (g_enabled) return nil;
+    return %orig;
+}
+- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
+    if (g_enabled) return NO;
+    return %orig;
+}
 %end
 
-
-// 3. 🌟 锁屏拦截核心：动态 Alpha 控制机制 + Z-Index 遮挡修复
-%hook CSCoverSheetViewController
-
-// 注册通知，监听下拉锁屏的进度
-- (void)viewDidLoad {
+// 2. 干掉滑动时的系统高斯模糊过渡层 (完全恢复你的初版)
+%hook SBWallpaperEffectView
+- (void)layoutSubviews {
     %orig;
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(tendies_updatePortalAlpha:) name:@"TendiesEngineProgress" object:nil];
-}
-
-// 🚀 核心：滑动时前半段透明暴露原生模糊，后半段渐变呈现实体！
-%new
-- (void)tendies_updatePortalAlpha:(NSNotification *)note {
-    if (!g_enabled) return;
-    double progress = [note.userInfo[@"progress"] doubleValue];
-    
-    _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
-    if (portalView) {
-        // progress: 1.0(桌面) -> 0.0(锁屏完全展开)
-        double targetAlpha = 0.0;
-        if (progress > 0.5) {
-            // 滑动前半段：彻底透明，原生高斯模糊全面接管！
-            targetAlpha = 0.0; 
-        } else {
-            // 滑动后半段：快速渐变至实体！(0.5处为0，0.0处为1)
-            targetAlpha = (0.5 - progress) * 2.0; 
-        }
-        portalView.alpha = targetAlpha;
+    if (g_enabled) {
+        self.hidden = YES;
+        self.alpha = 0.0;
     }
 }
+- (void)setAlpha:(double)alpha {
+    if (g_enabled) { %orig(0.0); } else { %orig; }
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) { %orig(YES); } else { %orig; }
+}
+%end
+
+// 3. 🌟 锁屏拦截核心修复：利用 Portal 镜像投影到模糊层之上！
+%hook CSCoverSheetViewController
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    EnsureEngineViewIsMounted();
+    EnsureEngineViewIsMounted(); // 1. 确保引擎老老实实呆在桌面底层
     
     if (g_enabled) {
+        // 2. 获取原生的模糊层背景
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        if (bgVC && bgVC.view) {
+            // 🚨 绝对保持模糊层可见！
+            bgVC.view.alpha = 1.0;
+            bgVC.view.hidden = NO;
+        }
         
+        // 3. 召唤传送门：把桌面的壁纸“镜像”一份到锁屏模糊层之上！
         id wallpaperController = [%c(SBWallpaperController) sharedInstance];
         TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
         
@@ -448,52 +464,43 @@ static void EnsureEngineViewIsMounted() {
             _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
             if (!portalView) {
                 portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-                portalView.sourceView = engineView;
-                portalView.hidesSourceView = NO;
-                portalView.matchesAlpha = YES;
+                portalView.sourceView = engineView; // 镜像源：桌面的真实引擎
+                portalView.hidesSourceView = NO;    // 核心：绝对不隐藏桌面引擎，保证桌面正常！
+                
+                // 🌟 改为 NO，以便下方由 SBCoverSheetSlidingViewController 滑动进度独立控制！
+                portalView.matchesAlpha = NO;
+                portalView.alpha = 1.0;             // 初始默认给 1.0（全显），滑动时会被自动接管
+                
                 portalView.matchesPosition = YES;
                 portalView.matchesTransform = YES;
                 portalView.userInteractionEnabled = NO;
-                
-                // 默认状态判定：处于锁屏即实体，否则等待滑动更新
-                portalView.alpha = g_isUnlocked ? 0.0 : 1.0;
-                
                 objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             }
 
-            // 🚀 Z-Index 修复：直接嵌在 bgVC 的【最底层】
-            // 绝对不可能遮挡时间和通知（时间和通知在 bgVC 外的更高层级）
-            if (bgVC && bgVC.view) {
-                if (portalView.superview != bgVC.view) {
-                    [portalView removeFromSuperview];
-                    [bgVC.view insertSubview:portalView atIndex:0]; 
-                }
-                portalView.frame = bgVC.view.bounds;
-            } else {
-                if (portalView.superview != self.view) {
-                    [portalView removeFromSuperview];
+            if (portalView.superview != self.view) {
+                [portalView removeFromSuperview];
+                if (bgVC && bgVC.view && bgVC.view.superview == self.view) {
+                    // 完美插入到模糊层的正上方！
+                    [self.view insertSubview:portalView aboveSubview:bgVC.view];
+                } else {
                     [self.view insertSubview:portalView atIndex:0];
                 }
-                portalView.frame = self.view.bounds;
             }
+            portalView.frame = self.view.bounds;
         }
 
-        // 🚀 加回你要求的透明代码：杀死原本在 bgVC 里的原生海报！
-        // 这样下滑时就不会变回原壁纸了！
+        // 4. 清理锁屏原生多余图层
         if (bgVC && bgVC.view) {
             for (UIView *sub in bgVC.view.subviews) {
-                // 注意不要误伤我们刚插入的 _UIPortalView 传送门
                 if (![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
                     sub.alpha = 0.0;
                     sub.hidden = YES;
                 }
             }
         }
-
-        // 清理原生多余遮罩层 
+        
         UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
         if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
-        
         if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
             @try {
                 UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
@@ -539,7 +546,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 动画进度获取及快照拦截
+// 动画进度获取及快照拦截 (完全恢复你的初版)
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -571,7 +578,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步
+// 亮灭屏与锁屏状态同步 (未变动)
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
@@ -612,6 +619,49 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+// ==========================================
+// 🌟 锁屏下拉滑动进度拦截 (兼容 iOS 16 & 17)
+// 实现：前50%仅显示原生模糊，超过50%传送门渐变浮现实体
+// ==========================================
+%hook SBCoverSheetSlidingViewController
+
+// 适配 iOS 16
+- (struct CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
+    struct CGRect rect = %orig;
+    if (g_enabled) {
+        [self _tendies_updatePortalAlphaWithProgress:progress];
+    }
+    return rect;
+}
+
+// 适配 iOS 17
+- (struct CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
+    struct CGRect rect = %orig;
+    if (g_enabled) {
+        [self _tendies_updatePortalAlphaWithProgress:progress];
+    }
+    return rect;
+}
+
+%new
+- (void)_tendies_updatePortalAlphaWithProgress:(double)progress {
+    // 这里的 progress：0.0 (主屏幕，已拉起) -> 1.0 (锁屏完全覆盖)
+    UIViewController *contentVC = [self contentViewController];
+    if ([contentVC isKindOfClass:NSClassFromString(@"CSCoverSheetViewController")]) {
+        _UIPortalView *portalView = objc_getAssociatedObject(contentVC, "CoverSheetTendiesPortal");
+        if (portalView) {
+            double alpha = 0.0;
+            // 超过屏幕 50% (progress > 0.5) 时开始浮现实体：
+            // 将 0.5~1.0 的进度映射为 Alpha 的 0.0~1.0
+            if (progress > 0.5) {
+                alpha = (progress - 0.5) * 2.0; 
+            }
+            alpha = MAX(0.0, MIN(1.0, alpha)); // 严格限制在 0.0 到 1.0 之间
+            portalView.alpha = alpha;
+        }
+    }
+}
+%end
 
 %ctor {
     reloadPrefs();
