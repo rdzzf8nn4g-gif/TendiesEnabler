@@ -1,6 +1,7 @@
 #import "ZonePrefsRootListController.h"
 #import <Preferences/PSSpecifier.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <ImageIO/ImageIO.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <spawn.h>
@@ -40,6 +41,139 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
         }
     }
     return NO;
+}
+
+// ========================================================
+// 内存守护系统：目录测算与底层 ImageIO 智能图像降维 (防漏/防热)
+// ========================================================
+
+static unsigned long long getDirectorySize(NSString *folderPath) {
+    unsigned long long fileSize = 0;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:folderPath];
+    for (NSString *subpath in enumerator) {
+        NSDictionary *attrs = [fm attributesOfItemAtPath:[folderPath stringByAppendingPathComponent:subpath] error:nil];
+        fileSize += [attrs fileSize];
+    }
+    return fileSize;
+}
+
+// 采用 ImageIO 硬件流降维，规避 UIImage 解压造成的内存核爆，完美保留 PNG 透明度
+static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor) {
+    NSURL *imageURL = [NSURL fileURLWithPath:path];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)imageURL, NULL);
+    if (!source) return 0;
+
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    if (!properties) { CFRelease(source); return 0; }
+
+    NSNumber *widthNum = (__bridge NSNumber *)CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+    NSNumber *heightNum = (__bridge NSNumber *)CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+    CFRelease(properties);
+
+    CGFloat width = [widthNum doubleValue];
+    CGFloat height = [heightNum doubleValue];
+    CGFloat maxDimension = MAX(width, height) * scaleFactor;
+
+    // 防御性策略：任何最大边长低于 500 像素的图片拒绝压缩，严保小图标/文字图层清晰度
+    if (maxDimension < 500) {
+        CFRelease(source);
+        return 0; // 0 表示没做处理
+    }
+
+    NSDictionary *downsampleOptions = @{
+        (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (__bridge NSString *)kCGImageSourceShouldCacheImmediately: @YES,
+        (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+        (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @(maxDimension)
+    };
+
+    CGImageRef downsampledImage = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)downsampleOptions);
+    CFRelease(source);
+    if (!downsampledImage) return 0;
+
+    BOOL isPNG = [[path lowercaseString] hasSuffix:@".png"];
+    CFStringRef uti = isPNG ? (__bridge CFStringRef)@"public.png" : (__bridge CFStringRef)@"public.jpeg";
+    
+    CGImageDestinationRef destination = CGImageDestinationCreateWithURL((__bridge CFURLRef)imageURL, uti, 1, NULL);
+    if (!destination) {
+        CGImageRelease(downsampledImage);
+        return 0;
+    }
+
+    if (isPNG) {
+        // PNG 无损，保留 Alpha 通道
+        CGImageDestinationAddImage(destination, downsampledImage, NULL);
+    } else {
+        // JPG 质量保持在极佳的 0.85
+        NSDictionary *destOptions = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @0.85};
+        CGImageDestinationAddImage(destination, downsampledImage, (__bridge CFDictionaryRef)destOptions);
+    }
+
+    BOOL success = CGImageDestinationFinalize(destination);
+    CFRelease(destination);
+    CGImageRelease(downsampledImage);
+
+    // 返回压缩后的新文件大小
+    if (success) {
+        return [[[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil] fileSize];
+    }
+    return 0;
+}
+
+static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
+    unsigned long long targetLimit = 25ULL * 1024 * 1024; // 死守 25MB 物理红线
+    unsigned long long currentTotalSize = getDirectorySize(unzipDir);
+    
+    if (currentTotalSize <= targetLimit) return;
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    
+    // 最多尝试 3 趟，防止遇到无法再压缩的极端图片陷入死循环导致 CPU 烧毁
+    for (int pass = 1; pass <= 3; pass++) {
+        if (currentTotalSize <= targetLimit) break;
+        
+        NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:unzipDir];
+        NSString *subpath;
+        NSMutableArray *imageFiles = [NSMutableArray array];
+        
+        while ((subpath = [enumerator nextObject])) {
+            NSString *ext = [[subpath pathExtension] lowercaseString];
+            if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) {
+                NSString *fullPath = [unzipDir stringByAppendingPathComponent:subpath];
+                unsigned long long fSize = [[fm attributesOfItemAtPath:fullPath error:nil] fileSize];
+                [imageFiles addObject:@{@"path": fullPath, @"size": @(fSize)}];
+            }
+        }
+        
+        // 核心：按文件大小降序排列，擒贼先擒王，直接干掉占空间最大的元凶
+        [imageFiles sortUsingComparator:^NSComparisonResult(id obj1, id obj2) {
+            return [obj2[@"size"] compare:obj1[@"size"]];
+        }];
+        
+        for (NSDictionary *imgInfo in imageFiles) {
+            @autoreleasepool { // 绝对隔离：保证单张图片处理完立即释放图形上下文
+                NSString *path = imgInfo[@"path"];
+                unsigned long long oldSize = [imgInfo[@"size"] unsignedLongLongValue];
+                
+                // 第一趟 80% 像素尺寸，第二趟 60%，第三趟 50%
+                CGFloat scale = 1.0 - (pass * 0.2);
+                if (scale < 0.5) scale = 0.5;
+                
+                unsigned long long newSize = downsampleImage(path, scale);
+                
+                if (newSize > 0 && newSize < oldSize) {
+                    currentTotalSize -= oldSize;
+                    currentTotalSize += newSize;
+                }
+                
+                // 只要总体积达标，立刻中止所有任务，节省 CPU 算力
+                if (currentTotalSize <= targetLimit) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------
@@ -290,8 +424,15 @@ static NSString * GetPrefsPlistPath() {
                     processSuccess = industrialUnzip(sourceURL.path, unzipDir);
                 }
                 
+                // ====== 注入策略 ======
+                // 只有在复制或解压成功后，才对目录进行体积清洗
+                if (processSuccess) {
+                    optimizeZoneFolderIfNecessary(unzipDir);
+                    anySuccess = YES;
+                }
+                
                 if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
-                if (processSuccess) anySuccess = YES;
+                // ====================
             }
             
             if (anySuccess) {
