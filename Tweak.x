@@ -47,6 +47,10 @@ typedef struct {
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
+@interface SBMainDisplaySceneManager : NSObject
++ (id)sharedInstance;
+@end
+
 @interface SBWallpaperEffectView : UIView
 @property (nonatomic) long long wallpaperStyle;
 @end
@@ -552,7 +556,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来
+// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来与应用内精准判断
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -576,16 +580,35 @@ static void EnsureEngineViewIsMounted() {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
             
-            // 🚨 修正后准确的渐变公式（主线程安全）：
-            // progress = 1.0 (桌面解锁), progress = 0.0 (锁屏完全覆盖)
-            // 下滑时，1.0 -> 0.0。
-            // 当到达一半（0.5）时，Alpha 慢慢由 0 变 1，到底时全实体显示。
             if (g_portalView) {
+                double p = progress;
                 double alpha = 0.0;
                 
-                if (progress <= 0.5) {
-                    // progress从0.5降到0.0时，(0.5 - progress)*2 将从0.0升到1.0
-                    alpha = (0.5 - progress) * 2.0; 
+                // 🌟 核心：精准判断当前是否在应用内
+                BOOL isAppOpen = NO;
+                @try {
+                    id sceneManager = [%c(SBMainDisplaySceneManager) sharedInstance];
+                    if (sceneManager) {
+                        id layoutState = [sceneManager valueForKey:@"layoutState"];
+                        // unlockedEnvironmentMode: 1 是桌面, 2 是应用内, 3 是多任务后台
+                        long long mode = [[layoutState valueForKey:@"unlockedEnvironmentMode"] longLongValue];
+                        if (mode != 1) { 
+                            isAppOpen = YES;
+                        }
+                    }
+                } @catch(NSException *e) {
+                    // 异常兜底，防止意外
+                }
+                
+                if (isAppOpen) {
+                    // 🚀 在应用内：无视 50% 限制，直接跟随手势平滑渐变
+                    // progress 从 1.0 降到 0.0 时，alpha 从 0.0 升到 1.0
+                    alpha = 1.0 - p;
+                } else {
+                    // 🏠 在桌面：保留 50% 限制，让原生模糊先挡住桌面图标
+                    if (p <= 0.5) {
+                        alpha = (0.5 - p) * 2.0; 
+                    }
                 }
                 
                 alpha = MAX(0.0, MIN(1.0, alpha));
