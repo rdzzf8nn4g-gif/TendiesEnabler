@@ -178,15 +178,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) BOOL isUnlocking; 
 @property (nonatomic, strong) NSString *currentState;
 @property (nonatomic, assign) NSInteger reloadGeneration; 
+@property (nonatomic, strong) CADisplayLink *freezeLink; // 绝对零度冻结器
+
 @property (nonatomic, strong) ZoneCAMLParserLegacy *bgParser;
 @property (nonatomic, strong) ZoneCAMLParserLegacy *floatParser;
 @property (nonatomic, strong) ZoneCAMLParserLegacy *fgParser;
 @property (nonatomic, strong) NSMutableDictionary *bgLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *floatLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
+
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
-- (void)updateAnimationSpeed;
 @end
 
 @implementation ZoneRenderEngineLegacy
@@ -212,7 +214,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     return self;
 }
 
-- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+- (void)dealloc { 
+    [self stopFreezeLink];
+    [[NSNotificationCenter defaultCenter] removeObserver:self]; 
+}
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -221,34 +226,71 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.fgView) self.fgView.frame = self.bounds;
 }
 
-// 【绝对零度冻结技术】双层降维打击：同时冻结包裹层与原生CAML根层
-- (void)updateAnimationSpeed {
-    float speed = g_wallpaper_animation ? 1.0 : 0.0;
-    NSArray *views = @[self.bgView ?: [NSNull null], self.floatingView ?: [NSNull null], self.fgView ?: [NSNull null]];
-    
-    for (id obj in views) {
-        if (obj == [NSNull null]) continue;
-        UIView *v = (UIView *)obj;
-        // 冻结包裹层
-        v.layer.speed = speed;
-        // 突破壁垒，直接冻结解析出来的 CAML Emitter / Animation 根节点
-        CALayer *camlRoot = [v.layer.sublayers firstObject];
-        if (camlRoot) {
-            camlRoot.speed = speed;
-        }
+// ================== 绝对零度冻结技术 ==================
+- (void)startFreezeLink {
+    if (!self.freezeLink && !g_wallpaper_animation) {
+        self.freezeLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(enforceFreeze)];
+        [self.freezeLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
 }
+
+- (void)stopFreezeLink {
+    if (self.freezeLink) {
+        [self.freezeLink invalidate];
+        self.freezeLink = nil;
+    }
+}
+
+- (void)enforceFreeze {
+    if (g_wallpaper_animation) {
+        [self stopFreezeLink];
+        return;
+    }
+    [self forceLayerZeroSpeed:self.bgView.layer];
+    [self forceLayerZeroSpeed:self.floatingView.layer];
+    [self forceLayerZeroSpeed:self.fgView.layer];
+}
+
+- (void)forceLayerZeroSpeed:(CALayer *)layer {
+    if (!layer) return;
+    
+    // 1. 暴力锁死流速
+    layer.speed = 0.0f;
+    
+    // 2. 剥离任何系统刚附加的自带动画
+    if (layer.animationKeys.count > 0) {
+        [layer removeAllAnimations];
+    }
+    
+    // 3. 彻底掐断 CAEmitterLayer 粒子发射器的生成
+    if ([layer isKindOfClass:[CAEmitterLayer class]]) {
+        CAEmitterLayer *em = (CAEmitterLayer *)layer;
+        em.birthRate = 0.0f;
+    }
+    
+    // 递归深潜
+    for (CALayer *sub in layer.sublayers) {
+        [self forceLayerZeroSpeed:sub];
+    }
+}
+// ===================================================
 
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+    
+    if (!g_wallpaper_animation) {
+        [self startFreezeLink];
+    }
 }
 
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:NO];
+    
+    [self stopFreezeLink]; // 息屏休眠以 100% 零耗电
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -280,7 +322,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         NSDictionary *lockedVals = states[@"Locked"]; NSDictionary *unlockVals = states[@"Unlock"];
         if (!lockedVals || !unlockVals) continue;
         for (NSString *keyPath in lockedVals) {
-            // 【核心拦截】：如果用户关闭了壁纸动画，全面封杀 CAML 文件企图私自篡改层级 speed 流速的行为
+            
+            // 拦截：拒绝解析器因为进度而推高 speed
             if (!g_wallpaper_animation && [keyPath isEqualToString:@"speed"]) continue;
             
             NSNumber *lockNum = lockedVals[keyPath]; NSNumber *unlockNum = unlockVals[keyPath];
@@ -324,15 +367,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } else {
         [self.bgView setState:stateName]; [self.floatingView setState:stateName]; [self.fgView setState:stateName];
     }
-    
-    // 【异步防漏锁定】：防止 UIKit 的内部队列或 BSUICAPackageView 的状态渲染引擎在下一帧再次重置 speed
-    [self updateAnimationSpeed]; 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self updateAnimationSpeed];
-    });
 }
 
 - (void)clearCurrentViewsSafely {
+    [self stopFreezeLink];
     [self.bgView removeFromSuperview]; self.bgView = nil;
     [self.floatingView removeFromSuperview]; self.floatingView = nil;
     [self.fgView removeFromSuperview]; self.fgView = nil;
@@ -414,7 +452,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self setNeedsLayout];
             self.currentState = @"Init";
             [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
-            [self updateAnimationSpeed]; 
+            
+            // 组装完成，开启强力冻结防护
+            if (!g_wallpaper_animation && g_isScreenOn) {
+                [self startFreezeLink];
+            }
         });
     });
 }
@@ -554,15 +596,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSString *currentState;
 @property (nonatomic, assign) NSInteger reloadGeneration; 
 @property (nonatomic, assign) CGSize logicalScreenSize; 
+@property (nonatomic, strong) CADisplayLink *freezeLink; // 绝对零度冻结器
+
 @property (nonatomic, strong) ZoneCAMLParserEnhanced *bgParser;
 @property (nonatomic, strong) ZoneCAMLParserEnhanced *floatParser;
 @property (nonatomic, strong) ZoneCAMLParserEnhanced *fgParser;
 @property (nonatomic, strong) NSMutableDictionary *bgLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *floatLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
+
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
-- (void)updateAnimationSpeed;
 @end
 
 @implementation ZoneRenderEngineEnhanced
@@ -589,7 +633,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     return self;
 }
 
-- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+- (void)dealloc { 
+    [self stopFreezeLink];
+    [[NSNotificationCenter defaultCenter] removeObserver:self]; 
+}
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -625,34 +672,71 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 【绝对零度冻结技术】双层降维打击：同时冻结包裹层与原生CAML根层
-- (void)updateAnimationSpeed {
-    float speed = g_wallpaper_animation ? 1.0 : 0.0;
-    NSArray *views = @[self.bgView ?: [NSNull null], self.floatingView ?: [NSNull null], self.fgView ?: [NSNull null]];
-    
-    for (id obj in views) {
-        if (obj == [NSNull null]) continue;
-        UIView *v = (UIView *)obj;
-        // 冻结包裹层
-        v.layer.speed = speed;
-        // 突破壁垒，直接冻结解析出来的 CAML Emitter / Animation 根节点
-        CALayer *camlRoot = [v.layer.sublayers firstObject];
-        if (camlRoot) {
-            camlRoot.speed = speed;
-        }
+// ================== 绝对零度冻结技术 ==================
+- (void)startFreezeLink {
+    if (!self.freezeLink && !g_wallpaper_animation) {
+        self.freezeLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(enforceFreeze)];
+        [self.freezeLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
 }
+
+- (void)stopFreezeLink {
+    if (self.freezeLink) {
+        [self.freezeLink invalidate];
+        self.freezeLink = nil;
+    }
+}
+
+- (void)enforceFreeze {
+    if (g_wallpaper_animation) {
+        [self stopFreezeLink];
+        return;
+    }
+    [self forceLayerZeroSpeed:self.bgView.layer];
+    [self forceLayerZeroSpeed:self.floatingView.layer];
+    [self forceLayerZeroSpeed:self.fgView.layer];
+}
+
+- (void)forceLayerZeroSpeed:(CALayer *)layer {
+    if (!layer) return;
+    
+    // 1. 暴力锁死流速
+    layer.speed = 0.0f;
+    
+    // 2. 剥离任何系统刚附加的自带动画
+    if (layer.animationKeys.count > 0) {
+        [layer removeAllAnimations];
+    }
+    
+    // 3. 彻底掐断 CAEmitterLayer 粒子发射器的生成
+    if ([layer isKindOfClass:[CAEmitterLayer class]]) {
+        CAEmitterLayer *em = (CAEmitterLayer *)layer;
+        em.birthRate = 0.0f;
+    }
+    
+    // 递归深潜
+    for (CALayer *sub in layer.sublayers) {
+        [self forceLayerZeroSpeed:sub];
+    }
+}
+// ===================================================
 
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+    
+    if (!g_wallpaper_animation) {
+        [self startFreezeLink];
+    }
 }
 
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:NO];
+    
+    [self stopFreezeLink]; // 息屏休眠以 100% 零耗电
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserEnhanced *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -691,14 +775,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (!lockedVals || !unlockVals) continue;
         
         for (NSString *keyPath in lockedVals) {
-            // 【核心拦截】：如果用户关闭了壁纸动画，全面封杀 CAML 文件企图私自篡改层级 speed 流速的行为
+            
+            // 拦截：拒绝解析器因为进度而推高 speed
             if (!g_wallpaper_animation && [keyPath isEqualToString:@"speed"]) continue;
             
             id lockVal = lockedVals[keyPath]; 
             id unlockVal = unlockVals[keyPath];
             
             if (lockVal && unlockVal) {
-                [layer removeAnimationForKey:keyPath]; // 剔除原生动画绑定以支持交互
+                // 不再单独 removeAnimationForKey，因为 enforceFreeze 统一处理了一切系统动画残留
                 @try {
                     if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
                         double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
@@ -763,15 +848,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:realFloatState]; 
         [self.fgView setState:realFgState];
     }
-    
-    // 【异步防漏锁定】：防止 UIKit 的内部队列或 BSUICAPackageView 的状态渲染引擎在下一帧再次重置 speed
-    [self updateAnimationSpeed]; 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self updateAnimationSpeed];
-    });
 }
 
 - (void)clearCurrentViewsSafely {
+    [self stopFreezeLink];
     [self.bgView removeFromSuperview]; self.bgView = nil;
     [self.floatingView removeFromSuperview]; self.floatingView = nil;
     [self.fgView removeFromSuperview]; self.fgView = nil;
@@ -872,7 +952,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self setNeedsLayout];
             self.currentState = @"Init";
             [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
-            [self updateAnimationSpeed]; 
+            
+            // 组装完成，开启强力冻结防护
+            if (!g_wallpaper_animation && g_isScreenOn) {
+                [self startFreezeLink];
+            }
         });
     });
 }
