@@ -47,6 +47,10 @@ typedef struct {
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
+@interface SBMainDisplaySceneManager : NSObject
++ (id)sharedInstance;
+@end
+
 @interface SBWallpaperEffectView : UIView
 @property (nonatomic) long long wallpaperStyle;
 @end
@@ -551,6 +555,9 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 
+// ==========================================
+// 🌟 锁屏下拉滑动进度拦截 (兼容 iOS 16 & 17)
+// ==========================================
 // ==========================================
 // 🌟 锁屏下拉滑动进度拦截 (兼容 iOS 16 & 17)
 // ==========================================
