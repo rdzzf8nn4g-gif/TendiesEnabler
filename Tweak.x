@@ -660,7 +660,7 @@ static void EnsureEngineViewIsMounted() {
                 
                 if (progress <= 0.5) {
                     // progress从0.5降到0.0时，(0.5 - progress)*2 将从0.0升到1.0
-                    alpha = (0.5 - progress) * 2.0; 
+                    alpha = (0.9 - progress) * 0.9; 
                 }
                 
                 alpha = MAX(0.0, MIN(1.0, alpha));
