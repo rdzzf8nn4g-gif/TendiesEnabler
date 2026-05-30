@@ -42,8 +42,8 @@ typedef struct {
 @property (readonly, nonatomic) long long backlightState;
 @end
 
+// 🌟 修复点：已彻底删除 @property view 声明，解决编译冲突
 @interface CSCoverSheetViewController : UIViewController
-@property (readonly, nonatomic) UIView *view;
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 @end
