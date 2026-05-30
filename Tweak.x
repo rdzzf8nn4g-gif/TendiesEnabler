@@ -438,7 +438,7 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 
-// 3. 🌟 锁屏拦截核心修复：利用 Portal 镜像投影到模糊层之上！
+// 3. 🌟 锁屏拦截核心修复：利用 Portal 镜像投影到背景层（Z-Index 寄生防遮挡）！
 %hook CSCoverSheetViewController
 
 - (void)viewWillLayoutSubviews {
@@ -446,7 +446,7 @@ static void EnsureEngineViewIsMounted() {
     EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
-        // 获取原生的模糊层背景 (第一层)
+        // 1. 获取原生的背景层控制器
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
@@ -462,59 +462,85 @@ static void EnsureEngineViewIsMounted() {
                 portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
                 portalView.sourceView = engineView;
                 portalView.hidesSourceView = NO;
-                
-                // 🔥 核心：取消自动匹配 Alpha，靠我们手动滑动手势控制！
                 portalView.matchesAlpha = NO; 
                 portalView.alpha = 0.0; // 默认隐藏，等待滑动激活
-                
                 portalView.matchesPosition = YES;
                 portalView.matchesTransform = YES;
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                
-                // 赋给全局追踪指针
                 g_portalView = portalView;
             }
 
-            if (portalView.superview != self.view) {
-                [self.view insertSubview:portalView atIndex:0];
+            // 🔥 核心修复：直接将传送门作为背景层的子视图，而不是锁屏主视图！
+            if (bgVC && bgVC.view) {
+                if (portalView.superview != bgVC.view) {
+                    [portalView removeFromSuperview];
+                    [bgVC.view addSubview:portalView];
+                }
+                portalView.frame = bgVC.view.bounds;
+                
+                // 清理锁屏背景原生多余图层，保留我们的传送门
+                for (UIView *sub in bgVC.view.subviews) {
+                    if (sub != portalView) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    }
+                }
+            } else {
+                // 极端情况兜底：如果获取不到 bgVC，就强行塞到锁屏最底层并置底
+                if (portalView.superview != self.view) {
+                    [self.view insertSubview:portalView atIndex:0];
+                }
+                portalView.frame = self.view.bounds;
+                [self.view sendSubviewToBack:portalView];
             }
-            portalView.frame = self.view.bounds;
             
-            // 🔥 绝杀一层灰：在视图层级上，强制把 Portal 插在所有模糊层、调色层的【上方】
-            if (bgVC && bgVC.view && bgVC.view.superview == self.view) {
-                [self.view insertSubview:portalView aboveSubview:bgVC.view];
-            }
+            // 彻底隐藏系统的调色层和模糊层，不依赖相对层级关系
             @try {
                 UIView *dimmingView = [self valueForKey:@"_dimmingView"];
-                if (dimmingView && dimmingView.superview == self.view) {
-                    [self.view insertSubview:portalView aboveSubview:dimmingView];
-                    dimmingView.alpha = 0.0;
-                    dimmingView.hidden = YES;
-                }
+                if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+                
                 UIView *tintingView = [self valueForKey:@"_tintingView"];
-                if (tintingView && tintingView.superview == self.view) {
-                    [self.view insertSubview:portalView aboveSubview:tintingView];
-                    tintingView.alpha = 0.0;
-                    tintingView.hidden = YES;
-                }
+                if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
             } @catch(NSException* e) {}
         }
-
-        // 清理锁屏原生多余图层
-        if (bgVC && bgVC.view) {
-            for (UIView *sub in bgVC.view.subviews) {
-                if (![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
-                    sub.alpha = 0.0;
-                    sub.hidden = YES;
-                }
-            }
-        }
         
+        // 🔥 【新增修复】在这个高频刷新的地方，也顺手按死系统的“景深”层
         UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-        if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
+        if (floatingLayer) { 
+            floatingLayer.alpha = 0.0; 
+            floatingLayer.hidden = YES; 
+        }
     }
 }
+
+// ==============================================================================
+// 🌟 核心拦截：彻底锁死系统的“景深效果”抠图悬浮层，防止它挡住壁纸！
+// ==============================================================================
+
+- (void)_updateWallpaperFloatingLayerContainerView {
+    %orig;
+    if (g_enabled) {
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
+    }
+}
+
+- (void)_updateFloatingLayerOrdering {
+    %orig;
+    if (g_enabled) {
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
+    }
+}
+
+// ==============================================================================
 
 - (void)viewDidLayoutSubviews {
     %orig;
@@ -527,6 +553,55 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
+
+// ==============================================================================
+// 🌟 修复：检测进出 Poster Switcher（壁纸编辑模式）
+// ==============================================================================
+
+// 1. 当长按锁屏准备进入编辑模式时
+- (void)_prepareForPosterSwitcherPresentation {
+    %orig;
+    if (g_enabled && g_portalView) {
+        // 暂时隐藏我们的镜像引擎，把舞台干净地交给系统，防止层级污染
+        g_portalView.hidden = YES;
+        g_portalView.alpha = 0.0;
+    }
+}
+
+// 2. 退出编辑模式的直接回调
+- (void)_dismissPosterSwitcherViewController {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        // 强制重新执行排版，确保 Portal 正确插回到底层背景之上
+        [self viewWillLayoutSubviews];
+        
+        // 强制重发一次 0.0 进度（锁屏标准状态），让 Alpha 公式恢复到 1.0 显示我们的壁纸
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+
+// 3. 退出/清理编辑模式的兜底回调（防止手势打断导致状态卡死）
+- (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+// ==============================================================================
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
