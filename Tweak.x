@@ -50,7 +50,7 @@ typedef struct {
 // 🌟 新增：锁屏滑动容器声明，用于拦截下滑进度
 @interface SBCoverSheetSlidingViewController : UIViewController
 - (UIViewController *)contentViewController;
-// 🛠 修复编译报错：向编译器提前声明我们用 %new 注入的自定义方法
+// 提前声明注入的方法，避免编译警告或报错
 - (void)_tendies_updatePortalAlphaWithProgress:(double)progress;
 @end
 
@@ -623,7 +623,6 @@ static void EnsureEngineViewIsMounted() {
 
 // ==========================================
 // 🌟 锁屏下拉滑动进度拦截 (兼容 iOS 16 & 17)
-// 实现：前50%仅显示原生模糊，超过50%传送门渐变浮现实体
 // ==========================================
 %hook SBCoverSheetSlidingViewController
 
@@ -647,21 +646,23 @@ static void EnsureEngineViewIsMounted() {
 
 %new
 - (void)_tendies_updatePortalAlphaWithProgress:(double)progress {
-    // 这里的 progress：0.0 (主屏幕，已拉起) -> 1.0 (锁屏完全覆盖)
-    UIViewController *contentVC = [self contentViewController];
-    if ([contentVC isKindOfClass:NSClassFromString(@"CSCoverSheetViewController")]) {
-        _UIPortalView *portalView = objc_getAssociatedObject(contentVC, "CoverSheetTendiesPortal");
-        if (portalView) {
-            double alpha = 0.0;
-            // 超过屏幕 50% (progress > 0.5) 时开始浮现实体：
-            // 将 0.5~1.0 的进度映射为 Alpha 的 0.0~1.0
-            if (progress > 0.5) {
-                alpha = (progress - 0.5) * 2.0; 
+    // 🔥修复崩溃的核心：动画系统的 Tick 存在于子线程(inProcessAnimationManager)
+    // 强制派发到主线程进行 UI 修改，避免 CA_ASSERT_MAIN_THREAD_TRANSACTIONS 崩溃
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *contentVC = [self contentViewController];
+        if ([contentVC isKindOfClass:NSClassFromString(@"CSCoverSheetViewController")]) {
+            _UIPortalView *portalView = objc_getAssociatedObject(contentVC, "CoverSheetTendiesPortal");
+            if (portalView) {
+                double alpha = 0.0;
+                // 超过屏幕 50% (progress > 0.5) 时开始浮现实体：
+                if (progress > 0.5) {
+                    alpha = (progress - 0.5) * 2.0; 
+                }
+                alpha = MAX(0.0, MIN(1.0, alpha)); 
+                portalView.alpha = alpha;
             }
-            alpha = MAX(0.0, MIN(1.0, alpha)); // 严格限制在 0.0 到 1.0 之间
-            portalView.alpha = alpha;
         }
-    }
+    });
 }
 %end
 
