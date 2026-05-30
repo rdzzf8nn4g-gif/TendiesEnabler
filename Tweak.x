@@ -59,6 +59,9 @@ typedef struct {
 @property (nonatomic, assign) BOOL matchesPosition;
 @end
 
+@interface CSBackgroundContentView : UIView
+@end
+
 // ==========================================
 // 全局变量与配置管理
 // ==========================================
@@ -453,6 +456,31 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBWallpaperEffectView
+
+- (void)didMoveToSuperview {
+    %orig;
+    if (g_enabled && self.superview) {
+        UIView *view = self;
+        BOOL isCoverSheetRelated = NO;
+        
+        while (view) {
+            NSString *name = NSStringFromClass([view class]);
+            if ([name containsString:@"Wallpaper"] || 
+                [name containsString:@"CoverSheet"] || 
+                [name containsString:@"CS"]) {
+                isCoverSheetRelated = YES;
+                break;
+            }
+            view = view.superview;
+        }
+        
+        if (isCoverSheetRelated) {
+            self.hidden = YES;
+            self.alpha = 0.0;
+        }
+    }
+}
+
 - (void)layoutSubviews {
     %orig;
     if (g_enabled) {
@@ -492,6 +520,28 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook CSCoverSheetViewController
+
+- (void)_scrollPanGestureBegan:(id)arg1 {
+    %orig;
+    if (g_enabled) {
+        [self viewWillLayoutSubviews];
+    }
+}
+
+- (void)_scrollPanGestureChanged:(id)arg1 {
+    %orig;
+    if (g_enabled) {
+        [self viewWillLayoutSubviews];
+    }
+}
+
+- (void)_scrollPanGestureEnded:(id)arg1 {
+    %orig;
+    if (g_enabled) {
+        [self viewWillLayoutSubviews];
+    }
+}
+
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted(); 
@@ -649,6 +699,19 @@ static void EnsureEngineViewIsMounted() {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
+    }
+}
+%end
+
+%hook CSBackgroundContentView
+- (void)layoutSubviews {
+    %orig;
+    if (g_enabled) {
+        UIView *presentationView = [self valueForKey:@"presentationView"];
+        if (presentationView) {
+            presentationView.hidden = YES;
+            presentationView.alpha = 0.0;
+        }
     }
 }
 %end
