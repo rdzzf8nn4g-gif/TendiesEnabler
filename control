@@ -1,9 +1,9 @@
-Package: com.yourname.tendiesenabler
-Name: TendiesEnabler
+Package: com.iosdump.zone
+Name: Zone
 Depends: mobilesubstrate, preferenceloader
-Version: 1.0.0
+Version: 0.0.2
 Architecture: iphoneos-arm
-Description: Interactive .tendies wallpapers for iOS 14-17.
-Maintainer: YourName
-Author: YourName
+Description: Interactive wallpapers.
+Maintainer: iosdump
+Author: iosdump
 Section: Tweaks
