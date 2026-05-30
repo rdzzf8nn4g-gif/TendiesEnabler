@@ -62,18 +62,6 @@ typedef struct {
 // ==========================================
 // 全局变量与配置管理
 // ==========================================
-static NSString * GetZoneStorageDir() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zone.media";
-#if __has_include(<roothide.h>)
-    return jbroot(base);
-#else
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
-        return [@"/var/jb" stringByAppendingPathComponent:base];
-    }
-    return base;
-#endif
-}
-
 static BOOL g_enabled = NO;
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
@@ -90,7 +78,7 @@ static void reloadPrefs() {
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
         g_zonePath = [(__bridge NSString *)pathRef copy];
     } else {
-        // 如果没有则置为空，不默认加载，等待用户点击
+        // 如果没有选中壁纸则置为空，不默认加载，等待用户在设置中点击
         g_zonePath = nil; 
     }
 }
