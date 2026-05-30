@@ -11,6 +11,15 @@
 #endif
 
 // ==========================================
+// 🌟 终极编译通行证：告诉编译器这些方法签名绝对存在！
+// ==========================================
+@interface NSObject (TendiesCompilerFix)
+- (void)_tendies_updatePortalAlphaWithProgress:(double)progress;
+- (UIView *)homescreenWallpaperView;
+- (UIView *)lockscreenWallpaperView;
+@end
+
+// ==========================================
 // 结构体与系统头文件声明
 // ==========================================
 typedef struct {
@@ -20,10 +29,6 @@ typedef struct {
 } PBUIWallpaperTransitionState;
 
 @interface PBUIWallpaperViewController : UIViewController
-@property (retain, nonatomic) UIView *homescreenWallpaperView;
-@property (retain, nonatomic) UIView *lockscreenWallpaperView;
-- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
-- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
 
 @interface BSUICAPackageView : UIView
