@@ -386,7 +386,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 只负责隐藏原生壁纸的图像层！(去除破坏系统模糊生成的恶性 Hook)
+// 1. 只负责隐藏原生桌面壁纸的图像层
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -404,16 +404,16 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 
-// 3. 🌟 锁屏拦截核心：动态 Alpha 控制机制
+// 3. 🌟 锁屏拦截核心：动态 Alpha 控制机制 + Z-Index 遮挡修复
 %hook CSCoverSheetViewController
 
-// 新增生命周期钩子，用来注册滑动进度观察者
+// 注册通知，监听下拉锁屏的进度
 - (void)viewDidLoad {
     %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(tendies_updatePortalAlpha:) name:@"TendiesEngineProgress" object:nil];
 }
 
-// 🚀 神奇的滑动透明度引擎：过半变实体！
+// 🚀 核心：滑动时前半段透明暴露原生模糊，后半段渐变呈现实体！
 %new
 - (void)tendies_updatePortalAlpha:(NSNotification *)note {
     if (!g_enabled) return;
@@ -421,9 +421,8 @@ static void EnsureEngineViewIsMounted() {
     
     _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
     if (portalView) {
-        // 核心数学转换：progress 1.0 (桌面) -> 0.0 (锁屏完全降下)
+        // progress: 1.0(桌面) -> 0.0(锁屏完全展开)
         double targetAlpha = 0.0;
-        
         if (progress > 0.5) {
             // 滑动前半段：彻底透明，原生高斯模糊全面接管！
             targetAlpha = 0.0; 
@@ -431,7 +430,6 @@ static void EnsureEngineViewIsMounted() {
             // 滑动后半段：快速渐变至实体！(0.5处为0，0.0处为1)
             targetAlpha = (0.5 - progress) * 2.0; 
         }
-        
         portalView.alpha = targetAlpha;
     }
 }
@@ -457,25 +455,42 @@ static void EnsureEngineViewIsMounted() {
                 portalView.matchesTransform = YES;
                 portalView.userInteractionEnabled = NO;
                 
-                // 给一个安全的初始值：如果当前是未解锁状态(位于锁屏)，默认让它是实体
+                // 默认状态判定：处于锁屏即实体，否则等待滑动更新
                 portalView.alpha = g_isUnlocked ? 0.0 : 1.0;
                 
                 objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             }
 
-            if (portalView.superview != self.view) {
-                [portalView removeFromSuperview];
-                if (bgVC && bgVC.view) {
-                    // 🎯 重新放到模糊层之上！利用上面的 Alpha 机制控制显隐
-                    [self.view insertSubview:portalView aboveSubview:bgVC.view];
-                } else {
+            // 🚀 Z-Index 修复：直接嵌在 bgVC 的【最底层】
+            // 绝对不可能遮挡时间和通知（时间和通知在 bgVC 外的更高层级）
+            if (bgVC && bgVC.view) {
+                if (portalView.superview != bgVC.view) {
+                    [portalView removeFromSuperview];
+                    [bgVC.view insertSubview:portalView atIndex:0]; 
+                }
+                portalView.frame = bgVC.view.bounds;
+            } else {
+                if (portalView.superview != self.view) {
+                    [portalView removeFromSuperview];
                     [self.view insertSubview:portalView atIndex:0];
                 }
+                portalView.frame = self.view.bounds;
             }
-            portalView.frame = self.view.bounds;
         }
 
-        // 清理原生多余层 
+        // 🚀 加回你要求的透明代码：杀死原本在 bgVC 里的原生海报！
+        // 这样下滑时就不会变回原壁纸了！
+        if (bgVC && bgVC.view) {
+            for (UIView *sub in bgVC.view.subviews) {
+                // 注意不要误伤我们刚插入的 _UIPortalView 传送门
+                if (![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
+                    sub.alpha = 0.0;
+                    sub.hidden = YES;
+                }
+            }
+        }
+
+        // 清理原生多余遮罩层 
         UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
         if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
         
