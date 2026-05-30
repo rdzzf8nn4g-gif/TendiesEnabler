@@ -495,20 +495,52 @@ static void EnsureEngineViewIsMounted() {
                 [self.view sendSubviewToBack:portalView];
             }
             
-            // 彻底隐藏系统的调色层、模糊层和景深层，不依赖相对层级关系
+            // 彻底隐藏系统的调色层和模糊层，不依赖相对层级关系
             @try {
                 UIView *dimmingView = [self valueForKey:@"_dimmingView"];
                 if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
                 
                 UIView *tintingView = [self valueForKey:@"_tintingView"];
                 if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
-                
-                UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-                if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
             } @catch(NSException* e) {}
+        }
+        
+        // 🔥 【新增修复】在这个高频刷新的地方，也顺手按死系统的“景深”层
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) { 
+            floatingLayer.alpha = 0.0; 
+            floatingLayer.hidden = YES; 
         }
     }
 }
+
+// ==============================================================================
+// 🌟 核心拦截：彻底锁死系统的“景深效果”抠图悬浮层，防止它挡住壁纸！
+// ==============================================================================
+
+- (void)_updateWallpaperFloatingLayerContainerView {
+    %orig;
+    if (g_enabled) {
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
+    }
+}
+
+- (void)_updateFloatingLayerOrdering {
+    %orig;
+    if (g_enabled) {
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
+    }
+}
+
+// ==============================================================================
 
 - (void)viewDidLayoutSubviews {
     %orig;
@@ -523,7 +555,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
 
 // ==============================================================================
-// 🌟 新增修复：检测进出 Poster Switcher（壁纸编辑模式）
+// 🌟 修复：检测进出 Poster Switcher（壁纸编辑模式）
 // ==============================================================================
 
 // 1. 当长按锁屏准备进入编辑模式时
