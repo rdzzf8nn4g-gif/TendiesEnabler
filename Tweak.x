@@ -50,6 +50,8 @@ typedef struct {
 // 🌟 新增：锁屏滑动容器声明，用于拦截下滑进度
 @interface SBCoverSheetSlidingViewController : UIViewController
 - (UIViewController *)contentViewController;
+// 🛠 修复编译报错：向编译器提前声明我们用 %new 注入的自定义方法
+- (void)_tendies_updatePortalAlphaWithProgress:(double)progress;
 @end
 
 @interface SBWallpaperEffectView : UIView
