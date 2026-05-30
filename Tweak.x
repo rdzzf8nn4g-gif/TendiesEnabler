@@ -221,29 +221,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.fgView) self.fgView.frame = self.bounds;
 }
 
-// 1. 新增递归方法：深入图层树，彻底拔除所有自发闲置动画
-- (void)stripAllAnimations:(CALayer *)layer {
-    if (!layer) return;
-    [layer removeAllAnimations];
-    for (CALayer *sub in layer.sublayers) {
-        [self stripAllAnimations:sub];
-    }
-}
-
-// 2. 替换原有的 updateAnimationSpeed 方法
+// 【绝对零度冻结技术】双层降维打击：同时冻结包裹层与原生CAML根层
 - (void)updateAnimationSpeed {
-    if (!g_wallpaper_animation) {
-        // 第一重绞杀：立即剥离当前存在的动画
-        [self stripAllAnimations:self.bgView.layer];
-        [self stripAllAnimations:self.floatingView.layer];
-        [self stripAllAnimations:self.fgView.layer];
-        
-        // 第二重兜底防漏：应对由于系统 CAML 状态机在下一帧延迟附加的顽固动画
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self stripAllAnimations:self.bgView.layer];
-            [self stripAllAnimations:self.floatingView.layer];
-            [self stripAllAnimations:self.fgView.layer];
-        });
+    float speed = g_wallpaper_animation ? 1.0 : 0.0;
+    NSArray *views = @[self.bgView ?: [NSNull null], self.floatingView ?: [NSNull null], self.fgView ?: [NSNull null]];
+    
+    for (id obj in views) {
+        if (obj == [NSNull null]) continue;
+        UIView *v = (UIView *)obj;
+        // 冻结包裹层
+        v.layer.speed = speed;
+        // 突破壁垒，直接冻结解析出来的 CAML Emitter / Animation 根节点
+        CALayer *camlRoot = [v.layer.sublayers firstObject];
+        if (camlRoot) {
+            camlRoot.speed = speed;
+        }
     }
 }
 
@@ -288,6 +280,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         NSDictionary *lockedVals = states[@"Locked"]; NSDictionary *unlockVals = states[@"Unlock"];
         if (!lockedVals || !unlockVals) continue;
         for (NSString *keyPath in lockedVals) {
+            // 【核心拦截】：如果用户关闭了壁纸动画，全面封杀 CAML 文件企图私自篡改层级 speed 流速的行为
+            if (!g_wallpaper_animation && [keyPath isEqualToString:@"speed"]) continue;
+            
             NSNumber *lockNum = lockedVals[keyPath]; NSNumber *unlockNum = unlockVals[keyPath];
             if (lockNum && unlockNum) {
                 double currentVal = [lockNum doubleValue] + ([unlockNum doubleValue] - [lockNum doubleValue]) * progress;
@@ -330,7 +325,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.bgView setState:stateName]; [self.floatingView setState:stateName]; [self.fgView setState:stateName];
     }
     
-    [self updateAnimationSpeed]; // 状态切换后强制同步时间流速
+    // 【异步防漏锁定】：防止 UIKit 的内部队列或 BSUICAPackageView 的状态渲染引擎在下一帧再次重置 speed
+    [self updateAnimationSpeed]; 
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateAnimationSpeed];
+    });
 }
 
 - (void)clearCurrentViewsSafely {
@@ -415,7 +414,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self setNeedsLayout];
             self.currentState = @"Init";
             [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
-            [self updateAnimationSpeed]; // 渲染完成后应用时间流速
+            [self updateAnimationSpeed]; 
         });
     });
 }
@@ -626,29 +625,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// 1. 新增递归方法：深入图层树，彻底拔除所有自发闲置动画
-- (void)stripAllAnimations:(CALayer *)layer {
-    if (!layer) return;
-    [layer removeAllAnimations];
-    for (CALayer *sub in layer.sublayers) {
-        [self stripAllAnimations:sub];
-    }
-}
-
-// 2. 替换原有的 updateAnimationSpeed 方法
+// 【绝对零度冻结技术】双层降维打击：同时冻结包裹层与原生CAML根层
 - (void)updateAnimationSpeed {
-    if (!g_wallpaper_animation) {
-        // 第一重绞杀：立即剥离当前存在的动画
-        [self stripAllAnimations:self.bgView.layer];
-        [self stripAllAnimations:self.floatingView.layer];
-        [self stripAllAnimations:self.fgView.layer];
-        
-        // 第二重兜底防漏：应对由于系统 CAML 状态机在下一帧延迟附加的顽固动画
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self stripAllAnimations:self.bgView.layer];
-            [self stripAllAnimations:self.floatingView.layer];
-            [self stripAllAnimations:self.fgView.layer];
-        });
+    float speed = g_wallpaper_animation ? 1.0 : 0.0;
+    NSArray *views = @[self.bgView ?: [NSNull null], self.floatingView ?: [NSNull null], self.fgView ?: [NSNull null]];
+    
+    for (id obj in views) {
+        if (obj == [NSNull null]) continue;
+        UIView *v = (UIView *)obj;
+        // 冻结包裹层
+        v.layer.speed = speed;
+        // 突破壁垒，直接冻结解析出来的 CAML Emitter / Animation 根节点
+        CALayer *camlRoot = [v.layer.sublayers firstObject];
+        if (camlRoot) {
+            camlRoot.speed = speed;
+        }
     }
 }
 
@@ -700,6 +691,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (!lockedVals || !unlockVals) continue;
         
         for (NSString *keyPath in lockedVals) {
+            // 【核心拦截】：如果用户关闭了壁纸动画，全面封杀 CAML 文件企图私自篡改层级 speed 流速的行为
+            if (!g_wallpaper_animation && [keyPath isEqualToString:@"speed"]) continue;
+            
             id lockVal = lockedVals[keyPath]; 
             id unlockVal = unlockVals[keyPath];
             
@@ -770,7 +764,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.fgView setState:realFgState];
     }
     
-    [self updateAnimationSpeed]; // 状态切换后强制同步时间流速
+    // 【异步防漏锁定】：防止 UIKit 的内部队列或 BSUICAPackageView 的状态渲染引擎在下一帧再次重置 speed
+    [self updateAnimationSpeed]; 
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updateAnimationSpeed];
+    });
 }
 
 - (void)clearCurrentViewsSafely {
@@ -874,7 +872,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self setNeedsLayout];
             self.currentState = @"Init";
             [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
-            [self updateAnimationSpeed]; // 渲染完成后应用时间流速
+            [self updateAnimationSpeed]; 
         });
     });
 }
