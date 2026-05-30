@@ -52,6 +52,15 @@ typedef struct {
 @property (nonatomic) long long wallpaperStyle;
 @end
 
+// 🌟 声明苹果底层的零开销克隆视窗
+@interface _UIPortalView : UIView
+@property (nonatomic, weak) UIView *sourceView;
+@property (nonatomic, assign) BOOL hidesSourceView;
+@property (nonatomic, assign) BOOL matchesAlpha;
+@property (nonatomic, assign) BOOL matchesTransform;
+@property (nonatomic, assign) BOOL matchesPosition;
+@end
+
 // ==========================================
 // 全局变量与配置管理
 // ==========================================
@@ -183,8 +192,8 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        // 🌟 修改1：改为 clearColor，解除黑色背景对模糊视线的阻挡
-        self.backgroundColor = [UIColor clearColor]; 
+        // 🌟 必须黑底！不能透明，否则打开软件下拉时还是会看到软件！
+        self.backgroundColor = [UIColor blackColor]; 
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -246,11 +255,10 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
-// 核心插值方法：彻底解决以前只显示过渡动画（假死/渐变）的问题
 - (void)applyProgress:(double)progress parser:(TendiesCAMLParser *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     [CATransaction begin]; 
-    [CATransaction setDisableActions:YES]; // 禁用系统默认补间动画，强行注入计算坐标
+    [CATransaction setDisableActions:YES]; 
     for (NSString *targetId in parser.statesData) {
         CALayer *layer = layerMap[targetId]; if (!layer) continue;
         NSDictionary *states = parser.statesData[targetId];
@@ -293,7 +301,6 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
         [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
     }
     
-    // 继续交由系统接管透明度等遗留效果
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated]; [self.floatingView setState:stateName animated:animated]; [self.fgView setState:stateName animated:animated];
     } else {
@@ -358,9 +365,8 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 @end
 
-
 // ==========================================
-// 完美回滚到你第一版发给我的纯净原始 Hook (保证壁纸绝对显示)
+// 挂载点保留在最底层桌面 (保证原有结构)
 // ==========================================
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
@@ -387,8 +393,7 @@ static void EnsureEngineViewIsMounted() {
     [targetContainer bringSubviewToFront:engineView];
 }
 
-
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
+// 1. 干掉默认墙纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -413,7 +418,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层 (完全恢复你的初版)
+// 2. 干掉模糊层
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -423,42 +428,65 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) {
-        %orig(0.0);
-    } else {
-        %orig;
-    }
+    if (g_enabled) { %orig(0.0); } else { %orig; }
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
-        %orig(YES);
-    } else {
-        %orig;
-    }
+    if (g_enabled) { %orig(YES); } else { %orig; }
 }
 %end
 
-// 3. 暴力拦截 CoverSheet (锁屏) 的所有后台视图滚动刷新事件 (完全恢复你的初版)
+// 3. 🌟 锁屏拦截核心修复：利用 Portal 阻断穿透
 %hook CSCoverSheetViewController
 %new
 - (void)tendies_forceHideNativeWallpaperLayers {
     UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
     if (bgVC && bgVC.view) {
-        bgVC.view.alpha = 0.0;
-        bgVC.view.hidden = YES;
+        // 🚨 绝对不能设为 alpha = 0！一旦设为0，锁屏就变成了透明玻璃，无论怎么改层级都会看到下面的图标和打开的软件！
+        bgVC.view.alpha = 1.0;
+        bgVC.view.hidden = NO;
+        
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
+        
+        if (engineView) {
+            // 🌟 开个零开销传送门，把桌面的壁纸完美复制到锁屏这层来！
+            // 因为锁屏层级天然就高，所以它的投影顺理成章地盖住了所有的图标和正在运行的软件！
+            _UIPortalView *portalView = objc_getAssociatedObject(self, "TendiesPortal");
+            if (!portalView) {
+                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:bgVC.view.bounds];
+                portalView.sourceView = engineView;
+                portalView.hidesSourceView = NO; // 最关键：保留底层的桌面不动
+                portalView.matchesAlpha = YES;
+                portalView.matchesPosition = YES;
+                portalView.matchesTransform = YES;
+                portalView.userInteractionEnabled = NO;
+                objc_setAssociatedObject(self, "TendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [bgVC.view addSubview:portalView];
+            }
+            if (portalView.superview != bgVC.view) {
+                [portalView removeFromSuperview];
+                [bgVC.view addSubview:portalView];
+            }
+            portalView.frame = bgVC.view.bounds;
+            [bgVC.view bringSubviewToFront:portalView];
+        }
+        
+        // 隐藏掉系统原生的其他乱七八糟的锁屏背景
+        for (UIView *sub in bgVC.view.subviews) {
+            if (![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
+                sub.alpha = 0.0;
+                sub.hidden = YES;
+            }
+        }
     }
+    
+    // 清理多余图层
     UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-    if (floatingLayer) {
-        floatingLayer.alpha = 0.0;
-        floatingLayer.hidden = YES;
-    }
+    if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
     if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
         @try {
             UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
-            if (dimmingLayer) {
-                dimmingLayer.alpha = 0.0;
-                dimmingLayer.hidden = YES;
-            }
+            if (dimmingLayer) { dimmingLayer.alpha = 0.0; dimmingLayer.hidden = YES; }
         } @catch (NSException *e) {}
     }
 }
@@ -478,22 +506,11 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-- (void)_updateBackgroundContentView {
-    %orig;
-    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
-}
-- (void)_updateWallpaperEffectView {
-    %orig;
-    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
-}
-- (void)_updateWallpaper {
-    %orig;
-    if (g_enabled) [self tendies_forceHideNativeWallpaperLayers];
-}
-- (void)updatePosterSwitcherSnapshots {
-    if (g_enabled) return;
-    %orig;
-}
+- (void)_updateBackgroundContentView { %orig; if (g_enabled) [self tendies_forceHideNativeWallpaperLayers]; }
+- (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self tendies_forceHideNativeWallpaperLayers]; }
+- (void)_updateWallpaper { %orig; if (g_enabled) [self tendies_forceHideNativeWallpaperLayers]; }
+- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
+
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
@@ -516,15 +533,12 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 动画进度获取及快照拦截 (🌟修改2：加入窗口降维打击逻辑)
+// 动画进度获取及快照拦截 
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
-        if (arg5) {
-            void (^completionBlock)(void) = arg5;
-            completionBlock();
-        }
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
         return; 
     }
     %orig;
@@ -541,42 +555,10 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-            
-            // 🌟 核心科技：根据你的思路，动态操作窗口层级，让图标沉入壁纸海底！
-            @try {
-                // 1. 获取桌面图标所在的窗口
-                id iconController = [%c(SBIconController) sharedInstance];
-                UIView *iconView = [iconController valueForKey:@"contentView"];
-                if (!iconView) iconView = [iconController valueForKey:@"view"];
-                UIWindow *iconWindow = iconView.window;
-                
-                // 2. 获取壁纸所在的窗口
-                UIView *wallpaperContainer = [self valueForKey:@"_wallpaperWindow"];
-                if (!wallpaperContainer) wallpaperContainer = [self valueForKey:@"_wallpaperContainerView"];
-                UIWindow *wallpaperWindow = wallpaperContainer.window;
-                
-                if (iconWindow && wallpaperWindow) {
-                    // 记录系统默认的图标窗口层级（通常是 0 或者 UIWindowLevelNormal）
-                    static CGFloat originalIconWindowLevel = -9999;
-                    if (originalIconWindowLevel == -9999) {
-                        originalIconWindowLevel = iconWindow.windowLevel;
-                    }
-                    
-                    // 下拉锁屏时 (progress 开始变化)
-                    if (progress > 0.05) {
-                        // 瞬间把图标窗口沉入海底！层级降到壁纸窗口之下
-                        iconWindow.windowLevel = wallpaperWindow.windowLevel - 1;
-                    } else {
-                        // 当你完全松手解锁，回到桌面时，恢复图标的正常层级
-                        iconWindow.windowLevel = originalIconWindowLevel;
-                    }
-                }
-            } @catch (NSException *e) {}
         });
     }
 }
 %end
-
 
 // ==========================================
 // 亮灭屏与锁屏状态同步 (未变动)
@@ -619,7 +601,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
-
 
 %ctor {
     reloadPrefs();
