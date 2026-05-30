@@ -11,15 +11,6 @@
 #endif
 
 // ==========================================
-// 🌟 终极编译通行证：告诉编译器这些方法签名绝对存在！
-// ==========================================
-@interface NSObject (TendiesCompilerFix)
-- (void)_tendies_updatePortalAlphaWithProgress:(double)progress;
-- (UIView *)homescreenWallpaperView;
-- (UIView *)lockscreenWallpaperView;
-@end
-
-// ==========================================
 // 结构体与系统头文件声明
 // ==========================================
 typedef struct {
@@ -29,6 +20,10 @@ typedef struct {
 } PBUIWallpaperTransitionState;
 
 @interface PBUIWallpaperViewController : UIViewController
+@property (retain, nonatomic) UIView *homescreenWallpaperView;
+@property (retain, nonatomic) UIView *lockscreenWallpaperView;
+- (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state;
+- (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -50,10 +45,6 @@ typedef struct {
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
-@end
-
-@interface SBMainDisplaySceneManager : NSObject
-+ (id)sharedInstance;
 @end
 
 @interface SBWallpaperEffectView : UIView
@@ -409,12 +400,12 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        if ([(id)self respondsToSelector:@selector(homescreenWallpaperView)]) {
-            UIView *homeView = [(id)self homescreenWallpaperView];
+        if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
+            UIView *homeView = [self homescreenWallpaperView];
             if (homeView) homeView.alpha = 0.0;
         }
-        if ([(id)self respondsToSelector:@selector(lockscreenWallpaperView)]) {
-            UIView *lockView = [(id)self lockscreenWallpaperView];
+        if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
+            UIView *lockView = [self lockscreenWallpaperView];
             if (lockView) lockView.alpha = 0.0;
         }
     }
@@ -456,7 +447,7 @@ static void EnsureEngineViewIsMounted() {
     
     if (g_enabled) {
         // 获取原生的模糊层背景 (第一层)
-        UIViewController *bgVC = [(id)self valueForKey:@"_backgroundContentViewController"];
+        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
@@ -495,13 +486,13 @@ static void EnsureEngineViewIsMounted() {
                 [self.view insertSubview:portalView aboveSubview:bgVC.view];
             }
             @try {
-                UIView *dimmingView = [(id)self valueForKey:@"_dimmingView"];
+                UIView *dimmingView = [self valueForKey:@"_dimmingView"];
                 if (dimmingView && dimmingView.superview == self.view) {
                     [self.view insertSubview:portalView aboveSubview:dimmingView];
                     dimmingView.alpha = 0.0;
                     dimmingView.hidden = YES;
                 }
-                UIView *tintingView = [(id)self valueForKey:@"_tintingView"];
+                UIView *tintingView = [self valueForKey:@"_tintingView"];
                 if (tintingView && tintingView.superview == self.view) {
                     [self.view insertSubview:portalView aboveSubview:tintingView];
                     tintingView.alpha = 0.0;
@@ -520,7 +511,7 @@ static void EnsureEngineViewIsMounted() {
             }
         }
         
-        UIView *floatingLayer = [(id)self valueForKey:@"_floatingLayerView"];
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
         if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
     }
 }
@@ -528,13 +519,13 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidLayoutSubviews {
     %orig;
     if (g_enabled) {
-        [(id)self viewWillLayoutSubviews];
+        [self viewWillLayoutSubviews];
     }
 }
 
-- (void)_updateBackgroundContentView { %orig; if (g_enabled) [(id)self viewWillLayoutSubviews]; }
-- (void)_updateWallpaperEffectView { %orig; if (g_enabled) [(id)self viewWillLayoutSubviews]; }
-- (void)_updateWallpaper { %orig; if (g_enabled) [(id)self viewWillLayoutSubviews]; }
+- (void)_updateBackgroundContentView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
 
 - (void)setInScreenOffMode:(BOOL)mode {
@@ -561,7 +552,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来与应用内精准判断
+// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -585,35 +576,16 @@ static void EnsureEngineViewIsMounted() {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
             
+            // 🚨 修正后准确的渐变公式（主线程安全）：
+            // progress = 1.0 (桌面解锁), progress = 0.0 (锁屏完全覆盖)
+            // 下滑时，1.0 -> 0.0。
+            // 当到达一半（0.5）时，Alpha 慢慢由 0 变 1，到底时全实体显示。
             if (g_portalView) {
-                double p = progress;
                 double alpha = 0.0;
                 
-                // 🌟 核心：精准判断当前是否在应用内
-                BOOL isAppOpen = NO;
-                @try {
-                    id sceneManager = [%c(SBMainDisplaySceneManager) sharedInstance];
-                    if (sceneManager) {
-                        id layoutState = [sceneManager valueForKey:@"layoutState"];
-                        // unlockedEnvironmentMode: 1 是桌面, 2 是应用内, 3 是多任务后台
-                        long long mode = [[layoutState valueForKey:@"unlockedEnvironmentMode"] longLongValue];
-                        if (mode != 1) { 
-                            isAppOpen = YES;
-                        }
-                    }
-                } @catch(NSException *e) {
-                    // 异常兜底，防止意外
-                }
-                
-                if (isAppOpen) {
-                    // 🚀 在应用内：无视 50% 限制，直接跟随手势平滑渐变
-                    // progress 从 1.0 降到 0.0 时，alpha 从 0.0 升到 1.0
-                    alpha = 1.0 - p;
-                } else {
-                    // 🏠 在桌面：保留 50% 限制，让原生模糊先挡住桌面图标
-                    if (p <= 0.5) {
-                        alpha = (0.5 - p) * 2.0; 
-                    }
+                if (progress <= 0.5) {
+                    // progress从0.5降到0.0时，(0.5 - progress)*2 将从0.0升到1.0
+                    alpha = (0.5 - progress) * 2.0; 
                 }
                 
                 alpha = MAX(0.0, MIN(1.0, alpha));
@@ -671,88 +643,6 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-
-// ==========================================
-// 🌟 锁屏下拉滑动进度拦截 (兼容 iOS 16 & 17)
-// ==========================================
-%hook SBCoverSheetSlidingViewController
-
-// 适配 iOS 16
-- (struct CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
-    struct CGRect rect = %orig;
-    if (g_enabled) {
-        [(id)self _tendies_updatePortalAlphaWithProgress:progress];
-    }
-    return rect;
-}
-
-// 适配 iOS 17
-- (struct CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
-    struct CGRect rect = %orig;
-    if (g_enabled) {
-        [(id)self _tendies_updatePortalAlphaWithProgress:progress];
-    }
-    return rect;
-}
-
-%new
-- (void)_tendies_updatePortalAlphaWithProgress:(double)progress {
-    // 🚨 线程安全：强制派发到 Main Queue 同步视觉进度
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_portalView) {
-            double p = progress;
-            double alpha = 0.0;
-            
-            // 🌟 核心：精准判断当前是否在应用内
-            BOOL isAppOpen = NO;
-            @try {
-                // 方法1：通过 SpringBoard 检查前台是否有活跃应用
-                id sb = [%c(SpringBoard) sharedApplication];
-                SEL sel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
-                if ([sb respondsToSelector:sel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    id frontApp = [sb performSelector:sel];
-                    #pragma clang diagnostic pop
-                    if (frontApp != nil) {
-                        isAppOpen = YES;
-                    }
-                }
-                
-                // 方法2 (绝对纠错)：通过桌面控制器检查是否真正在桌面
-                id iconController = [%c(SBIconController) sharedInstance];
-                if (iconController && [iconController respondsToSelector:@selector(isHomeScreenVisible)]) {
-                    BOOL isHome = [[iconController valueForKey:@"isHomeScreenVisible"] boolValue];
-                    if (isHome) {
-                        isAppOpen = NO; 
-                    }
-                }
-            } @catch(NSException *e) {
-                // 异常兜底，防止任何意外崩溃
-            }
-            
-            if (isAppOpen) {
-                // 🚀 在应用内：无视 50% 限制，直接平滑线性渐变出来
-                // (progress 从 1.0 降到 0.0 时，alpha 从 0.0 升到 1.0)
-                alpha = 1.0 - p;
-            } else {
-                // 🏠 在桌面：保留 50% 限制，让原生模糊先挡住桌面图标
-                if (p <= 0.5) {
-                    alpha = (0.5 - p) * 2.0; 
-                }
-            }
-            
-            alpha = MAX(0.0, MIN(1.0, alpha));
-            
-            // 隐式事务关闭，防止动画撕裂
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            g_portalView.alpha = alpha;
-            [CATransaction commit];
-        }
-    });
-}
-%end
 
 %ctor {
     reloadPrefs();
