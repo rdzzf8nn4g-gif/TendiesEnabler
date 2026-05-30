@@ -1,4 +1,4 @@
-#import "TendiesPrefsRootListController.h"
+#import "ZonePrefsRootListController.h"
 #import <Preferences/PSSpecifier.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <sys/stat.h>
@@ -18,9 +18,8 @@
 #define jbroot(path) path
 #endif
 
-// 黄金共享偏好路径适配
-static NSString * GetTendiesStorageDir() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesenabler.media";
+static NSString * GetZoneStorageDir() {
+    NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zone.media";
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -32,7 +31,7 @@ static NSString * GetTendiesStorageDir() {
 }
 
 static NSString * GetPrefsPlistPath() {
-    NSString *base = @"/var/mobile/Library/Preferences/com.yourname.tendiesprefs.plist";
+    NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zoneprefs.plist";
 #if __has_include(<roothide.h>)
     return jbroot(base);
 #else
@@ -43,7 +42,36 @@ static NSString * GetPrefsPlistPath() {
 #endif
 }
 
-@implementation TendiesPrefsRootListController
+@implementation ZonePrefsRootListController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    
+    // 构建顶部的高清图标与标题 Header
+    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 110)];
+    headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    
+    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(30, 30, 60, 60)];
+    NSBundle *bundle = [NSBundle bundleForClass:[self class]];
+    UIImage *icon = [UIImage imageNamed:@"icon" inBundle:bundle compatibleWithTraitCollection:nil];
+    if (!icon) icon = [UIImage imageNamed:@"icon@3x" inBundle:bundle compatibleWithTraitCollection:nil];
+    iconView.image = icon;
+    iconView.layer.cornerRadius = 14;
+    iconView.layer.masksToBounds = YES;
+    [headerView addSubview:iconView];
+    
+    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(105, 30, headerView.frame.size.width - 120, 60)];
+    titleLabel.text = @"Zone";
+    titleLabel.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
+    titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [headerView addSubview:titleLabel];
+    
+    // 兼容部分设备的 _table / table 属性调用
+    if ([self respondsToSelector:@selector(table)]) {
+        UITableView *tableView = [self performSelector:@selector(table)];
+        [tableView setTableHeaderView:headerView];
+    }
+}
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
@@ -52,7 +80,7 @@ static NSString * GetPrefsPlistPath() {
     return _specifiers;
 }
 
-- (void)importTendies:(PSSpecifier *)spec {
+- (void)importZone:(PSSpecifier *)spec {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (@available(iOS 14.0, *)) {
             UTType *itemType = [UTType typeWithIdentifier:@"public.item"];
@@ -91,7 +119,7 @@ static NSString * GetPrefsPlistPath() {
     NSURL *sourceURL = urls.firstObject;
     if (!sourceURL) return;
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在无缝注入...\n\n" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
     spinner.center = CGPointMake(135.0, 65.5);
     [spinner startAnimating];
@@ -107,8 +135,8 @@ static NSString * GetPrefsPlistPath() {
             BOOL isAccessing = [sourceURL startAccessingSecurityScopedResource];
             NSFileManager *fm = [NSFileManager defaultManager];
             
-            NSString *targetDir = GetTendiesStorageDir();
-            NSString *unzipDir = [targetDir stringByAppendingPathComponent:@"ActiveTendies"];
+            NSString *targetDir = GetZoneStorageDir();
+            NSString *unzipDir = [targetDir stringByAppendingPathComponent:@"ActiveZone"];
             
             if (![fm fileExistsAtPath:targetDir]) {
                 [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
@@ -154,25 +182,24 @@ static NSString * GetPrefsPlistPath() {
             if (processSuccess) {
                 [self forceOwnershipToMobile:unzipDir];
                 
-                // 核心穿梭同步：写入全局 Preferences 中央托管，彻底打破沙盒壁垒
-                CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
+                CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
                 CFPreferencesSetAppValue(CFSTR("Enabled"), kCFBooleanTrue, appID);
-                CFPreferencesSetAppValue(CFSTR("TendiesPath"), (__bridge CFStringRef)unzipDir, appID);
+                CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)unzipDir, appID);
                 CFPreferencesAppSynchronize(appID);
                 
                 NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
                 prefs[@"Enabled"] = @YES;
-                prefs[@"TendiesPath"] = unzipDir;
+                prefs[@"ZonePath"] = unzipDir;
                 
                 NSString *plistPath = GetPrefsPlistPath();
                 [prefs writeToFile:plistPath atomically:YES];
                 [self forceOwnershipToMobile:plistPath]; 
                 
-                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"挂载成功 🚀" message:@"资产已导入系统公共共享空间，无缝击穿沙盒！" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功" message:nil preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -180,7 +207,7 @@ static NSString * GetPrefsPlistPath() {
             } else {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"解压失败" message:@"无效的壁纸文件，或设备缺少 unzip 环境。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"无效的壁纸文件。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -191,14 +218,14 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (void)openFilzaPath:(PSSpecifier *)spec {
-    NSString *targetDir = GetTendiesStorageDir();
+    NSString *targetDir = GetZoneStorageDir();
     NSString *filzaURLString = [NSString stringWithFormat:@"filza://%@", targetDir];
     NSURL *filzaURL = [NSURL URLWithString:[filzaURLString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
     
     if ([[UIApplication sharedApplication] canOpenURL:filzaURL]) {
         [[UIApplication sharedApplication] openURL:filzaURL options:@{} completionHandler:nil];
     } else {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"请先安装 Filza。" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"设备未安装 Filza。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
     }
@@ -207,7 +234,7 @@ static NSString * GetPrefsPlistPath() {
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
     
-    CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
+    CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     if ([specifier.identifier isEqualToString:@"Enabled"]) {
         CFPreferencesSetAppValue(CFSTR("Enabled"), (__bridge CFPropertyListRef)value, appID);
         CFPreferencesAppSynchronize(appID);
@@ -218,7 +245,7 @@ static NSString * GetPrefsPlistPath() {
         [prefs writeToFile:plistPath atomically:YES];
         [self forceOwnershipToMobile:plistPath];
         
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.tendiesprefs/ReloadPrefs"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     }
 }
 @end
