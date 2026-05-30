@@ -80,7 +80,7 @@ static NSString * GetPrefsPlistPath() {
     [super viewDidLoad];
     
     // =======================================
-    // 极致完美的排版布局 (修改为：图左名右居中，文字左对齐块居中，缩小下巴留白)
+    // 极致完美的排版布局 (图左名右居中，文字左对齐块居中，缩小下巴留白)
     // =======================================
     // 将高度从220缩小到160，从而让下面的 Cell 整体上移
     UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
@@ -97,11 +97,21 @@ static NSString * GetPrefsPlistPath() {
     [iconView.widthAnchor constraintEqualToConstant:60].active = YES;
     [iconView.heightAnchor constraintEqualToConstant:60].active = YES;
     
-    // 2. 标题
+    // 2. 标题 (彩色涂鸦效果)
     UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = @"Zone";
     titleLabel.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
     titleLabel.textAlignment = NSTextAlignmentLeft; // 配合横向Stack改为左对齐
+    
+    NSMutableAttributedString *coloredTitle = [[NSMutableAttributedString alloc] initWithString:@"Zone"];
+    // 浅蓝
+    [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1.0] range:NSMakeRange(0, 1)];
+    // 紫色
+    [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.70 green:0.40 blue:0.90 alpha:1.0] range:NSMakeRange(1, 1)];
+    // 浅绿
+    [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.50 green:0.90 blue:0.60 alpha:1.0] range:NSMakeRange(2, 1)];
+    // 浅粉
+    [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:1.00 green:0.60 blue:0.80 alpha:1.0] range:NSMakeRange(3, 1)];
+    titleLabel.attributedText = coloredTitle;
     
     // 2.5 将图标和标题打包成一个水平的 StackView（图左、字右）
     UIStackView *topHorizontalStack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel]];
@@ -222,9 +232,12 @@ static NSString * GetPrefsPlistPath() {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
-    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-    spinner.center = CGPointMake(135.0, 65.5);
+    // 添加几个空格留出右侧空间给菊花
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入...      " message:nil preferredStyle:UIAlertControllerStyleAlert];
+    // 改为 Medium 大小，使其与单行文字更加协调匹配
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    // X=205.0靠右，Y=31.0正好与系统 UIAlertController 的单行标题处于同一高度
+    spinner.center = CGPointMake(205.0, 31.0);
     [spinner startAnimating];
     [loadingAlert.view addSubview:spinner];
     
