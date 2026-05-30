@@ -183,7 +183,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        // 🌟 修改：改为 clearColor，彻底放开原生锁定界面的透明与模糊！
+        // 🌟 修改1：改为 clearColor，解除黑色背景对模糊视线的阻挡
         self.backgroundColor = [UIColor clearColor]; 
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
@@ -438,7 +438,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 3. 暴力拦截 CoverSheet (锁屏) 的所有后台视图滚动刷新事件 
+// 3. 暴力拦截 CoverSheet (锁屏) 的所有后台视图滚动刷新事件 (完全恢复你的初版)
 %hook CSCoverSheetViewController
 %new
 - (void)tendies_forceHideNativeWallpaperLayers {
@@ -468,31 +468,6 @@ static void EnsureEngineViewIsMounted() {
     EnsureEngineViewIsMounted();
     if (g_enabled) {
         [self tendies_forceHideNativeWallpaperLayers];
-        
-        // 🌟 核心科技：图层分离 (Layer Splitting)
-        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-        TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
-        
-        if (engineView) {
-            // 背景层 (bgView) 留在引擎里做桌面底色，绝不乱动。
-            // 悬浮层 (floatingView) 和 前景层 (fgView) 提到锁屏层，盖住图标！
-            if (engineView.floatingView && engineView.floatingView.superview != self.view) {
-                [engineView.floatingView removeFromSuperview];
-                [self.view insertSubview:engineView.floatingView atIndex:0]; // 放在锁屏最底层，但依然在图标之上
-            }
-            if (engineView.fgView && engineView.fgView.superview != self.view) {
-                [engineView.fgView removeFromSuperview];
-                if (engineView.floatingView && engineView.floatingView.superview == self.view) {
-                    [self.view insertSubview:engineView.fgView aboveSubview:engineView.floatingView];
-                } else {
-                    [self.view insertSubview:engineView.fgView atIndex:0];
-                }
-            }
-            
-            // 实时保持坐标同步
-            if (engineView.floatingView) engineView.floatingView.frame = self.view.bounds;
-            if (engineView.fgView) engineView.fgView.frame = self.view.bounds;
-        }
     }
 }
 
@@ -541,7 +516,7 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // ==========================================
-// 动画进度获取及快照拦截 (完全恢复你的初版，仅仅通过通知抛给 Parser 运算)
+// 动画进度获取及快照拦截 (🌟修改2：加入窗口降维打击逻辑)
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -554,16 +529,49 @@ static void EnsureEngineViewIsMounted() {
     }
     %orig;
 }
+
 - (void)updatePosterSwitcherSnapshots {
     if (g_enabled) return;
     %orig;
 }
+
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+            
+            // 🌟 核心科技：根据你的思路，动态操作窗口层级，让图标沉入壁纸海底！
+            @try {
+                // 1. 获取桌面图标所在的窗口
+                id iconController = [%c(SBIconController) sharedInstance];
+                UIView *iconView = [iconController valueForKey:@"contentView"];
+                if (!iconView) iconView = [iconController valueForKey:@"view"];
+                UIWindow *iconWindow = iconView.window;
+                
+                // 2. 获取壁纸所在的窗口
+                UIView *wallpaperContainer = [self valueForKey:@"_wallpaperWindow"];
+                if (!wallpaperContainer) wallpaperContainer = [self valueForKey:@"_wallpaperContainerView"];
+                UIWindow *wallpaperWindow = wallpaperContainer.window;
+                
+                if (iconWindow && wallpaperWindow) {
+                    // 记录系统默认的图标窗口层级（通常是 0 或者 UIWindowLevelNormal）
+                    static CGFloat originalIconWindowLevel = -9999;
+                    if (originalIconWindowLevel == -9999) {
+                        originalIconWindowLevel = iconWindow.windowLevel;
+                    }
+                    
+                    // 下拉锁屏时 (progress 开始变化)
+                    if (progress > 0.05) {
+                        // 瞬间把图标窗口沉入海底！层级降到壁纸窗口之下
+                        iconWindow.windowLevel = wallpaperWindow.windowLevel - 1;
+                    } else {
+                        // 当你完全松手解锁，回到桌面时，恢复图标的正常层级
+                        iconWindow.windowLevel = originalIconWindowLevel;
+                    }
+                }
+            } @catch (NSException *e) {}
         });
     }
 }
