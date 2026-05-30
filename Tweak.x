@@ -404,12 +404,12 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
-            UIView *homeView = [self homescreenWallpaperView];
+        if ([(id)self respondsToSelector:@selector(homescreenWallpaperView)]) {
+            UIView *homeView = [(id)self homescreenWallpaperView];
             if (homeView) homeView.alpha = 0.0;
         }
-        if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
-            UIView *lockView = [self lockscreenWallpaperView];
+        if ([(id)self respondsToSelector:@selector(lockscreenWallpaperView)]) {
+            UIView *lockView = [(id)self lockscreenWallpaperView];
             if (lockView) lockView.alpha = 0.0;
         }
     }
@@ -451,7 +451,7 @@ static void EnsureEngineViewIsMounted() {
     
     if (g_enabled) {
         // 获取原生的模糊层背景 (第一层)
-        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        UIViewController *bgVC = [(id)self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
@@ -490,13 +490,13 @@ static void EnsureEngineViewIsMounted() {
                 [self.view insertSubview:portalView aboveSubview:bgVC.view];
             }
             @try {
-                UIView *dimmingView = [self valueForKey:@"_dimmingView"];
+                UIView *dimmingView = [(id)self valueForKey:@"_dimmingView"];
                 if (dimmingView && dimmingView.superview == self.view) {
                     [self.view insertSubview:portalView aboveSubview:dimmingView];
                     dimmingView.alpha = 0.0;
                     dimmingView.hidden = YES;
                 }
-                UIView *tintingView = [self valueForKey:@"_tintingView"];
+                UIView *tintingView = [(id)self valueForKey:@"_tintingView"];
                 if (tintingView && tintingView.superview == self.view) {
                     [self.view insertSubview:portalView aboveSubview:tintingView];
                     tintingView.alpha = 0.0;
@@ -515,7 +515,7 @@ static void EnsureEngineViewIsMounted() {
             }
         }
         
-        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        UIView *floatingLayer = [(id)self valueForKey:@"_floatingLayerView"];
         if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
     }
 }
@@ -523,13 +523,13 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidLayoutSubviews {
     %orig;
     if (g_enabled) {
-        [self viewWillLayoutSubviews];
+        [(id)self viewWillLayoutSubviews];
     }
 }
 
-- (void)_updateBackgroundContentView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)_updateBackgroundContentView { %orig; if (g_enabled) [(id)self viewWillLayoutSubviews]; }
+- (void)_updateWallpaperEffectView { %orig; if (g_enabled) [(id)self viewWillLayoutSubviews]; }
+- (void)_updateWallpaper { %orig; if (g_enabled) [(id)self viewWillLayoutSubviews]; }
 - (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
 
 - (void)setInScreenOffMode:(BOOL)mode {
@@ -556,7 +556,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来
+// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来与应用内精准判断
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
@@ -584,32 +584,20 @@ static void EnsureEngineViewIsMounted() {
                 double p = progress;
                 double alpha = 0.0;
                 
-                // 🌟 核心：精准判断当前是否在应用内 (最强双保险方案)
+                // 🌟 核心：精准判断当前是否在应用内
                 BOOL isAppOpen = NO;
                 @try {
-                    // 方法1：通过 SpringBoard 检查前台是否有活跃应用
-                    id sb = [%c(SpringBoard) sharedApplication];
-                    SEL sel = NSSelectorFromString(@"_accessibilityFrontMostApplication");
-                    if ([sb respondsToSelector:sel]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id frontApp = [sb performSelector:sel];
-                        #pragma clang diagnostic pop
-                        if (frontApp != nil) {
+                    id sceneManager = [%c(SBMainDisplaySceneManager) sharedInstance];
+                    if (sceneManager) {
+                        id layoutState = [sceneManager valueForKey:@"layoutState"];
+                        // unlockedEnvironmentMode: 1 是桌面, 2 是应用内, 3 是多任务后台
+                        long long mode = [[layoutState valueForKey:@"unlockedEnvironmentMode"] longLongValue];
+                        if (mode != 1) { 
                             isAppOpen = YES;
                         }
                     }
-                    
-                    // 方法2 (绝对纠错)：通过桌面控制器检查是否真正在桌面
-                    id iconController = [%c(SBIconController) sharedInstance];
-                    if (iconController && [iconController respondsToSelector:@selector(isHomeScreenVisible)]) {
-                        BOOL isHome = [[iconController valueForKey:@"isHomeScreenVisible"] boolValue];
-                        if (isHome) {
-                            isAppOpen = NO; 
-                        }
-                    }
                 } @catch(NSException *e) {
-                    // 异常兜底，防止意外崩溃
+                    // 异常兜底，防止意外
                 }
                 
                 if (isAppOpen) {
@@ -688,7 +676,7 @@ static void EnsureEngineViewIsMounted() {
 - (struct CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
     struct CGRect rect = %orig;
     if (g_enabled) {
-        [self _tendies_updatePortalAlphaWithProgress:progress];
+        [(id)self _tendies_updatePortalAlphaWithProgress:progress];
     }
     return rect;
 }
@@ -697,7 +685,7 @@ static void EnsureEngineViewIsMounted() {
 - (struct CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
     struct CGRect rect = %orig;
     if (g_enabled) {
-        [self _tendies_updatePortalAlphaWithProgress:progress];
+        [(id)self _tendies_updatePortalAlphaWithProgress:progress];
     }
     return rect;
 }
@@ -710,7 +698,7 @@ static void EnsureEngineViewIsMounted() {
             double p = progress;
             double alpha = 0.0;
             
-            // 🌟 核心：精准判断当前是否在应用内 (最强双保险方案)
+            // 🌟 核心：精准判断当前是否在应用内
             BOOL isAppOpen = NO;
             @try {
                 // 方法1：通过 SpringBoard 检查前台是否有活跃应用
