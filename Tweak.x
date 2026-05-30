@@ -47,10 +47,10 @@ typedef struct {
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
-// 🌟 新增：锁屏滑动容器声明，用于拦截下滑进度
+// 🌟 锁屏滑动容器声明，用于拦截下滑进度
 @interface SBCoverSheetSlidingViewController : UIViewController
 - (UIViewController *)contentViewController;
-// 提前声明注入的方法，避免编译警告或报错
+// 提前向编译器声明我们动态注入的方法，解决编译报错
 - (void)_tendies_updatePortalAlphaWithProgress:(double)progress;
 @end
 
@@ -86,6 +86,9 @@ static BOOL g_enabled = NO;
 static NSString *g_tendiesPath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
+
+// 🌟 全局极速指针：跨层级无损追踪传送门，用于主线程进度同步！
+static __weak _UIPortalView *g_portalView = nil;
 
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.yourname.tendiesprefs");
@@ -450,10 +453,21 @@ static void EnsureEngineViewIsMounted() {
     EnsureEngineViewIsMounted(); // 1. 确保引擎老老实实呆在桌面底层
     
     if (g_enabled) {
+        // ===============================================
+        // 🚨 终极灭除灰层：干掉锁屏所有暗色的遮罩和色调层
+        // ===============================================
+        @try {
+            UIView *tintingView = [self valueForKey:@"_tintingView"];
+            if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
+            
+            UIView *dimmingView = [self respondsToSelector:@selector(_updateDimmingLayer)] ? [self valueForKey:@"_dimmingView"] : nil;
+            if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+        } @catch (NSException *e) {}
+
         // 2. 获取原生的模糊层背景
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
-            // 🚨 绝对保持模糊层可见！
+            // 🚨 绝对保持模糊层可见！这样滑下来才有初始模糊
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
         }
@@ -469,14 +483,17 @@ static void EnsureEngineViewIsMounted() {
                 portalView.sourceView = engineView; // 镜像源：桌面的真实引擎
                 portalView.hidesSourceView = NO;    // 核心：绝对不隐藏桌面引擎，保证桌面正常！
                 
-                // 🌟 改为 NO，以便下方由 SBCoverSheetSlidingViewController 滑动进度独立控制！
+                // 取消自动匹配 Alpha，交由下方 SlidingViewController 手动控进度！
                 portalView.matchesAlpha = NO;
-                portalView.alpha = 1.0;             // 初始默认给 1.0（全显），滑动时会被自动接管
+                portalView.alpha = 0.0;             // 初始隐藏，等划出一定进度再显形
                 
                 portalView.matchesPosition = YES;
                 portalView.matchesTransform = YES;
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                
+                // 🌟 将其赋给全局指针，供动画队列调用！
+                g_portalView = portalView;
             }
 
             if (portalView.superview != self.view) {
@@ -503,12 +520,6 @@ static void EnsureEngineViewIsMounted() {
         
         UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
         if (floatingLayer) { floatingLayer.alpha = 0.0; floatingLayer.hidden = YES; }
-        if ([self respondsToSelector:@selector(_updateDimmingLayer)]) {
-            @try {
-                UIView *dimmingLayer = [self valueForKey:@"_dimmingView"];
-                if (dimmingLayer) { dimmingLayer.alpha = 0.0; dimmingLayer.hidden = YES; }
-            } @catch (NSException *e) {}
-        }
     }
 }
 
@@ -646,21 +657,24 @@ static void EnsureEngineViewIsMounted() {
 
 %new
 - (void)_tendies_updatePortalAlphaWithProgress:(double)progress {
-    // 🔥修复崩溃的核心：动画系统的 Tick 存在于子线程(inProcessAnimationManager)
-    // 强制派发到主线程进行 UI 修改，避免 CA_ASSERT_MAIN_THREAD_TRANSACTIONS 崩溃
+    // 🚨 线程安全：彻底杜绝 CoreAnimation 异步跨线程修改 UI 触发安全模式崩溃！
+    // 强制派发到 Main Queue 同步视觉进度，使用全局弱指针获取传送门
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *contentVC = [self contentViewController];
-        if ([contentVC isKindOfClass:NSClassFromString(@"CSCoverSheetViewController")]) {
-            _UIPortalView *portalView = objc_getAssociatedObject(contentVC, "CoverSheetTendiesPortal");
-            if (portalView) {
-                double alpha = 0.0;
-                // 超过屏幕 50% (progress > 0.5) 时开始浮现实体：
-                if (progress > 0.5) {
-                    alpha = (progress - 0.5) * 2.0; 
-                }
-                alpha = MAX(0.0, MIN(1.0, alpha)); 
-                portalView.alpha = alpha;
+        if (g_portalView) {
+            double p = progress;
+            double alpha = 0.0;
+            // 控制逻辑：30% 的拉下进度时，只有模糊。从 30% 到 50%，传送门极速变清晰并取代模糊层
+            // 到达一半屏幕 (50%) 时，实体壁纸完美显现实体效果。
+            if (p > 0.3) {
+                alpha = (p - 0.3) * 5.0; 
             }
+            alpha = MAX(0.0, MIN(1.0, alpha));
+            
+            // 为了防止 CA 事务撕裂，使用隐式事务关闭包装
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            g_portalView.alpha = alpha;
+            [CATransaction commit];
         }
     });
 }
