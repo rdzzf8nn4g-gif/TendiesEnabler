@@ -81,7 +81,6 @@ static void reloadPrefs() {
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
         g_zonePath = [(__bridge NSString *)pathRef copy];
     } else {
-        // 如果没有选中壁纸则置为空，不默认加载，等待用户在设置中点击
         g_zonePath = nil; 
     }
 }
@@ -102,11 +101,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, copy) NSString *currentParsingTargetId;
 @property (nonatomic, copy) NSString *currentParsingKeyPath;
 
-// --- 根图层环境数据 (用于修复背景丢失和反转) ---
+// --- 根图层环境数据保护 ---
 @property (nonatomic, assign) BOOL rootParsed;
 @property (nonatomic, strong) UIColor *rootBackgroundColor;
-@property (nonatomic, assign) CGSize rootSize;
-@property (nonatomic, assign) BOOL isGeometryFlipped;
 
 - (void)parseFile:(NSString *)path;
 - (NSString *)resolveRealStateNameFor:(NSString *)logicalState;
@@ -144,17 +141,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
     
+    // 萃取并拯救被覆盖的原生背景色
     if ([elementName isEqualToString:@"CALayer"]) {
         if (!self.rootParsed) {
             self.rootParsed = YES;
             if (attributeDict[@"backgroundColor"]) {
                 self.rootBackgroundColor = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
             }
-            if (attributeDict[@"bounds"]) {
-                NSArray *comps = [attributeDict[@"bounds"] componentsSeparatedByString:@" "];
-                if (comps.count == 4) self.rootSize = CGSizeMake([comps[2] doubleValue], [comps[3] doubleValue]);
-            }
-            if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
         }
         
         NSString *layerId = attributeDict[@"id"];
@@ -178,6 +171,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             if (valStr) {
                 id finalValue = nil;
+                // 修复：拯救由于 CGPoint 类型强转 double 导致的严重坐标断层崩溃
                 if ([typeStr isEqualToString:@"CGPoint"]) {
                     NSArray *comps = [valStr componentsSeparatedByString:@" "];
                     if (comps.count == 2) {
@@ -204,6 +198,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
 }
 
+// 修复：严谨的防冲突状态映射树
 - (NSString *)resolveRealStateNameFor:(NSString *)logicalState {
     if ([self.availableStates containsObject:logicalState]) return logicalState;
     
@@ -213,10 +208,22 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     NSMutableArray *candidates = [NSMutableArray array];
     for (NSString *state in self.availableStates) {
-        if ([state localizedCaseInsensitiveContainsString:logicalState] || [state localizedCaseInsensitiveContainsString:keyword]) {
+        NSString *lowerState = [state lowercaseString];
+        NSString *lowerLogic = [logicalState lowercaseString];
+        NSString *lowerKey = [keyword lowercaseString];
+        
+        // 【核心修复】防止寻找 "Lock" 时错误匹配到 "Unlock" 导致锁屏显示成桌面！
+        if ([lowerLogic isEqualToString:@"locked"]) {
+            if ([lowerState containsString:@"unlock"] || [lowerState containsString:@"home"]) {
+                continue; 
+            }
+        }
+        
+        if ([lowerState containsString:lowerLogic] || [lowerState containsString:lowerKey]) {
             [candidates addObject:state];
         }
     }
+    
     if (candidates.count == 0) return logicalState;
     
     for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"] && [s containsString:@"Light"]) return s; }
@@ -246,6 +253,7 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 @property (nonatomic, strong) NSString *currentState;
 
 @property (nonatomic, assign) NSInteger reloadGeneration; 
+@property (nonatomic, assign) CGSize logicalScreenSize; // 【核心新增】用于记录 iPad 等巨型壁纸的真实逻辑视口
 
 @property (nonatomic, strong) ZoneCAMLParser *bgParser;
 @property (nonatomic, strong) ZoneCAMLParser *floatParser;
@@ -267,6 +275,7 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         self.isUnlocking = NO;
         self.currentState = @"Init";
         self.reloadGeneration = 0;
+        self.logicalScreenSize = CGSizeZero;
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
@@ -288,6 +297,15 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     [super layoutSubviews];
     CGRect bounds = self.bounds;
     
+    // 【核心修复】读取壁纸的真实视口 (Fallback为手机屏幕)
+    CGSize targetSize = self.logicalScreenSize;
+    if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
+    
+    // 计算 Aspect Fill 缩放比例 (以视口为基准，而不是巨幅画布)
+    CGFloat scaleX = bounds.size.width / targetSize.width;
+    CGFloat scaleY = bounds.size.height / targetSize.height;
+    CGFloat scale = MAX(scaleX, scaleY);
+    
     BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
     ZoneCAMLParser *parsers[] = {self.bgParser, self.floatParser, self.fgParser};
     
@@ -298,7 +316,7 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         
         v.frame = bounds;
         
-        // 保留成功的修复：提取并渲染原生背景色，防止黑色太空变成纯透明
+        // 恢复原生背景色
         if (p && p.rootBackgroundColor) {
             v.backgroundColor = p.rootBackgroundColor;
         } else {
@@ -307,12 +325,11 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
-            // 保留成功的修复：解决翻转问题
-            v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
-            
-            // 彻底移除破坏原生的强行缩放逻辑，采用最安全的“绝对居中偏移”！
-            // 这样 BlackHole 依然保持巨幅画布但中心精准对准手机中间，正常壁纸依然跟随原生逻辑缩放。
+            // 【终极排版修复】: 
+            // 不盲目全局翻转坐标系保护原生壁纸。
+            // 强制绝对居中点定位 + 完美比例缩放，使得 BlackHole 这种巨屏壁纸能在手机居中满屏显示。
             rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
         }
     }
 }
@@ -369,6 +386,9 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
             id unlockVal = unlockVals[keyPath];
             
             if (lockVal && unlockVal) {
+                // 【核心修复】：精准“绞杀”该属性上的系统自带缓冲动画，强制让图层跟随手势互动！
+                [layer removeAnimationForKey:keyPath];
+                
                 @try {
                     if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
                         double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
@@ -435,7 +455,6 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     }
 }
 
-// 内存清理方法独立封装，必须在主线程被调用
 - (void)clearCurrentViewsSafely {
     [self.bgView removeFromSuperview]; self.bgView = nil;
     [self.floatingView removeFromSuperview]; self.floatingView = nil;
@@ -448,19 +467,18 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     self.bgParser = nil; 
     self.floatParser = nil; 
     self.fgParser = nil;
+    self.logicalScreenSize = CGSizeZero;
 }
 
-// 采用严苛的异步预处理 + 同步阻断丢弃方案防漏抗压
 - (void)reloadWallpaperViews {
     self.reloadGeneration++;
     NSInteger currentGen = self.reloadGeneration;
     
-    // 把繁重的 IO 深搜读写扔去后台
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         
         if (!g_enabled || !g_zonePath || ![[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (currentGen != self.reloadGeneration) return; // 代次过期，自动废弃
+                if (currentGen != self.reloadGeneration) return;
                 [self clearCurrentViewsSafely];
             });
             return;
@@ -471,15 +489,28 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         __block NSString *foundFloat = nil;
         __block NSString *foundFg = nil;
         
-        // 执行你要求的兜底超深搜逻辑
+        // 【核心修复】：预先提取 Wallpaper.plist 中的逻辑屏幕尺寸以进行正确排版缩放
+        NSString *plistPath = [g_zonePath stringByAppendingPathComponent:@"Wallpaper.plist"];
+        NSDictionary *plistData = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        NSString *logicalClassStr = plistData[@"logicalScreenClass"];
+        __block CGSize targetSize = CGSizeZero;
+        
+        if (logicalClassStr) {
+            NSRange wRange = [logicalClassStr rangeOfString:@"w-"];
+            NSRange hRange = [logicalClassStr rangeOfString:@"h@"];
+            if (wRange.location != NSNotFound && hRange.location != NSNotFound) {
+                NSString *wStr = [logicalClassStr substringToIndex:wRange.location];
+                NSString *hStr = [logicalClassStr substringWithRange:NSMakeRange(NSMaxRange(wRange), hRange.location - NSMaxRange(wRange))];
+                if ([wStr doubleValue] > 0 && [hStr doubleValue] > 0) {
+                    targetSize = CGSizeMake([wStr doubleValue], [hStr doubleValue]);
+                }
+            }
+        }
+        
         NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
         NSString *subPath;
         while ((subPath = [dirEnum nextObject])) {
-            // 过滤系统垃圾缓存文件夹
-            if ([subPath containsString:@"__MACOSX"]) {
-                [dirEnum skipDescendants];
-                continue;
-            }
+            if ([subPath containsString:@"__MACOSX"]) { [dirEnum skipDescendants]; continue; }
             
             NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
             NSString *fileName = [subPath lastPathComponent];
@@ -490,25 +521,24 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
                     if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) foundBg = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) foundFloat = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) foundFg = fullPath;
-                    [dirEnum skipDescendants]; // 找到了目标后缀直接切断内层徒劳下潜
+                    [dirEnum skipDescendants];
                 }
             }
         }
         
-        if (currentGen != self.reloadGeneration) return; // IO结束如果被新点击覆盖，立即掐断丢弃
+        if (currentGen != self.reloadGeneration) return; 
         
-        // IO结束，主线程组装图层树
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (currentGen != self.reloadGeneration) return; // 回到主线程的最终拦截
+            if (currentGen != self.reloadGeneration) return; 
             
-            [self clearCurrentViewsSafely]; // 拆卸旧装甲，绝对不留内存残留
+            [self clearCurrentViewsSafely]; 
+            self.logicalScreenSize = targetSize; // 注入提取好的逻辑屏幕分辨率
             
             void *handle = dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             if (!handle) return; 
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             if (!PackageViewClass) return;
             
-            // 使用极速的 autoreleasepool 防止瞬时内存飙升
             @autoreleasepool {
                 if (foundBg) {
                     self.bgView = [[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundBg]];
