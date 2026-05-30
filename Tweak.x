@@ -528,6 +528,55 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
 
+// ==============================================================================
+// 🌟 新增修复：检测进出 Poster Switcher（壁纸编辑模式），防止遮挡时间与通知
+// ==============================================================================
+
+// 1. 当长按锁屏准备进入编辑模式时
+- (void)_prepareForPosterSwitcherPresentation {
+    %orig;
+    if (g_enabled && g_portalView) {
+        // 暂时隐藏我们的镜像引擎，把舞台干净地交给系统，防止层级污染
+        g_portalView.hidden = YES;
+        g_portalView.alpha = 0.0;
+    }
+}
+
+// 2. 退出编辑模式的直接回调
+- (void)_dismissPosterSwitcherViewController {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        // 强制重新执行排版，确保 Portal 正确插回到底层背景之上，而非跑到时间组件上面
+        [self viewWillLayoutSubviews];
+        
+        // 强制重发一次 0.0 进度（锁屏标准状态），让 Alpha 公式恢复到 1.0 显示我们的壁纸
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+
+// 3. 退出/清理编辑模式的兜底回调（防止手势打断导致状态卡死）
+- (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+// ==============================================================================
+
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
