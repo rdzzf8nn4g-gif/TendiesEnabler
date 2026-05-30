@@ -1,19 +1,18 @@
 DEBUG = 0
 FINALPACKAGE = 1
-PACKAGE_VERSION = 1.0.0
+PACKAGE_VERSION = 0.0.1
 
 TARGET := iphone:clang:16.5:14.0
 ARCHS = arm64 arm64e
-# 仅注入 SpringBoard
 INSTALL_TARGET_PROCESSES = SpringBoard
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = TendiesEnabler
-TendiesEnabler_FILES = Tweak.x
-TendiesEnabler_CFLAGS = -fobjc-arc
-TendiesEnabler_FRAMEWORKS = Foundation UIKit
+TWEAK_NAME = Zone
+Zone_FILES = Tweak.x
+Zone_CFLAGS = -fobjc-arc
+Zone_FRAMEWORKS = Foundation UIKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
-SUBPROJECTS += tendiesprefs
+SUBPROJECTS += zoneprefs
 include $(THEOS_MAKE_PATH)/aggregate.mk
