@@ -3,14 +3,10 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
-@interface NSTask : NSObject
-@property (copy) NSString *launchPath;
-@property (copy) NSArray *arguments;
-- (void)launch;
-- (void)waitUntilExit;
-- (int)terminationStatus;
-@end
+extern char **environ;
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -18,7 +14,37 @@
 #define jbroot(path) path
 #endif
 
-// 修改为子目录 Wallpapers 专门存放多个壁纸
+// --------------------------------------------------------
+// 工业级解压引擎：直接调用底层 posix_spawn，防卡顿防泄漏
+// --------------------------------------------------------
+static BOOL industrialUnzip(NSString *source, NSString *destination) {
+    pid_t pid;
+    int status;
+    NSString *unzipBin = @"/usr/bin/unzip";
+#if __has_include(<roothide.h>)
+    unzipBin = jbroot(unzipBin);
+#else
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/unzip"]) {
+        unzipBin = @"/var/jb/usr/bin/unzip";
+    }
+#endif
+
+    // 使用底层参数传递，-o: 覆盖, -q: 静默提速
+    const char *argv[] = {"unzip", "-o", "-q", [source UTF8String], "-d", [destination UTF8String], NULL};
+    
+    // posix_spawn 是 iOS 底层最高效的进程拉起方式，完美规避 NSTask 的所有缺陷
+    if (posix_spawn(&pid, [unzipBin UTF8String], NULL, NULL, (char *const *)argv, environ) == 0) {
+        if (waitpid(pid, &status, 0) != -1) {
+            // 返回 0 是成功，返回 1 通常是警告（比如内部有 macosx 缓存也会报 1，同样视为成功）
+            return WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 1);
+        }
+    }
+    return NO;
+}
+
+// --------------------------------------------------------
+// 路径管理
+// --------------------------------------------------------
 static NSString * GetZoneStorageDir() {
     NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zone.media";
 #if __has_include(<roothide.h>)
@@ -47,29 +73,60 @@ static NSString * GetPrefsPlistPath() {
 #endif
 }
 
+
 @implementation ZonePrefsRootListController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    // 保持你原有的顶部高清图标布局设计，一行不动
-    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 110)];
+    // =======================================
+    // 极致完美的居中排版布局 (UIStackView)
+    // =======================================
+    UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 220)];
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     
-    UIImageView *iconView = [[UIImageView alloc] initWithFrame:CGRectMake(30, 30, 60, 60)];
+    // 1. 图标
+    UIImageView *iconView = [[UIImageView alloc] init];
     NSBundle *bundle = [NSBundle bundleForClass:[self class]];
     UIImage *icon = [UIImage imageNamed:@"icon" inBundle:bundle compatibleWithTraitCollection:nil];
     if (!icon) icon = [UIImage imageNamed:@"icon@3x" inBundle:bundle compatibleWithTraitCollection:nil];
     iconView.image = icon;
     iconView.layer.cornerRadius = 14;
     iconView.layer.masksToBounds = YES;
-    [headerView addSubview:iconView];
+    [iconView.widthAnchor constraintEqualToConstant:60].active = YES;
+    [iconView.heightAnchor constraintEqualToConstant:60].active = YES;
     
-    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(105, 30, headerView.frame.size.width - 120, 60)];
+    // 2. 标题
+    UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = @"Zone";
     titleLabel.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
-    titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [headerView addSubview:titleLabel];
+    titleLabel.textAlignment = NSTextAlignmentCenter;
+    
+    // 3. 作者信息及频道 (使用 UITextView 实现多行居中+链接可直接点击)
+    UITextView *creditsView = [[UITextView alloc] init];
+    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
+    creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    creditsView.textColor = [UIColor secondaryLabelColor];
+    creditsView.textAlignment = NSTextAlignmentCenter;
+    creditsView.editable = NO;
+    creditsView.scrollEnabled = NO;
+    creditsView.backgroundColor = [UIColor clearColor];
+    creditsView.dataDetectorTypes = UIDataDetectorTypeLink; // 开启自动识别超链接
+    
+    // 4. 打包进弹性容器 (自动完美居中)
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel, creditsView]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    [headerView addSubview:stack];
+    
+    // 设置弹性容器在头部居中
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerXAnchor constraintEqualToAnchor:headerView.centerXAnchor],
+        [stack.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor]
+    ]];
     
     if ([self respondsToSelector:@selector(table)]) {
         UITableView *tableView = [self performSelector:@selector(table)];
@@ -82,18 +139,15 @@ static NSString * GetPrefsPlistPath() {
     if (!_specifiers) {
         NSMutableArray *specs = [[self loadSpecifiersFromPlistName:@"Root" target:self] mutableCopy];
         
-        // 动态添加一个分组栏
         PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
         [group setProperty:@"点击切换壁纸，实时生效。向左滑动可删除不再需要的壁纸。" forKey:@"footerText"];
         [specs addObject:group];
         
-        // 扫描已存在的壁纸文件夹
         NSFileManager *fm = [NSFileManager defaultManager];
         NSString *wpDir = GetWallpapersDir();
         if ([fm fileExistsAtPath:wpDir]) {
             NSArray *contents = [fm contentsOfDirectoryAtPath:wpDir error:nil];
             
-            // 获取当前选中的壁纸路径
             NSString *currentPath = nil;
             CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
             if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
@@ -102,17 +156,16 @@ static NSString * GetPrefsPlistPath() {
             }
 
             for (NSString *name in contents) {
-                if ([name hasPrefix:@"."]) continue; // 过滤隐藏文件
+                if ([name hasPrefix:@"."]) continue; 
                 BOOL isDir;
                 if ([fm fileExistsAtPath:[wpDir stringByAppendingPathComponent:name] isDirectory:&isDir] && isDir) {
                     
                     PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
                     spec->action = @selector(selectWallpaper:);
                     [spec setProperty:name forKey:@"WallpaperName"];
-                    [spec setProperty:@YES forKey:@"IsWallpaperCell"]; // 用于标记可删除
+                    [spec setProperty:@YES forKey:@"IsWallpaperCell"]; 
                     
                     NSString *fullWpPath = [wpDir stringByAppendingPathComponent:name];
-                    // 如果是当前生效的壁纸，打上对号标记
                     if ([currentPath isEqualToString:fullWpPath]) {
                         spec.name = [NSString stringWithFormat:@"%@  ✓", name];
                     }
@@ -135,7 +188,6 @@ static NSString * GetPrefsPlistPath() {
             
             UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[itemType, folderType, dataType]];
             picker.delegate = self;
-            // 允许一次性选择多个壁纸
             picker.allowsMultipleSelection = YES; 
             
             UIViewController *topVC = self.view.window.rootViewController;
@@ -163,7 +215,7 @@ static NSString * GetPrefsPlistPath() {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在无缝导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
     spinner.center = CGPointMake(135.0, 65.5);
     [spinner startAnimating];
@@ -174,7 +226,6 @@ static NSString * GetPrefsPlistPath() {
     while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
     
     [topVC presentViewController:loadingAlert animated:YES completion:^{
-        // 核心解压转移至全局高优队列，防止卡主线程
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             NSFileManager *fm = [NSFileManager defaultManager];
             NSString *wpDir = GetWallpapersDir();
@@ -205,24 +256,10 @@ static NSString * GetPrefsPlistPath() {
                         if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
                     }
                 } else {
-                    NSString *unzipBin = @"/usr/bin/unzip";
-#if __has_include(<roothide.h>)
-                    unzipBin = jbroot(unzipBin);
-#else
-                    if ([fm fileExistsAtPath:@"/var/jb/usr/bin/unzip"]) unzipBin = @"/var/jb/usr/bin/unzip";
-#endif
-                    Class NSTaskClass = NSClassFromString(@"NSTask");
-                    if (NSTaskClass && [fm fileExistsAtPath:unzipBin]) {
-                        @try {
-                            id task = [[NSTaskClass alloc] init];
-                            [task setLaunchPath:unzipBin];
-                            [task setArguments:@[@"-o", sourceURL.path, @"-d", unzipDir]];
-                            [task launch];
-                            [task waitUntilExit];
-                            processSuccess = ([task terminationStatus] == 0);
-                        } @catch (NSException *e) { processSuccess = NO; }
-                    }
+                    // 调用强大的底层 C 语言原生解压引擎
+                    processSuccess = industrialUnzip(sourceURL.path, unzipDir);
                 }
+                
                 if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
                 if (processSuccess) anySuccess = YES;
             }
@@ -231,13 +268,13 @@ static NSString * GetPrefsPlistPath() {
                 [self forceOwnershipToMobile:wpDir];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        [self reloadSpecifiers]; // 刷新列表，新壁纸自动显示
+                        [self reloadSpecifiers]; 
                     }];
                 });
             } else {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"无效的壁纸文件。" preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"无效的壁纸文件或已损坏。" preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
@@ -247,14 +284,12 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// 选中并切换壁纸操作（实时生效）
 - (void)selectWallpaper:(PSSpecifier *)spec {
     NSString *name = [spec propertyForKey:@"WallpaperName"];
     if (!name) return;
     
     NSString *fullPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
     
-    // 写入偏好并穿透沙盒
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)fullPath, appID);
     CFPreferencesAppSynchronize(appID);
@@ -265,14 +300,11 @@ static NSString * GetPrefsPlistPath() {
     [prefs writeToFile:plistPath atomically:YES];
     [self forceOwnershipToMobile:plistPath];
     
-    // 触发 Tweak 实时加载
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    // 刷新界面显示打勾
     [self reloadSpecifiers];
 }
 
-// 支持左滑删除
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
     PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
     if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) return YES;
@@ -287,7 +319,6 @@ static NSString * GetPrefsPlistPath() {
             NSString *path = [GetWallpapersDir() stringByAppendingPathComponent:name];
             [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
             
-            // 如果删除了正在使用的壁纸，将其置空并停止渲染
             CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
             if (pathRef) {
                 NSString *currentPath = (__bridge NSString *)pathRef;
