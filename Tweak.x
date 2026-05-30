@@ -656,14 +656,7 @@ static void EnsureEngineViewIsMounted() {
             // 下滑时，1.0 -> 0.0。
             // 当到达一半（0.5）时，Alpha 慢慢由 0 变 1，到底时全实体显示。
             if (g_portalView) {
-                double alpha = 0.0;
                 
-                if (progress <= 0.5) {
-                    // progress从0.5降到0.0时，(0.5 - progress)*2 将从0.0升到1.0
-                    alpha = (0.5 - progress) * 2.0; 
-                }
-                
-                alpha = MAX(0.0, MIN(1.0, alpha));
                 
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
