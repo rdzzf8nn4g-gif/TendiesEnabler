@@ -459,8 +459,7 @@ static void EnsureEngineViewIsMounted() {
         if (engineView) {
             _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
             if (!portalView) {
-                // 🔥 修复 1：初始化时就给它绝对的物理全屏尺寸，不要用可能被系统缩放的 bounds
-                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:[UIScreen mainScreen].bounds];
+                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
                 portalView.sourceView = engineView;
                 portalView.hidesSourceView = NO;
                 portalView.matchesAlpha = NO; 
@@ -468,26 +467,17 @@ static void EnsureEngineViewIsMounted() {
                 portalView.matchesPosition = YES;
                 portalView.matchesTransform = YES;
                 portalView.userInteractionEnabled = NO;
-                
-                // 🔥 修复 2：加上自适应拉伸面具，防止设备旋转或状态突变时脱节
-                portalView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                
                 objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 g_portalView = portalView;
             }
 
-            // 🔥 核心修复：直接将传送门作为背景层的子视图
+            // 🔥 核心修复：直接将传送门作为背景层的子视图，而不是锁屏主视图！
             if (bgVC && bgVC.view) {
                 if (portalView.superview != bgVC.view) {
                     [portalView removeFromSuperview];
                     [bgVC.view addSubview:portalView];
                 }
-                
-                // 🔥 修复 3：每一帧刷新都死死锁住绝对全屏尺寸！
-                portalView.frame = [UIScreen mainScreen].bounds;
-                
-                // 🔥 修复 4：强制解除系统的越界裁切！防止滑动中途被系统切掉下半截
-                bgVC.view.clipsToBounds = NO;
+                portalView.frame = bgVC.view.bounds;
                 
                 // 清理锁屏背景原生多余图层，保留我们的传送门
                 for (UIView *sub in bgVC.view.subviews) {
@@ -501,10 +491,7 @@ static void EnsureEngineViewIsMounted() {
                 if (portalView.superview != self.view) {
                     [self.view insertSubview:portalView atIndex:0];
                 }
-                
-                portalView.frame = [UIScreen mainScreen].bounds; // 同步修复
-                self.view.clipsToBounds = NO; // 同步修复
-                
+                portalView.frame = self.view.bounds;
                 [self.view sendSubviewToBack:portalView];
             }
             
