@@ -15,22 +15,14 @@
             <key>label</key> <string>启用插件</string>
             <key>PostNotification</key> <string>com.iosdump.zoneprefs/ReloadPrefs</string>
         </dict>
-        
-        <dict>
-            <key>cell</key> <string>PSGroupCell</string>
-        </dict>
         <dict>
             <key>cell</key> <string>PSButtonCell</string>
             <key>label</key> <string>导入壁纸</string>
             <key>action</key> <string>importZone:</string>
         </dict>
-
-        <dict>
-            <key>cell</key> <string>PSGroupCell</string>
-        </dict>
         <dict>
             <key>cell</key> <string>PSButtonCell</string>
-            <key>label</key> <string>查看壁纸目录</string>
+            <key>label</key> <string>壁纸目录</string>
             <key>action</key> <string>openFilzaPath:</string>
         </dict>
     </array>
