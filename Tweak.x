@@ -382,9 +382,34 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
             }
             
-            [self setNeedsLayout];
+[self setNeedsLayout];
+            [self layoutIfNeeded]; // 1. 强制系统立即排版，催促构建图层树
+
             self.currentState = @"Init";
-            [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+            
+            // 2. 延迟到下一个 RunLoop (约0.05秒)，确保 CoreAnimation 图层已完全解包就绪
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                
+                // 获取当前绝对准确的锁屏状态（防脱节）
+                BOOL realUnlocked = g_isUnlocked;
+                Class lsManager = NSClassFromString(@"SBLockScreenManager");
+                if ([lsManager respondsToSelector:@selector(sharedInstance)]) {
+                    id manager = [lsManager sharedInstance];
+                    if ([manager respondsToSelector:@selector(isUILocked)]) {
+                        realUnlocked = !((BOOL)[manager performSelector:@selector(isUILocked)]);
+                    }
+                }
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                
+                // 3. 主动广播一次当前应当处的进度，强迫引擎执行 onProgress 重新绑定图层映射
+                double currentProgress = realUnlocked ? 1.0 : 0.0;
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(currentProgress)}];
+                
+                [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
+                [CATransaction commit];
+            });
         });
     });
 }
@@ -811,9 +836,34 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
             }
             
-            [self setNeedsLayout];
+[self setNeedsLayout];
+            [self layoutIfNeeded]; // 1. 强制系统立即排版，催促构建图层树
+
             self.currentState = @"Init";
-            [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+            
+            // 2. 延迟到下一个 RunLoop (约0.05秒)，确保 CoreAnimation 图层已完全解包就绪
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                
+                // 获取当前绝对准确的锁屏状态（防脱节）
+                BOOL realUnlocked = g_isUnlocked;
+                Class lsManager = NSClassFromString(@"SBLockScreenManager");
+                if ([lsManager respondsToSelector:@selector(sharedInstance)]) {
+                    id manager = [lsManager sharedInstance];
+                    if ([manager respondsToSelector:@selector(isUILocked)]) {
+                        realUnlocked = !((BOOL)[manager performSelector:@selector(isUILocked)]);
+                    }
+                }
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                
+                // 3. 主动广播一次当前应当处的进度，强迫引擎执行 onProgress 重新绑定图层映射
+                double currentProgress = realUnlocked ? 1.0 : 0.0;
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(currentProgress)}];
+                
+                [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
+                [CATransaction commit];
+            });
         });
     });
 }
