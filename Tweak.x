@@ -47,13 +47,6 @@ typedef struct {
 - (void)setDismissed:(BOOL)dismissed;
 @end
 
-// 🌟 锁屏滑动容器声明，用于拦截下滑进度
-@interface SBCoverSheetSlidingViewController : UIViewController
-- (UIViewController *)contentViewController;
-// 提前向编译器声明我们动态注入的方法，解决编译报错
-- (void)_tendies_updatePortalAlphaWithProgress:(double)progress;
-@end
-
 @interface SBWallpaperEffectView : UIView
 @property (nonatomic) long long wallpaperStyle;
 @end
@@ -87,7 +80,7 @@ static NSString *g_tendiesPath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
 
-// 🌟 全局极速指针：跨层级无损追踪传送门，用于主线程进度同步！
+// 🌟 核心：全局追踪传送门，提供给主线程动画同步使用！
 static __weak _UIPortalView *g_portalView = nil;
 
 static void reloadPrefs() {
@@ -201,7 +194,7 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor clearColor]; // 必须透明以透视原生模糊
+        self.backgroundColor = [UIColor clearColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
         self.isPathCached = NO;
@@ -373,7 +366,6 @@ static CALayer *TendiesFindLayerByName(CALayer *layer, NSString *name) {
 }
 @end
 
-
 // ==========================================
 // 🌟 核心：确保真实引擎始终挂载在桌面最底层！
 // ==========================================
@@ -403,7 +395,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -428,7 +420,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层 (完全恢复你的初版)
+// 2. 干掉滑动时的系统高斯模糊过渡层
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -445,34 +437,22 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+
 // 3. 🌟 锁屏拦截核心修复：利用 Portal 镜像投影到模糊层之上！
 %hook CSCoverSheetViewController
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    EnsureEngineViewIsMounted(); // 1. 确保引擎老老实实呆在桌面底层
+    EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
-        // ===============================================
-        // 🚨 终极灭除灰层：干掉锁屏所有暗色的遮罩和色调层
-        // ===============================================
-        @try {
-            UIView *tintingView = [self valueForKey:@"_tintingView"];
-            if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
-            
-            UIView *dimmingView = [self respondsToSelector:@selector(_updateDimmingLayer)] ? [self valueForKey:@"_dimmingView"] : nil;
-            if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
-        } @catch (NSException *e) {}
-
-        // 2. 获取原生的模糊层背景
+        // 获取原生的模糊层背景 (第一层)
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
-            // 🚨 绝对保持模糊层可见！这样滑下来才有初始模糊
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
         }
         
-        // 3. 召唤传送门：把桌面的壁纸“镜像”一份到锁屏模糊层之上！
         id wallpaperController = [%c(SBWallpaperController) sharedInstance];
         TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
         
@@ -480,35 +460,48 @@ static void EnsureEngineViewIsMounted() {
             _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
             if (!portalView) {
                 portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-                portalView.sourceView = engineView; // 镜像源：桌面的真实引擎
-                portalView.hidesSourceView = NO;    // 核心：绝对不隐藏桌面引擎，保证桌面正常！
+                portalView.sourceView = engineView;
+                portalView.hidesSourceView = NO;
                 
-                // 取消自动匹配 Alpha，交由下方 SlidingViewController 手动控进度！
-                portalView.matchesAlpha = NO;
-                portalView.alpha = 0.0;             // 初始隐藏，等划出一定进度再显形
+                // 🔥 核心：取消自动匹配 Alpha，靠我们手动滑动手势控制！
+                portalView.matchesAlpha = NO; 
+                portalView.alpha = 0.0; // 默认隐藏，等待滑动激活
                 
                 portalView.matchesPosition = YES;
                 portalView.matchesTransform = YES;
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 
-                // 🌟 将其赋给全局指针，供动画队列调用！
+                // 赋给全局追踪指针
                 g_portalView = portalView;
             }
 
             if (portalView.superview != self.view) {
-                [portalView removeFromSuperview];
-                if (bgVC && bgVC.view && bgVC.view.superview == self.view) {
-                    // 完美插入到模糊层的正上方！
-                    [self.view insertSubview:portalView aboveSubview:bgVC.view];
-                } else {
-                    [self.view insertSubview:portalView atIndex:0];
-                }
+                [self.view insertSubview:portalView atIndex:0];
             }
             portalView.frame = self.view.bounds;
+            
+            // 🔥 绝杀一层灰：在视图层级上，强制把 Portal 插在所有模糊层、调色层的【上方】
+            if (bgVC && bgVC.view && bgVC.view.superview == self.view) {
+                [self.view insertSubview:portalView aboveSubview:bgVC.view];
+            }
+            @try {
+                UIView *dimmingView = [self valueForKey:@"_dimmingView"];
+                if (dimmingView && dimmingView.superview == self.view) {
+                    [self.view insertSubview:portalView aboveSubview:dimmingView];
+                    dimmingView.alpha = 0.0;
+                    dimmingView.hidden = YES;
+                }
+                UIView *tintingView = [self valueForKey:@"_tintingView"];
+                if (tintingView && tintingView.superview == self.view) {
+                    [self.view insertSubview:portalView aboveSubview:tintingView];
+                    tintingView.alpha = 0.0;
+                    tintingView.hidden = YES;
+                }
+            } @catch(NSException* e) {}
         }
 
-        // 4. 清理锁屏原生多余图层
+        // 清理锁屏原生多余图层
         if (bgVC && bgVC.view) {
             for (UIView *sub in bgVC.view.subviews) {
                 if (![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
@@ -559,15 +552,12 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 动画进度获取及快照拦截 (完全恢复你的初版)
+// 🚀 核心进步拦截 (安全的主线程) 解决滑一半不出来
 // ==========================================
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
     if (g_enabled) {
-        if (arg5) {
-            void (^completionBlock)(void) = arg5;
-            completionBlock();
-        }
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
         return; 
     }
     %orig;
@@ -582,8 +572,29 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
+        // 发送给底层的动画同步
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"TendiesEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+            
+            // 🚨 修正后准确的渐变公式（主线程安全）：
+            // progress = 1.0 (桌面解锁), progress = 0.0 (锁屏完全覆盖)
+            // 下滑时，1.0 -> 0.0。
+            // 当到达一半（0.5）时，Alpha 慢慢由 0 变 1，到底时全实体显示。
+            if (g_portalView) {
+                double alpha = 0.0;
+                
+                if (progress <= 0.5) {
+                    // progress从0.5降到0.0时，(0.5 - progress)*2 将从0.0升到1.0
+                    alpha = (0.5 - progress) * 2.0; 
+                }
+                
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
+            }
         });
     }
 }
@@ -591,7 +602,7 @@ static void EnsureEngineViewIsMounted() {
 
 
 // ==========================================
-// 亮灭屏与锁屏状态同步 (未变动)
+// 亮灭屏与锁屏状态同步
 // ==========================================
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
@@ -632,53 +643,6 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// ==========================================
-// 🌟 锁屏下拉滑动进度拦截 (兼容 iOS 16 & 17)
-// ==========================================
-%hook SBCoverSheetSlidingViewController
-
-// 适配 iOS 16
-- (struct CGRect)_updatePositionViewForProgress:(double)progress forPresentationValue:(BOOL)value {
-    struct CGRect rect = %orig;
-    if (g_enabled) {
-        [self _tendies_updatePortalAlphaWithProgress:progress];
-    }
-    return rect;
-}
-
-// 适配 iOS 17
-- (struct CGRect)_updatePositionViewForProgress:(double)progress velocity:(double)velocity forPresentationValue:(BOOL)value {
-    struct CGRect rect = %orig;
-    if (g_enabled) {
-        [self _tendies_updatePortalAlphaWithProgress:progress];
-    }
-    return rect;
-}
-
-%new
-- (void)_tendies_updatePortalAlphaWithProgress:(double)progress {
-    // 🚨 线程安全：彻底杜绝 CoreAnimation 异步跨线程修改 UI 触发安全模式崩溃！
-    // 强制派发到 Main Queue 同步视觉进度，使用全局弱指针获取传送门
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_portalView) {
-            double p = progress;
-            double alpha = 0.0;
-            // 控制逻辑：30% 的拉下进度时，只有模糊。从 30% 到 50%，传送门极速变清晰并取代模糊层
-            // 到达一半屏幕 (50%) 时，实体壁纸完美显现实体效果。
-            if (p > 0.3) {
-                alpha = (p - 0.3) * 5.0; 
-            }
-            alpha = MAX(0.0, MIN(1.0, alpha));
-            
-            // 为了防止 CA 事务撕裂，使用隐式事务关闭包装
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            g_portalView.alpha = alpha;
-            [CATransaction commit];
-        }
-    });
-}
-%end
 
 %ctor {
     reloadPrefs();
