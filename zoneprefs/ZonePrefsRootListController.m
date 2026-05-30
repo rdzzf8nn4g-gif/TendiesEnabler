@@ -76,6 +76,16 @@ static NSString * GetPrefsPlistPath() {
 
 @implementation ZonePrefsRootListController
 
+// =======================================
+// 强制使用 iOS 13+ 的 InsetGrouped 样式，自动实现原生圆角分区和标准小标题
+// =======================================
+- (UITableViewStyle)tableViewStyle {
+    if (@available(iOS 13.0, *)) {
+        return UITableViewStyleInsetGrouped;
+    }
+    return UITableViewStyleGrouped;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     
