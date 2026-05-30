@@ -658,9 +658,9 @@ static void EnsureEngineViewIsMounted() {
             if (g_portalView) {
                 double alpha = 0.0;
                 
-                if (progress <= 0.95) {
+                if (progress <= 1.0) {
                     // progress从0.5降到0.0时，(0.5 - progress)*2 将从0.0升到1.0
-                    alpha = (0.95 - progress) / 0.95; 
+                    alpha = (1.0 - progress) / 0.6; 
                 }
                 
                 alpha = MAX(0.0, MIN(1.0, alpha));
