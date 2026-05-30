@@ -42,7 +42,6 @@ typedef struct {
 @property (readonly, nonatomic) long long backlightState;
 @end
 
-// 🌟 修复点：已彻底删除 @property view 声明，解决编译冲突
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
@@ -394,7 +393,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 
-// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸 (完全恢复你的初版)
+// 1. 干掉 PaperBoardUI 负责的桌面系统壁纸和默认锁屏壁纸
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
     %orig;
@@ -419,7 +418,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 2. 干掉滑动时的系统高斯模糊过渡层 (完全恢复你的初版)
+// 2. 干掉滑动时的系统高斯模糊过渡层
 %hook SBWallpaperEffectView
 - (void)layoutSubviews {
     %orig;
@@ -436,25 +435,65 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 3. 🌟 锁屏拦截核心修复：将传送门放入模糊层容器，实现 1:1 高度绑定
+// 3. 🌟 锁屏拦截核心：动态穿梭传送门，1:1高度绑定与越级遮挡！
 %hook CSCoverSheetViewController
+
+// 添加一个进度处理方法
+%new
+- (void)tendies_handleProgress:(NSNotification *)note {
+    if (!g_enabled) return;
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    // 记录进度供 Layout 使用
+    objc_setAssociatedObject(self, "TendiesSwipeProgress", @(progress), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
+    UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+
+    if (portalView && bgVC && bgVC.view) {
+        // 🌟 核心判断：过了屏幕一半才放到最外层，完美遮挡一切！
+        if (progress > 0.5) {
+            if (portalView.superview != self.view) {
+                [portalView removeFromSuperview];
+                // 放在最外层且在 bgVC 的上方，彻底压死那层灰色透明图层！
+                [self.view insertSubview:portalView aboveSubview:bgVC.view];
+                portalView.frame = self.view.bounds;
+            }
+        } else {
+            // 没过一半时，钻进原生的模糊层里，1:1 滑动高度绝对一致！
+            if (portalView.superview != bgVC.view) {
+                [portalView removeFromSuperview];
+                [bgVC.view addSubview:portalView];
+                [bgVC.view bringSubviewToFront:portalView];
+                portalView.frame = bgVC.view.bounds;
+            }
+        }
+    }
+}
+
+// 注册通知
+- (void)viewDidLoad {
+    %orig;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(tendies_handleProgress:) name:@"TendiesEngineProgress" object:nil];
+}
+
+// 移除通知
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    %orig;
+}
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    EnsureEngineViewIsMounted(); // 1. 确保引擎老老实实呆在桌面底层
+    EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
-        // 2. 获取原生的模糊层背景 (bgVC)
         UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
         if (bgVC && bgVC.view) {
-            // 🚨 绝对保持模糊层可见！
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
-            
-            // 🌟 修复1：裁剪边界！这样传送门就绝对不会溢出模糊层
+            // 🌟 裁剪边界：让传送门在模糊层里时绝对不溢出！
             bgVC.view.clipsToBounds = YES; 
             
-            // 3. 召唤传送门
             id wallpaperController = [%c(SBWallpaperController) sharedInstance];
             TendiesRenderEngineView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalTendiesEngine");
             
@@ -462,33 +501,39 @@ static void EnsureEngineViewIsMounted() {
                 _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetTendiesPortal");
                 if (!portalView) {
                     portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:bgVC.view.bounds];
-                    portalView.sourceView = engineView; // 镜像源：桌面的真实引擎
-                    portalView.hidesSourceView = NO;    // 核心：绝对不隐藏桌面引擎
+                    portalView.sourceView = engineView; 
+                    portalView.hidesSourceView = NO;    
                     portalView.matchesAlpha = YES;
                     portalView.matchesPosition = YES;
                     portalView.matchesTransform = YES;
                     portalView.userInteractionEnabled = NO;
-                    
-                    // 🌟 修复2：开启自动伸缩，确保尺寸永远和灰色的模糊层1:1绑定！
+                    // 自适应缩放
                     portalView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                    
                     objc_setAssociatedObject(self, "CoverSheetTendiesPortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 }
 
-                // 🌟 修复3：将传送门【放入】模糊层容器内部 (bgVC.view)
-                // 这样它的滑动高度、视差、遮挡范围就会和灰色模糊层绝对同步！
-                if (portalView.superview != bgVC.view) {
-                    [portalView removeFromSuperview];
-                    [bgVC.view addSubview:portalView];
+                NSNumber *progressNum = objc_getAssociatedObject(self, "TendiesSwipeProgress");
+                double progress = progressNum ? [progressNum doubleValue] : (g_isUnlocked ? 0.0 : 1.0);
+
+                // 根据进度决定层级
+                if (progress > 0.5) {
+                    if (portalView.superview != self.view) {
+                        [portalView removeFromSuperview];
+                        [self.view insertSubview:portalView aboveSubview:bgVC.view];
+                    }
+                    portalView.frame = self.view.bounds;
+                } else {
+                    if (portalView.superview != bgVC.view) {
+                        [portalView removeFromSuperview];
+                        [bgVC.view addSubview:portalView];
+                        [bgVC.view bringSubviewToFront:portalView];
+                    }
+                    portalView.frame = bgVC.view.bounds;
                 }
-                portalView.frame = bgVC.view.bounds;
                 
-                // 将传送门提至模糊层内部的最上方，盖住系统原生的背景海报
-                [bgVC.view bringSubviewToFront:portalView];
-                
-                // 清理模糊层容器里原生的、不需要的多余图层
+                // 隐藏原生多余图层
                 for (UIView *sub in bgVC.view.subviews) {
-                    if (sub != portalView) {
+                    if (sub != portalView && ![sub isKindOfClass:NSClassFromString(@"_UIPortalView")]) {
                         sub.alpha = 0.0;
                         sub.hidden = YES;
                     }
