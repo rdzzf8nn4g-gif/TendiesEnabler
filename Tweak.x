@@ -104,6 +104,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // --- 根图层环境数据保护 ---
 @property (nonatomic, assign) BOOL rootParsed;
 @property (nonatomic, strong) UIColor *rootBackgroundColor;
+@property (nonatomic, assign) BOOL isGeometryFlipped;
 
 - (void)parseFile:(NSString *)path;
 - (NSString *)resolveRealStateNameFor:(NSString *)logicalState;
@@ -148,6 +149,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (attributeDict[@"backgroundColor"]) {
                 self.rootBackgroundColor = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
             }
+            if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
         }
         
         NSString *layerId = attributeDict[@"id"];
@@ -325,6 +327,8 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
+            v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
+            
             // 【终极排版修复】: 
             // 不盲目全局翻转坐标系保护原生壁纸。
             // 强制绝对居中点定位 + 完美比例缩放，使得 BlackHole 这种巨屏壁纸能在手机居中满屏显示。
