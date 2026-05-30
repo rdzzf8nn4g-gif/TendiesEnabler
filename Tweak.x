@@ -654,13 +654,18 @@ static void EnsureEngineViewIsMounted() {
             // 🚨 修正后准确的渐变公式（主线程安全）：
             // progress = 1.0 (桌面解锁), progress = 0.0 (锁屏完全覆盖)
             // 下滑时，1.0 -> 0.0。
-            // 当到达一半（0.5）时，Alpha 慢慢由 0 变 1，到底时全实体显示。
+            // 修改为 70% (0.7) 时开始显示，并在 60% (0.6) 开始渐渐流畅显示，避免突然出现
             if (g_portalView) {
                 double alpha = 0.0;
                 
-                if (progress <= 0.5) {
-                    // progress从0.5降到0.0时，(0.5 - progress)*2 将从0.0升到1.0
-                    alpha = (0.5 - progress) * 2.0; 
+                if (progress <= 0.7) {
+                    if (progress > 0.6) {
+                        // 0.7 到 0.6 区间作微小缓冲，从 0 渐变到 0.1
+                        alpha = (0.7 - progress) * 1.0; 
+                    } else {
+                        // 0.6 到 0.0 区间开始主要且流畅的渐变，从 0.1 渐变到 1.0
+                        alpha = 0.1 + ((0.6 - progress) / 0.6) * 0.9;
+                    }
                 }
                 
                 alpha = MAX(0.0, MIN(1.0, alpha));
