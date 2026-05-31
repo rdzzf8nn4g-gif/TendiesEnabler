@@ -62,6 +62,9 @@ typedef struct {
 @interface CSBackgroundContentView : UIView
 @end
 
+@interface SBIconController : UIViewController
+@end
+
 // ---------- iOS 14-15 必备头文件 ----------
 @interface SBLockScreenManager : NSObject
 + (id)sharedInstance;
@@ -1760,18 +1763,14 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 // 【全新功能：应用透明文本阴影与实时重绘支持】
-@interface _UILegibilitySettings : NSObject
-@property (nonatomic, assign) CGFloat shadowAlpha;
-@property (nonatomic, assign) CGFloat shadowRadius;
-@property (nonatomic, strong) UIColor *shadowColor;
-@end
-
 %hook SBIconLegibilityLabelView
-- (void)updateIconLabelWithSettings:(_UILegibilitySettings *)settings imageParameters:(id)params {
+- (void)updateIconLabelWithSettings:(id)settings imageParameters:(id)params {
     if (g_enabled && g_hideTextShadow && settings) {
-        settings.shadowAlpha = 0.0;
-        settings.shadowRadius = 0.0;
-        settings.shadowColor = [UIColor clearColor];
+        @try {
+            [settings setValue:@(0.0) forKey:@"shadowAlpha"];
+            [settings setValue:@(0.0) forKey:@"shadowRadius"];
+            [settings setValue:[UIColor clearColor] forKey:@"shadowColor"];
+        } @catch (NSException *e) {}
     }
     %orig(settings, params);
 }
