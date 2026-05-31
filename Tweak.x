@@ -1403,6 +1403,8 @@ static void EnsureEngineViewIsMounted() {
 // 为了避免编译器警告，声明扩展方法
 @interface CSCoverSheetViewController (Zone)
 - (void)zone_tickProgress;
+- (void)zone_screenSleep;
+- (void)zone_screenWake;
 @end
 
 %hook CSCoverSheetViewController
@@ -1415,18 +1417,30 @@ static void EnsureEngineViewIsMounted() {
         // 绑定到通用线程，哪怕系统在疯狂执行手势弹簧动画，照样捕获不误
         [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         objc_setAssociatedObject(self, "ZoneTicker", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
+        // 防御性策略：加入息屏自动切断侦听（超级省电）
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenSleep) name:@"ZoneEngineSleep" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenWake) name:@"ZoneEngineWake" object:nil];
     }
+}
+
+// 内存清理防护
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineSleep" object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineWake" object:nil];
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker");
+    if (link) [link invalidate];
+    %orig;
 }
 
 // 【物理位置提取引擎】：真正捕获到了导致弹跳的根源！
 %new
 - (void)zone_tickProgress {
-    if (!g_enabled) return;
+    if (!g_enabled || !g_isScreenOn) return;
     
     // CoreAnimation 底层 presentationLayer：包含系统正处于运动回弹状态的每一帧
     CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
     
-    // 【核弹级突破】：不要读自己的坐标！在 iOS 14 中滑动的是它的老祖宗（系统盖板），
     // 必须直接利用 `convertRect:toLayer:nil` 打穿组件树，获取在全屏幕上绝对的、包含物理减速的最终弹簧坐标！
     CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
     
@@ -1437,7 +1451,7 @@ static void EnsureEngineViewIsMounted() {
     double engineProgress = -yOffset / screenHeight;
     engineProgress = MAX(0.0, MIN(1.0, engineProgress));
     
-    // 【修复】：使用全局变量 g_lastTickProgress 代替静态变量，彻底防止息屏缓存锁死
+    // 使用全局变量 g_lastTickProgress 代替静态变量，彻底防止息屏缓存锁死
     if (ABS(engineProgress - g_lastTickProgress) > 0.0001) {
         g_lastTickProgress = engineProgress;
         
@@ -1463,15 +1477,24 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
+%new
+- (void)zone_screenSleep {
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker");
+    if (link) link.paused = YES;
+}
+
+%new
+- (void)zone_screenWake {
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker");
+    if (link) link.paused = NO;
+}
+
+
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
-        // =========================================================================
-        // 【iOS 14-15 究极修复】：完美移植 iOS 16 的 _backgroundContentViewController 容器挂载
-        // 彻底解决下拉通知中心时传送门“溢出、跑出去”的问题，将其严格锁定在锁屏背景层内。
-        // =========================================================================
         UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
@@ -1489,8 +1512,12 @@ static void EnsureEngineViewIsMounted() {
                 portalView.hidesSourceView = NO;
                 portalView.matchesAlpha = NO; 
                 portalView.alpha = 1.0; 
-                portalView.matchesPosition = YES;
-                portalView.matchesTransform = YES;
+                
+                // 【核心修复！！！】：这里必须设置为 NO
+                // 只有禁用绝对屏幕坐标强锁（MatchesPosition），Portal 才可以跟随滑动锁屏的 View 被下拉！
+                portalView.matchesPosition = NO;
+                portalView.matchesTransform = NO;
+                
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 g_portalView = portalView;
@@ -1500,7 +1527,6 @@ static void EnsureEngineViewIsMounted() {
                 portalView.sourceView = engineView; 
             }
 
-            // 【挂载逻辑同步 iOS 16】：直接塞进 bgVC.view 容器并做裁切隐藏，禁止放在 self.view 顶层
             if (bgVC && bgVC.view) {
                 if (portalView.superview != bgVC.view) {
                     [portalView removeFromSuperview];
@@ -1777,13 +1803,41 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBIconController
-- (instancetype)init {
-    id res = %orig;
-    [[NSNotificationCenter defaultCenter] addObserver:res selector:@selector(zone_forceIconRefresh) name:@"ZoneForceIconRefresh" object:nil];
-    return res;
+- (void)viewDidLoad {
+    %orig;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_forceIconRefresh) name:@"ZoneForceIconRefresh" object:nil];
 }
+
+// 内存清理防护
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceIconRefresh" object:nil];
+    %orig;
+}
+
+// 【文字阴影极速生效核心补丁】：通过深拷贝强制绕过系统渲染管线缓存，立刻刷图标
 %new
 - (void)zone_forceIconRefresh {
+    id iconManager = nil;
+    if ([self respondsToSelector:@selector(iconManager)]) {
+        iconManager = [self performSelector:@selector(iconManager)];
+    }
+    
+    if (iconManager && [iconManager respondsToSelector:@selector(legibilitySettingsDidChange:)]) {
+        Class wcClass = NSClassFromString(@"SBWallpaperController");
+        if ([wcClass respondsToSelector:@selector(sharedInstance)]) {
+            id wc = [wcClass sharedInstance];
+            if ([wc respondsToSelector:@selector(legibilitySettingsForVariant:)]) {
+                id settings = [wc performSelector:@selector(legibilitySettingsForVariant:) withObject:@(1)]; // 1代表主屏幕
+                if (settings && [settings respondsToSelector:@selector(copy)]) {
+                    id newSettings = [settings copy];
+                    [iconManager performSelector:@selector(legibilitySettingsDidChange:) withObject:newSettings];
+                    return;
+                }
+            }
+        }
+    }
+    
+    // 如果上面的新方法因某些版本原因没触发，则保留此经典兜底方法
     if ([self respondsToSelector:@selector(_legibilitySettingsChanged)]) {
         [self performSelector:@selector(_legibilitySettingsChanged)];
     } else if ([self respondsToSelector:@selector(updateLegibility)]) {
