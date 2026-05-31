@@ -224,6 +224,7 @@ static UIViewController* safelyGetIvarAsViewController(id object, const char* iv
 static BOOL g_enabled = NO;
 static BOOL g_enhanced_engine = NO;
 static BOOL g_hideTextShadow = NO;
+static BOOL g_lowPowerPause = NO; // 新增：低电量暂停开关
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
@@ -248,6 +249,7 @@ static void reloadPrefs() {
     g_enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &valid) ? valid : NO;
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
     g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
+    g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO; // 新增读取
     
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
     
@@ -304,6 +306,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
+        // 通知配置更改，可能需要立即暂停或恢复视频
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil]; 
     });
 }
 
@@ -337,6 +341,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
             self.player.muted = YES;
+            // 【核心防打断】：严格禁止外部媒体强占和影响播放器
+            self.player.allowsExternalPlayback = NO;
             self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
             if (@available(iOS 12.0, *)) {
                 self.player.preventsDisplaySleepDuringVideoPlayback = NO;
@@ -348,6 +354,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
             self.playerLayer.frame = self.bounds;
             [self.layer addSublayer:self.playerLayer];
+            
+            // 【防停止保护伞】：监听打断与停滞，在底层自动强制拉起
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:UIApplicationDidBecomeActiveNotification object:nil];
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:AVPlayerItemPlaybackStalledNotification object:nil];
         }
     }
     return self;
@@ -358,10 +368,23 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
+    // 【激进唤醒】：只要还在屏幕上渲染且屏幕亮着，强制保证视频没被系统冻结
+    if (g_isScreenOn && g_enabled && g_isVideoMode) {
+        [self playVideo];
+    }
 }
 
 - (void)playVideo {
-    if (self.player && self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying) {
+    if (!self.player) return;
+    
+    // 【精准低电量拦截】
+    if (g_lowPowerPause && [[NSProcessInfo processInfo] isLowPowerModeEnabled]) {
+        [self pauseVideo];
+        return;
+    }
+    
+    // 若被意外挂起（rate == 0），则强制重新播放，做到卡顿后彻底无感恢复
+    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
         [self.player play];
     }
 }
@@ -373,6 +396,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)cleanUpEngineSafely {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self pauseVideo];
     if (self.looper) {
         [self.looper disableLooping];
@@ -413,6 +437,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
+        
+        // 【动态电量监控】：监听电量模式突变
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(powerStateChanged) name:NSProcessInfoPowerStateDidChangeNotification object:nil];
     }
     return self;
 }
@@ -428,8 +455,23 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.homeVideoView) self.homeVideoView.frame = self.bounds;
 }
 
+- (void)powerStateChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_enabled && g_isVideoMode && g_isScreenOn) {
+            [self onWakeUp]; // 复用 onWakeUp 的逻辑来快速暂停或恢复
+        }
+    });
+}
+
 - (void)onWakeUp {
     if (!g_enabled || !g_isVideoMode) return;
+    
+    // 【电量哨兵】检测到低电量且开关开启，彻底抑制播放
+    if (g_lowPowerPause && [[NSProcessInfo processInfo] isLowPowerModeEnabled]) {
+        [self.lockVideoView pauseVideo];
+        [self.homeVideoView pauseVideo];
+        return;
+    }
     
     if (self.isSingleVideoMode) {
         [self.lockVideoView playVideo];
@@ -479,6 +521,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         self.backgroundColor = [UIColor clearColor];
+        // 这里会自动匹配我们 .m 中设置的 同素材选项 完美复用内存！
         self.isSingleVideoMode = (hasLock && hasHome && [g_lockVideoPath isEqualToString:g_homeVideoPath]);
         
         if (self.isSingleVideoMode) {
@@ -488,7 +531,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 self.lockVideoView.alpha = 1.0;
                 [self addSubview:self.lockVideoView];
             }
-            if (g_isScreenOn) [self.lockVideoView playVideo];
+            if (g_isScreenOn) [self onWakeUp]; // 使用 onWakeUp 走低电量检查
         } else {
             // 【核心修复防鬼影】：锁屏和桌面分开。
             if (hasLock) {
@@ -507,8 +550,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
             }
             if (g_isScreenOn) {
-                if (self.lockVideoView) [self.lockVideoView playVideo];
-                if (self.homeVideoView) [self.homeVideoView playVideo];
+                [self onWakeUp]; // 使用 onWakeUp 走低电量检查
             }
         }
     });
