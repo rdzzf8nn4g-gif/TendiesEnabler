@@ -74,7 +74,7 @@ typedef struct {
 @end
 
 // =========================================================================
-// 核心修复：纯血 CoreAnimation 底层解析器 (拯救 iOS14/15 崩溃)
+// 核心修复：纯血 CoreAnimation 底层解析器 (拯救 iOS14/15 崩溃与颠倒问题)
 // =========================================================================
 @interface CAStateController : NSObject
 - (instancetype)initWithLayer:(CALayer *)layer;
@@ -86,13 +86,7 @@ typedef struct {
 @property (readonly) CALayer *rootLayer;
 @end
 
-@interface _UICAPackageView : UIView
-- (instancetype)initWithContentsOfURL:(NSURL *)url publishedObjectViewClassMap:(NSDictionary *)map;
-- (BOOL)setState:(NSString *)state;
-@end
-
 @interface ZonePackageFallbackView : UIView
-@property (nonatomic, strong) UIView *uiPackageView; 
 @property (nonatomic, strong) id package;            
 @property (nonatomic, strong) id stateController;    
 - (instancetype)initWithURL:(NSURL *)url;
@@ -105,18 +99,8 @@ typedef struct {
     self = [super initWithFrame:CGRectZero];
     if (self) {
         NSURL *dirURL = [url copy];
-        Class UICPClass = NSClassFromString(@"_UICAPackageView");
-        if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
-            @try {
-                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
-                if (_uiPackageView) {
-                    _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                    [self addSubview:_uiPackageView];
-                    return self;
-                }
-            } @catch (NSException *e) {}
-        }
         
+        // 【核心大手术】：彻底移除了有 Bug 的 _UICAPackageView，全盘走纯血 CoreAnimation！
         Class CAPackageClass = NSClassFromString(@"CAPackage");
         if (CAPackageClass) {
             NSError *err = nil;
@@ -130,9 +114,7 @@ typedef struct {
                 if (root) {
                     [self.layer addSublayer:root];
                     
-                    // ==========================================
-                    // 【iOS 14-15 修复 1/2】：强制继承 CoreAnimation 的翻转系，防止桌面壁纸上下颠倒
-                    // ==========================================
+                    // 【这就是为什么你的壁纸不再颠倒了】：继承 CA 最底层的坐标系翻转！
                     self.layer.geometryFlipped = root.geometryFlipped;
                     
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
@@ -148,14 +130,8 @@ typedef struct {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (_uiPackageView) {
-        _uiPackageView.frame = self.bounds;
-    } else if (_package) {
-        CALayer *root = [_package valueForKey:@"rootLayer"];
-        if (root) {
-            root.frame = self.bounds;
-        }
-    }
+    // 【重要留空】：去除了 root.frame = self.bounds;
+    // 强制把控制权移交给 EnhancedEngine，保留最正确的物理缩放比例！
 }
 
 - (BOOL)setState:(NSString *)state {
@@ -163,9 +139,6 @@ typedef struct {
 }
 
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated {
-    if (_uiPackageView && [_uiPackageView respondsToSelector:@selector(setState:)]) {
-        return (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
-    }
     if (_stateController && _package) {
         CALayer *root = [_package valueForKey:@"rootLayer"];
         if (root) {
@@ -504,7 +477,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             
-            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
+            // 【精准切分器】保留 iOS16-17 原版，强迫 iOS14-15 全体走底层 CoreAnimation 降级渲染，从根本上隔离颠倒 Bug！
+            if (NSClassFromString(@"PBUIWallpaperViewController") == Nil) {
+                PackageViewClass = [ZonePackageFallbackView class];
+            } else if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
                 PackageViewClass = [ZonePackageFallbackView class];
             }
             if (!PackageViewClass) return;
@@ -969,7 +945,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             
-            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
+            // 【精准切分器】保留 iOS16-17 原版，强迫 iOS14-15 全体走底层 CoreAnimation 降级渲染，从根本上隔离颠倒 Bug！
+            if (NSClassFromString(@"PBUIWallpaperViewController") == Nil) {
+                PackageViewClass = [ZonePackageFallbackView class];
+            } else if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
                 PackageViewClass = [ZonePackageFallbackView class];
             }
             if (!PackageViewClass) return;
@@ -1325,18 +1304,14 @@ static void EnsureEngineViewIsMounted() {
     // CoreAnimation 底层 presentationLayer：包含系统正处于运动回弹状态的每一帧
     CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
     
-    // 【核弹级突破】：不要读自己的坐标！在 iOS 14 中滑动的是它的老祖宗（系统盖板），
-    // 必须直接利用 `convertRect:toLayer:nil` 打穿组件树，获取在全屏幕上绝对的、包含物理减速的最终弹簧坐标！
+    // 【核弹级突破】：直接打穿组件树，获取在全屏幕上绝对的、包含物理减速的最终弹簧坐标！
     CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
     
     double yOffset = absoluteRect.origin.y;
     double screenHeight = [UIScreen mainScreen].bounds.size.height;
     
-    // ==========================================
-    // 【iOS 14-15 修复 2/2】：使用负号严格限定解锁滑动方向
-    // 原来：ABS(yOffset) 会把下拉的回弹也计算为解锁进度
-    // 现在：下拉 (正数) 变为负，会被下方的 MAX(0.0, ...) 彻底屏蔽归零
-    // ==========================================
+    // 【保留极其精准的下拉正负判断】：
+    // 将滑动位移精确转换为进度，负向下拉会被严格掐断为 0 避免错乱假解锁！
     double engineProgress = -yOffset / screenHeight;
     engineProgress = MAX(0.0, MIN(1.0, engineProgress));
     
