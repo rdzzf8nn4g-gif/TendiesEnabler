@@ -3,6 +3,8 @@
 #import <Preferences/PSTableCell.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <ImageIO/ImageIO.h>
+#import <PhotosUI/PhotosUI.h> // 【新增】相册导入支持
+#import <AVFoundation/AVFoundation.h> // 【新增】视频处理支持
 #include <sys/stat.h>
 #include <unistd.h>
 #include <spawn.h>
@@ -166,7 +168,7 @@ static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
 }
 
 // --------------------------------------------------------
-// 路径管理
+// 路径管理与辅助工具
 // --------------------------------------------------------
 static NSString * GetZoneStorageDir() {
     NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zone.media";
@@ -180,10 +182,8 @@ static NSString * GetZoneStorageDir() {
 #endif
 }
 
-static NSString * GetWallpapersDir() {
-    return [GetZoneStorageDir() stringByAppendingPathComponent:@"Wallpapers"];
-}
-
+static NSString * GetWallpapersDir() { return [GetZoneStorageDir() stringByAppendingPathComponent:@"Wallpapers"]; }
+static NSString * GetVideoWallpapersDir() { return [GetZoneStorageDir() stringByAppendingPathComponent:@"Videos"]; } // 【新增】视频壁纸专属目录
 static NSString * GetPrefsPlistPath() {
     NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zoneprefs.plist";
 #if __has_include(<roothide.h>)
@@ -196,12 +196,158 @@ static NSString * GetPrefsPlistPath() {
 #endif
 }
 
+// 【新增】注销设备功能
+static void respringDevice() {
+    pid_t pid;
+    const char* args[] = {"killall", "SpringBoard", NULL};
+    posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char* const*)args, NULL);
+}
 
+// ========================================================
+// 【新增核心】独立的视频壁纸设置页控制器
+// ========================================================
+@interface ZoneVideoPrefsController : PSListController <PHPickerViewControllerDelegate, UIDocumentPickerDelegate>
+@property (nonatomic, assign) NSInteger targetVideoType; // 0 = 锁屏, 1 = 桌面
+@end
+
+@implementation ZoneVideoPrefsController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"视频壁纸模式";
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:GetVideoWallpapersDir()]) {
+        [fm createDirectoryAtPath:GetVideoWallpapersDir() withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
+    }
+}
+
+- (NSMutableArray *)specifiers {
+    if (!_specifiers) {
+        NSMutableArray *specs = [NSMutableArray array];
+        
+        PSSpecifier *group1 = [PSSpecifier preferenceSpecifierNamed:@"全局控制" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [group1 setProperty:@"视频壁纸模式开启后，交互壁纸功能将自动休眠以节省资源。" forKey:@"footerText"];
+        [specs addObject:group1];
+        
+        PSSpecifier *enableSpec = [PSSpecifier preferenceSpecifierNamed:@"启用插件" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        [enableSpec setProperty:@"Enabled" forKey:@"key"];
+        [enableSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+        [specs addObject:enableSpec];
+        
+        PSSpecifier *group2 = [PSSpecifier preferenceSpecifierNamed:@"锁屏视频" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [specs addObject:group2];
+        
+        PSSpecifier *lsAlbumSpec = [PSSpecifier preferenceSpecifierNamed:@"从相册导入 (锁屏)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        lsAlbumSpec->action = @selector(importLSSFromAlbum:);
+        [specs addObject:lsAlbumSpec];
+        
+        PSSpecifier *lsFileSpec = [PSSpecifier preferenceSpecifierNamed:@"从文件导入 (锁屏)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        lsFileSpec->action = @selector(importLSSFromFile:);
+        [specs addObject:lsFileSpec];
+
+        PSSpecifier *group3 = [PSSpecifier preferenceSpecifierNamed:@"桌面视频" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [specs addObject:group3];
+        
+        PSSpecifier *hsAlbumSpec = [PSSpecifier preferenceSpecifierNamed:@"从相册导入 (桌面)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        hsAlbumSpec->action = @selector(importHSSFromAlbum:);
+        [specs addObject:hsAlbumSpec];
+        
+        PSSpecifier *hsFileSpec = [PSSpecifier preferenceSpecifierNamed:@"从文件导入 (桌面)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        hsFileSpec->action = @selector(importHSSFromFile:);
+        [specs addObject:hsFileSpec];
+        
+        _specifiers = specs;
+    }
+    return _specifiers;
+}
+
+- (void)importLSSFromAlbum:(PSSpecifier *)spec { self.targetVideoType = 0; [self showPhotoPicker]; }
+- (void)importHSSFromAlbum:(PSSpecifier *)spec { self.targetVideoType = 1; [self showPhotoPicker]; }
+- (void)importLSSFromFile:(PSSpecifier *)spec { self.targetVideoType = 0; [self showFilePicker]; }
+- (void)importHSSFromFile:(PSSpecifier *)spec { self.targetVideoType = 1; [self showFilePicker]; }
+
+- (void)showPhotoPicker {
+    if (@available(iOS 14.0, *)) {
+        PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+        config.filter = [PHPickerFilter videosFilter];
+        config.selectionLimit = 1;
+        PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
+        picker.delegate = self;
+        [self presentViewController:picker animated:YES completion:nil];
+    }
+}
+
+- (void)showFilePicker {
+    if (@available(iOS 14.0, *)) {
+        UTType *videoType = [UTType typeWithIdentifier:@"public.movie"];
+        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[videoType]];
+        picker.delegate = self;
+        [self presentViewController:picker animated:YES completion:nil];
+    }
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14)){
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    if (results.count == 0) return;
+    
+    NSItemProvider *provider = results.firstObject.itemProvider;
+    if ([provider hasItemConformingToTypeIdentifier:UTTypeMovie.identifier]) {
+        [provider loadFileRepresentationForTypeIdentifier:UTTypeMovie.identifier completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+            if (url) {
+                [self processImportedVideoAtURL:url];
+            }
+        }];
+    }
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count > 0) {
+        [self processImportedVideoAtURL:urls.firstObject];
+    }
+}
+
+- (void)processImportedVideoAtURL:(NSURL *)url {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        BOOL isAccessing = [url startAccessingSecurityScopedResource];
+        
+        NSString *fileName = [NSString stringWithFormat:@"%@_%ld.mp4", (self.targetVideoType == 0 ? @"LS" : @"HS"), (long)[[NSDate date] timeIntervalSince1970]];
+        NSString *destPath = [GetVideoWallpapersDir() stringByAppendingPathComponent:fileName];
+        
+        NSError *error = nil;
+        if ([[NSFileManager defaultManager] copyItemAtPath:url.path toPath:destPath error:&error]) {
+            chown(destPath.UTF8String, 501, 501);
+            chmod(destPath.UTF8String, 0777);
+            
+            NSString *prefKey = self.targetVideoType == 0 ? @"LSVideoPath" : @"HSVideoPath";
+            CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
+            CFPreferencesSetAppValue((__bridge CFStringRef)prefKey, (__bridge CFStringRef)destPath, appID);
+            CFPreferencesAppSynchronize(appID);
+            
+            NSString *plistPath = GetPrefsPlistPath();
+            NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+            prefs[prefKey] = destPath;
+            [prefs writeToFile:plistPath atomically:YES];
+            chown(plistPath.UTF8String, 501, 501);
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"视频壁纸已实时生效。" preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            });
+        }
+        
+        if (isAccessing) [url stopAccessingSecurityScopedResource];
+    });
+}
+@end
+
+
+// =======================================
+// 原主面板 (ZonePrefsRootListController)
+// =======================================
 @implementation ZonePrefsRootListController
-
-// =======================================
-// 自定义UI注入区域
-// =======================================
 
 // 点击增强引擎旁的问号按钮后弹出的提示
 - (void)showEnhancedEngineInfo {
@@ -365,8 +511,17 @@ static NSString * GetPrefsPlistPath() {
     return UITableViewStyleGrouped;
 }
 
+// 【新增核心保护】每次回到主交互壁纸页面，自动重置模式为 0，防止逻辑冲突
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self switchWallpaperMode:0];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
+    
+    // 【新增】注册右上角菜单导航
+    [self setupNavigationMenu];
     
     UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -424,6 +579,43 @@ static NSString * GetPrefsPlistPath() {
         UITableView *tableView = [self performSelector:@selector(table)];
         [tableView setTableHeaderView:headerView];
     }
+}
+
+// 【新增】导航栏右上角菜单构建
+- (void)setupNavigationMenu {
+    if (@available(iOS 14.0, *)) {
+        UIAction *videoAction = [UIAction actionWithTitle:@"视频壁纸模式" image:[UIImage systemName:@"video"] identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
+            [self switchWallpaperMode:1];
+            ZoneVideoPrefsController *videoVC = [[ZoneVideoPrefsController alloc] init];
+            [self.navigationController pushViewController:videoVC animated:YES];
+        }];
+        
+        UIAction *respringAction = [UIAction actionWithTitle:@"注销设备" image:[UIImage systemName:@"arrow.clockwise"] identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
+            respringDevice();
+        }];
+        respringAction.attributes = UIMenuElementAttributesDestructive;
+        
+        UIMenu *menu = [UIMenu menuWithTitle:@"" children:@[videoAction, respringAction]];
+        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemName:@"ellipsis.circle"] menu:menu];
+    } else {
+        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"注销" style:UIBarButtonItemStylePlain target:self action:@selector(fallbackRespring)];
+    }
+}
+
+- (void)fallbackRespring { respringDevice(); }
+
+- (void)switchWallpaperMode:(NSInteger)mode {
+    CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
+    CFPreferencesSetAppValue(CFSTR("WallpaperMode"), (__bridge CFNumberRef)@(mode), appID);
+    CFPreferencesAppSynchronize(appID);
+    
+    NSString *plistPath = GetPrefsPlistPath();
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+    prefs[@"WallpaperMode"] = @(mode);
+    [prefs writeToFile:plistPath atomically:YES];
+    
+    // 广播重绘，通知底层引擎进行模式隔离
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
 }
 
 // 动态追加列表
