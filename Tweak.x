@@ -74,12 +74,27 @@ typedef struct {
 @end
 
 // =========================================================================
-// 核心救场组件：纯血底层 CoreAnimation 解包视图 (解决 iOS14/15 崩溃问题)
+// 核心修复：纯血 CoreAnimation 底层解析器 (拯救 iOS14/15 崩溃)
 // =========================================================================
+@interface CAStateController : NSObject
+- (instancetype)initWithLayer:(CALayer *)layer;
+- (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
+@end
+
+@interface CAPackage : NSObject
++ (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)error;
+@property (readonly) CALayer *rootLayer;
+@end
+
+@interface _UICAPackageView : UIView
+- (instancetype)initWithContentsOfURL:(NSURL *)url publishedObjectViewClassMap:(NSDictionary *)map;
+- (BOOL)setState:(NSString *)state;
+@end
+
 @interface ZonePackageFallbackView : UIView
-@property (nonatomic, strong) UIView *uiPackageView; // 底层私有 _UICAPackageView
-@property (nonatomic, strong) id package;            // 替身 CAPackage
-@property (nonatomic, strong) id stateController;    // CAStateController
+@property (nonatomic, strong) UIView *uiPackageView; 
+@property (nonatomic, strong) id package;            
+@property (nonatomic, strong) id stateController;    
 - (instancetype)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated;
@@ -90,11 +105,12 @@ typedef struct {
     self = [super initWithFrame:CGRectZero];
     if (self) {
         NSURL *dirURL = [url copy];
-        // 尝试使用最高效的 _UICAPackageView (iOS 10+ 均存在)
+        // 尝试使用最高效的 _UICAPackageView
         Class UICPClass = NSClassFromString(@"_UICAPackageView");
         if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
             @try {
-                _uiPackageView = [[UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
+                // 【修复点】：强制转换为 id，消除编译器的警告
+                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
                 if (_uiPackageView) {
                     _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                     [self addSubview:_uiPackageView];
@@ -107,10 +123,11 @@ typedef struct {
         Class CAPackageClass = NSClassFromString(@"CAPackage");
         if (CAPackageClass) {
             NSError *err = nil;
-            _package = [CAPackageClass packageWithContentsOfURL:dirURL type:@"com.apple.coreanimation-package" options:nil error:&err];
+            // 【修复点】：强制转换为 id，消除编译器的警告
+            _package = [(id)CAPackageClass packageWithContentsOfURL:dirURL type:@"com.apple.coreanimation-package" options:nil error:&err];
             if (!_package) {
                 NSURL *camlURL = [dirURL URLByAppendingPathComponent:@"main.caml"];
-                _package = [CAPackageClass packageWithContentsOfURL:camlURL type:@"com.apple.coreanimation-xml" options:nil error:&err];
+                _package = [(id)CAPackageClass packageWithContentsOfURL:camlURL type:@"com.apple.coreanimation-xml" options:nil error:&err];
             }
             if (_package) {
                 CALayer *root = [_package valueForKey:@"rootLayer"];
@@ -118,7 +135,7 @@ typedef struct {
                     [self.layer addSublayer:root];
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
-                        _stateController = [[CAStateControllerClass alloc] initWithLayer:self.layer];
+                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:self.layer];
                     }
                 }
             }
@@ -485,7 +502,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             
-            // 🔥 核心降级：若 iOS 14/15 发现系统不支持 initWithURL，则自动用 ZonePackageFallbackView 代替
+            // 🔥 核心降级：若发现系统不支持 initWithURL，则自动用 ZonePackageFallbackView 代替
             if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
                 PackageViewClass = [ZonePackageFallbackView class];
             }
@@ -493,7 +510,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             @autoreleasepool {
                 if (foundBg) {
-                    self.bgView = (BSUICAPackageView *)[[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundBg isDirectory:YES]];
+                    // 【修复点】：强制转换为 id 消除编译警告
+                    self.bgView = (BSUICAPackageView *)[[(id)PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundBg isDirectory:YES]];
                     if (self.bgView) {
                         [self addSubview:self.bgView];
                         self.bgParser = [ZoneCAMLParserLegacy new]; 
@@ -501,7 +519,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     }
                 }
                 if (foundFloat) {
-                    self.floatingView = (BSUICAPackageView *)[[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFloat isDirectory:YES]];
+                    self.floatingView = (BSUICAPackageView *)[[(id)PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFloat isDirectory:YES]];
                     if (self.floatingView) {
                         [self addSubview:self.floatingView];
                         self.floatParser = [ZoneCAMLParserLegacy new]; 
@@ -509,7 +527,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     }
                 }
                 if (foundFg) {
-                    self.fgView = (BSUICAPackageView *)[[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFg isDirectory:YES]];
+                    self.fgView = (BSUICAPackageView *)[[(id)PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFg isDirectory:YES]];
                     if (self.fgView) {
                         [self addSubview:self.fgView];
                         self.fgParser = [ZoneCAMLParserLegacy new]; 
@@ -938,7 +956,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             
-            // 🔥 核心降级：若 iOS 14/15 发现系统不支持 initWithURL，则自动用 ZonePackageFallbackView 代替
+            // 🔥 核心降级：若发现系统不支持 initWithURL，则自动用 ZonePackageFallbackView 代替
             if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
                 PackageViewClass = [ZonePackageFallbackView class];
             }
@@ -946,7 +964,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             @autoreleasepool {
                 if (foundBg) {
-                    self.bgView = (BSUICAPackageView *)[[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundBg isDirectory:YES]];
+                    // 【修复点】：强制转换为 id 消除编译警告
+                    self.bgView = (BSUICAPackageView *)[[(id)PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundBg isDirectory:YES]];
                     if (self.bgView) {
                         [self addSubview:self.bgView];
                         self.bgParser = [ZoneCAMLParserEnhanced new]; 
@@ -954,7 +973,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     }
                 }
                 if (foundFloat) {
-                    self.floatingView = (BSUICAPackageView *)[[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFloat isDirectory:YES]];
+                    self.floatingView = (BSUICAPackageView *)[[(id)PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFloat isDirectory:YES]];
                     if (self.floatingView) {
                         [self addSubview:self.floatingView];
                         self.floatParser = [ZoneCAMLParserEnhanced new]; 
@@ -962,7 +981,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     }
                 }
                 if (foundFg) {
-                    self.fgView = (BSUICAPackageView *)[[PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFg isDirectory:YES]];
+                    self.fgView = (BSUICAPackageView *)[[(id)PackageViewClass alloc] initWithURL:[NSURL fileURLWithPath:foundFg isDirectory:YES]];
                     if (self.fgView) {
                         [self addSubview:self.fgView];
                         self.fgParser = [ZoneCAMLParserEnhanced new]; 
