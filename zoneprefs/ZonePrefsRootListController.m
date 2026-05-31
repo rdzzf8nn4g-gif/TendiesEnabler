@@ -205,7 +205,7 @@ static NSString * GetPrefsPlistPath() {
 
 // 点击增强引擎旁的问号按钮后弹出的提示
 - (void)showEnhancedEngineInfo {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"增强复杂壁纸识别" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后增强复杂交互壁纸识别" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -234,10 +234,10 @@ static NSString * GetPrefsPlistPath() {
             infoBtn.translatesAutoresizingMaskIntoConstraints = NO;
             [cell.contentView addSubview:infoBtn];
             
-            // 将按钮锚定在ContentView的右侧外缘（由于 AccessoryView 占据最右，ContentView在它左边，完美呈现于文字与开关中间靠右位置）
+            // 【核心修正点】：绑定在文字标签的右侧，彻底避开 Switch 开关的图层遮挡
             [NSLayoutConstraint activateConstraints:@[
-                [infoBtn.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-                [infoBtn.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8]
+                [infoBtn.centerYAnchor constraintEqualToAnchor:cell.textLabel.centerYAnchor],
+                [infoBtn.leadingAnchor constraintEqualToAnchor:cell.textLabel.trailingAnchor constant:10] // 距离文字右侧 10 像素
             ]];
         }
     }
@@ -425,8 +425,8 @@ static NSString * GetPrefsPlistPath() {
         // 延时一点确保 UIDocumentPicker 完全退出动画后再弹框，避免UI冲突
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (totalMB > 40.0) {
-                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"超大文件警告" 
-                                                                               message:[NSString stringWithFormat:@"检测到将要导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入此类超大体积引擎包可能会导致设备在锁屏严重发热、卡顿甚至死机。\n是否确认要继续导入？", totalMB] 
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
+                                                                               message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时、卡顿甚至卡死。\n是否继续导入？", totalMB] 
                                                                         preferredStyle:UIAlertControllerStyleAlert];
                 [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
                 [alert addAction:[UIAlertAction actionWithTitle:@"继续导入" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
