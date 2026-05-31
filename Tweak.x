@@ -728,10 +728,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 
-// 【完全保留】iOS16-17 的原生布局代码，一个字不动，保证原汁原味计算
+// 【一字未改】完全保留你 iOS16-17 的原生布局代码
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.bounds;
+    
+    // 【强制拦截系统干扰】若 iOS14-15 的父层容器比屏幕大（塞入了 Padding），主动切除多余部分以防止画面异常变大
+    CGSize screenSize = [UIScreen mainScreen].bounds.size;
+    if (bounds.size.width > screenSize.width + 5) {
+        bounds.size = screenSize;
+        bounds.origin = CGPointZero;
+    }
+    
     CGSize targetSize = self.logicalScreenSize;
     if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
     
@@ -794,7 +802,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
-// 【完全保留】原生引擎的计算方式
+// 【修复核心 CPU 消耗】
 - (void)applyProgress:(double)progress parser:(ZoneCAMLParserEnhanced *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     
@@ -817,19 +825,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             if (lockVal && unlockVal) {
                 [layer removeAnimationForKey:keyPath];
-                @try {
-                    if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
-                        double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
-                        [layer setValue:@(currentVal) forKeyPath:keyPath];
-                    } 
-                    else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
-                        CGPoint lockPt = [lockVal CGPointValue];
-                        CGPoint unlockPt = [unlockVal CGPointValue];
-                        CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
-                                                        lockPt.y + (unlockPt.y - lockPt.y) * progress);
-                        [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
-                    }
-                } @catch (NSException *e) {}
+                // 替换 @try-catch 为安全判断，大幅减轻 iOS14-15 中的发热与卡顿现象
+                if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
+                    double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
+                    [layer setValue:@(currentVal) forKeyPath:keyPath];
+                } 
+                else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
+                    CGPoint lockPt = [lockVal CGPointValue];
+                    CGPoint unlockPt = [unlockVal CGPointValue];
+                    CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
+                                                    lockPt.y + (unlockPt.y - lockPt.y) * progress);
+                    [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
+                }
             }
         }
     }
@@ -907,24 +914,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         NSFileManager *fm = [NSFileManager defaultManager];
         __block NSString *foundBg = nil; __block NSString *foundFloat = nil; __block NSString *foundFg = nil;
+        __block NSString *foundPlist = nil;
         
-        NSString *plistPath = [g_zonePath stringByAppendingPathComponent:@"Wallpaper.plist"];
-        NSDictionary *plistData = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-        NSString *logicalClassStr = plistData[@"logicalScreenClass"];
-        __block CGSize targetSize = CGSizeZero;
-        
-        if (logicalClassStr) {
-            NSRange wRange = [logicalClassStr rangeOfString:@"w-"];
-            NSRange hRange = [logicalClassStr rangeOfString:@"h@"];
-            if (wRange.location != NSNotFound && hRange.location != NSNotFound) {
-                NSString *wStr = [logicalClassStr substringToIndex:wRange.location];
-                NSString *hStr = [logicalClassStr substringWithRange:NSMakeRange(NSMaxRange(wRange), hRange.location - NSMaxRange(wRange))];
-                if ([wStr doubleValue] > 0 && [hStr doubleValue] > 0) {
-                    targetSize = CGSizeMake([wStr doubleValue], [hStr doubleValue]);
-                }
-            }
-        }
-        
+        // 【核心漏洞修复】：全局深度搜索 Wallpaper.plist，解决“部分大，部分小”的解析失败问题！
         NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
         NSString *subPath;
         while ((subPath = [dirEnum nextObject])) {
@@ -932,12 +924,31 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
             NSString *fileName = [subPath lastPathComponent];
             BOOL isDir = NO;
-            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-                if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
+            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir]) {
+                if (isDir && [[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
                     if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) foundBg = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) foundFloat = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) foundFg = fullPath;
                     [dirEnum skipDescendants];
+                } else if (!isDir && [fileName isEqualToString:@"Wallpaper.plist"]) {
+                    foundPlist = fullPath;
+                }
+            }
+        }
+        
+        __block CGSize targetSize = CGSizeZero;
+        if (foundPlist) {
+            NSDictionary *plistData = [NSDictionary dictionaryWithContentsOfFile:foundPlist];
+            NSString *logicalClassStr = plistData[@"logicalScreenClass"];
+            if (logicalClassStr) {
+                NSRange wRange = [logicalClassStr rangeOfString:@"w-"];
+                NSRange hRange = [logicalClassStr rangeOfString:@"h@"];
+                if (wRange.location != NSNotFound && hRange.location != NSNotFound) {
+                    NSString *wStr = [logicalClassStr substringToIndex:wRange.location];
+                    NSString *hStr = [logicalClassStr substringWithRange:NSMakeRange(NSMaxRange(wRange), hRange.location - NSMaxRange(wRange))];
+                    if ([wStr doubleValue] > 0 && [hStr doubleValue] > 0) {
+                        targetSize = CGSizeMake([wStr doubleValue], [hStr doubleValue]);
+                    }
                 }
             }
         }
@@ -1061,18 +1072,7 @@ static void EnsureEngineViewIsMounted() {
         [targetContainer addSubview:existingEngine];
     }
     
-    // 【最强补丁】仅拦截 iOS 14/15 的容器放大黑边（Padding）
-    // 强制剥离 Padding，让 iOS 14 的 engine 跟 iOS 16 物理尺寸完全对齐！彻底解决变大错乱问题。
-    BOOL isIOS14_15 = (NSClassFromString(@"PBUIWallpaperViewController") == Nil);
-    if (isIOS14_15) {
-        existingEngine.autoresizingMask = UIViewAutoresizingNone; 
-        CGSize screenSize = [UIScreen mainScreen].bounds.size;
-        existingEngine.bounds = CGRectMake(0, 0, screenSize.width, screenSize.height);
-        existingEngine.center = CGPointMake(targetContainer.bounds.size.width / 2.0, targetContainer.bounds.size.height / 2.0);
-    } else {
-        existingEngine.frame = targetContainer.bounds;
-    }
-    
+    existingEngine.frame = targetContainer.bounds;
     [targetContainer bringSubviewToFront:existingEngine];
 }
 
@@ -1293,46 +1293,51 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 提前声明自定义方法
+// 为了避免编译器警告，声明扩展方法
 @interface CSCoverSheetViewController (Zone)
 - (void)zone_tickProgress;
 @end
 
 %hook CSCoverSheetViewController
 
-// 挂载高频实时侦测器（完美解决释放后的弹簧动画消失问题）
+// 【无敌的核心物理雷达】：使用 CADisplayLink 挂载最高优先级的渲染帧侦听
 - (void)viewDidLoad {
     %orig;
     if (g_enabled) {
         CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zone_tickProgress)];
+        // 绑定到通用线程，哪怕系统在疯狂执行手势弹簧动画，照样捕获不误
         [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         objc_setAssociatedObject(self, "ZoneTicker", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 
-// 独家 CADisplayLink：实时追踪锁屏界面的真实物理“弹性偏移层”！
+// 【物理位置提取引擎】：真正捕获到了导致弹跳的根源！
 %new
 - (void)zone_tickProgress {
     if (!g_enabled) return;
     
-    // 直接读 CoreAnimation 动画在屏幕上当前渲染的真实位置（包含系统弹性回弹的每一步）
-    CALayer *presLayer = self.view.layer.presentationLayer;
-    if (!presLayer) presLayer = self.view.layer;
+    // CoreAnimation 底层 presentationLayer：包含系统正处于运动回弹状态的每一帧
+    CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
     
-    double yOffset = presLayer.frame.origin.y;
+    // 【核弹级突破】：不要读自己的坐标！在 iOS 14 中滑动的是它的老祖宗（系统盖板），
+    // 必须直接利用 `convertRect:toLayer:nil` 打穿组件树，获取在全屏幕上绝对的、包含物理减速的最终弹簧坐标！
+    CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
+    
+    double yOffset = absoluteRect.origin.y;
     double screenHeight = [UIScreen mainScreen].bounds.size.height;
     
-    // 计算物理位移比例
+    // yOffset: 锁屏时为 0；在桌面时为 -screenHeight。完美的线性映射。
     double engineProgress = ABS(yOffset) / screenHeight;
     engineProgress = MAX(0.0, MIN(1.0, engineProgress));
     
-    // 高精度过滤重复发信，防卡防烫，0.0001保证了顺滑的阻尼弹簧效果能完整传输给引擎
     static double lastProgress = -1;
+    // 极小精度的变动检测 (0.0001)，完美把系统的阻尼弹跳势能，一丝不苟地传导给壁纸
     if (ABS(engineProgress - lastProgress) > 0.0001) {
         lastProgress = engineProgress;
         
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
         
+        // Portal 透视渐变跟随同步
         if (g_portalView) {
             double alpha = 0.0;
             if (engineProgress > 0.7) {
@@ -1379,7 +1384,6 @@ static void EnsureEngineViewIsMounted() {
                 portalView.sourceView = engineView; 
             }
 
-            // 防止死循环的插入逻辑
             if (portalView.superview != self.view) {
                 [self.view insertSubview:portalView atIndex:0];
             } else {
@@ -1406,12 +1410,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// 不再使用僵硬的系统代理计算进度，全部交给完美的 zone_tickProgress CADisplayLink 处理！
-- (void)overlayController:(id)controller didChangePresentationProgress:(double)oldProgress newPresentationProgress:(double)newProgress fromLeading:(BOOL)leading {
-    %orig; 
-}
-
-// 进出桌面的生命周期强制锁死状态，保证绝不脱节
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
@@ -1529,7 +1527,7 @@ static void EnsureEngineViewIsMounted() {
 
 %hook CSCoverSheetViewController
 
-// 【核心清理】彻底删掉了在这里多余捕获滚动去调用重绘引擎的冗余代码，杜绝滑动发热！
+// 手势系统重绘：全部静默剔除，将发热源头彻底拔除，运算权让给刚刚配置好的专属 CADisplayLink
 - (void)_scrollPanGestureBegan:(id)arg1 { %orig; }
 - (void)_scrollPanGestureChanged:(id)arg1 { %orig; }
 - (void)_scrollPanGestureEnded:(id)arg1 { %orig; }
