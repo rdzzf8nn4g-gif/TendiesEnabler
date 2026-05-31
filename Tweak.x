@@ -62,6 +62,18 @@ typedef struct {
 @interface CSBackgroundContentView : UIView
 @end
 
+// ---------- 新增：兼容 iOS 14-15 必备头文件 ----------
+@interface SBLockScreenManager : NSObject
++ (id)sharedInstance;
+- (void)lockUIFromSource:(int)source withOptions:(id)options;
+- (void)unlockUIFromSource:(int)source withOptions:(id)options;
+- (BOOL)isUILocked;
+@end
+
+@interface SBFWallpaperView : UIView
+@end
+// --------------------------------------------------
+
 static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     if ([layer.name isEqualToString:name]) return layer;
     for (CALayer *sub in layer.sublayers) {
@@ -382,7 +394,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
             }
             
-[self setNeedsLayout];
+            [self setNeedsLayout];
             [self layoutIfNeeded]; // 1. 强制系统立即排版，催促构建图层树
 
             self.currentState = @"Init";
@@ -836,7 +848,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
             }
             
-[self setNeedsLayout];
+            [self setNeedsLayout];
             [self layoutIfNeeded]; // 1. 强制系统立即排版，催促构建图层树
 
             self.currentState = @"Init";
@@ -921,8 +933,9 @@ static void EnsureEngineViewIsMounted() {
 
 
 // =========================================================================
-// ==================== 以下 Hook 内容自动适配由于类型多态的 UIView ==================
+// ==================== 【iOS 16+ 专属 Hook 区域】 ==========================
 // =========================================================================
+%group iOS16Plus
 
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
@@ -947,6 +960,191 @@ static void EnsureEngineViewIsMounted() {
     return %orig;
 }
 %end
+
+%hook CSCoverSheetViewController
+- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
+
+- (void)_prepareForPosterSwitcherPresentation {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = YES;
+        g_portalView.alpha = 0.0;
+    }
+}
+
+- (void)_dismissPosterSwitcherViewController {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+
+- (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+
+- (void)setDismissed:(BOOL)dismissed {
+    %orig;
+    g_isUnlocked = dismissed;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
+        });
+    }
+}
+%end
+
+%hook SBWallpaperController
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
+    %orig;
+}
+
+- (void)updatePosterSwitcherSnapshots {
+    if (g_enabled) return;
+    %orig;
+}
+
+- (void)updateWallpaperAnimationWithProgress:(double)progress {
+    %orig;
+    EnsureEngineViewIsMounted();
+    if (g_enabled) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+            
+            if (g_portalView) {
+                double alpha = 0.0;
+                
+                if (progress > 0.7) {
+                    alpha = (1.0 - progress) * (0.05 / 0.3);
+                } else if (progress > 0.6) {
+                    alpha = 0.05 + (0.7 - progress) * 1.0; 
+                } else {
+                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+                }
+                
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
+            }
+        });
+    }
+}
+%end
+
+%end // end of iOS16Plus
+
+
+// =========================================================================
+// ==================== 【iOS 14-15 专属 Hook 区域】 ========================
+// =========================================================================
+%group iOS14_15
+
+%hook SBFWallpaperView
+- (void)layoutSubviews {
+    %orig;
+    if (g_enabled) {
+        self.hidden = YES;
+        self.alpha = 0.0;
+    }
+}
+- (void)setAlpha:(double)alpha {
+    if (g_enabled) { %orig(0.0); return; }
+    %orig;
+}
+- (void)setHidden:(BOOL)hidden {
+    if (g_enabled) { %orig(YES); return; }
+    %orig;
+}
+%end
+
+%hook CSCoverSheetViewController
+- (void)overlayController:(id)controller didChangePresentationProgress:(double)oldProgress newPresentationProgress:(double)newProgress fromLeading:(BOOL)leading {
+    %orig;
+    EnsureEngineViewIsMounted();
+    if (g_enabled) {
+        // 在 iOS 14/15 中，CoverSheet 完全盖住屏幕代表已锁定（newProgress == 1.0）
+        // 所以我们用 1.0 减去它，就能换算成和 iOS16 引擎内部一致的 Progress（0.0=Locked，1.0=Unlock）
+        double convertedProgress = 1.0 - newProgress;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(convertedProgress)}];
+            
+            if (g_portalView) {
+                double alpha = 0.0;
+                if (convertedProgress > 0.7) {
+                    alpha = (1.0 - convertedProgress) * (0.05 / 0.3);
+                } else if (convertedProgress > 0.6) {
+                    alpha = 0.05 + (0.7 - convertedProgress) * 1.0; 
+                } else {
+                    alpha = 0.15 + ((0.6 - convertedProgress) / 0.6) * 0.85;
+                }
+                
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
+            }
+        });
+    }
+}
+%end
+
+%hook SBLockScreenManager
+- (void)lockUIFromSource:(int)source withOptions:(id)options {
+    %orig;
+    g_isUnlocked = NO;
+    if (g_enabled && g_isScreenOn) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+        });
+    }
+}
+
+- (void)unlockUIFromSource:(int)source withOptions:(id)options {
+    %orig;
+    g_isUnlocked = YES;
+    if (g_enabled && g_isScreenOn) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+        });
+    }
+}
+%end
+
+%end // end of iOS14_15
+
+
+// =========================================================================
+// ==================== 【全版本通用 Hook 区域】 ============================
+// =========================================================================
 
 %hook SBWallpaperEffectView
 
@@ -1114,61 +1312,11 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateBackgroundContentView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
-
-- (void)_prepareForPosterSwitcherPresentation {
-    %orig;
-    if (g_enabled && g_portalView) {
-        g_portalView.hidden = YES;
-        g_portalView.alpha = 0.0;
-    }
-}
-
-- (void)_dismissPosterSwitcherViewController {
-    %orig;
-    if (g_enabled && g_portalView) {
-        g_portalView.hidden = NO;
-        [self viewWillLayoutSubviews];
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
-    }
-}
-
-- (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
-    %orig;
-    if (g_enabled && g_portalView) {
-        g_portalView.hidden = NO;
-        [self viewWillLayoutSubviews];
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
-    }
-}
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
-        });
-    }
-}
-
-- (void)setDismissed:(BOOL)dismissed {
-    %orig;
-    g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn) {
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
@@ -1185,50 +1333,6 @@ static void EnsureEngineViewIsMounted() {
             presentationView.hidden = YES;
             presentationView.alpha = 0.0;
         }
-    }
-}
-%end
-
-%hook SBWallpaperController
-- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
-    if (g_enabled) {
-        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
-        return; 
-    }
-    %orig;
-}
-
-- (void)updatePosterSwitcherSnapshots {
-    if (g_enabled) return;
-    %orig;
-}
-
-- (void)updateWallpaperAnimationWithProgress:(double)progress {
-    %orig;
-    EnsureEngineViewIsMounted();
-    if (g_enabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-            
-            if (g_portalView) {
-                double alpha = 0.0;
-                
-                if (progress > 0.7) {
-                    alpha = (1.0 - progress) * (0.05 / 0.3);
-                } else if (progress > 0.6) {
-                    alpha = 0.05 + (0.7 - progress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-                }
-                
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
-        });
     }
 }
 %end
@@ -1275,4 +1379,14 @@ static void EnsureEngineViewIsMounted() {
 %ctor {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+    
+    // 使用浮点数安全判断 iOS 跨越版本，智能挂载对应 Hook 分组
+    if ([[[UIDevice currentDevice] systemVersion] floatValue] >= 16.0) {
+        %init(iOS16Plus);
+    } else {
+        %init(iOS14_15);
+    }
+    
+    // 加载未分组的通用全局 Hook
+    %init;
 }
