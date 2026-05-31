@@ -260,31 +260,21 @@ static NSString * GetPrefsPlistPath() {
     topHorizontalStack.alignment = UIStackViewAlignmentCenter;
     topHorizontalStack.spacing = 15; 
     
-    // 【核心修复：彻底解决 \n 不见或者排版乱掉的 Bug，改用三个独立 Label 加入垂直 StackView】
-    UILabel *lbl1 = [[UILabel alloc] init];
-    lbl1.text = @"插件作者: iosdump";
-    lbl1.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    lbl1.textColor = [UIColor secondaryLabelColor];
+    // 【核心修复：完美还原原生 UITextView，保证 \n 断层不出错且超链接直接可点！】
+    UITextView *creditsView = [[UITextView alloc] init];
+    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzzn图标设计: https://t.me/RrrankkK";
+    creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    creditsView.textColor = [UIColor secondaryLabelColor];
+    creditsView.textAlignment = NSTextAlignmentLeft; 
+    creditsView.editable = NO;
+    creditsView.scrollEnabled = NO;
+    creditsView.backgroundColor = [UIColor clearColor];
+    creditsView.dataDetectorTypes = UIDataDetectorTypeLink; 
     
-    UILabel *lbl2 = [[UILabel alloc] init];
-    lbl2.text = @"作者频道: https://t.me/iosdumpzzz";
-    lbl2.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    lbl2.textColor = [UIColor secondaryLabelColor];
-    
-    UILabel *lbl3 = [[UILabel alloc] init];
-    lbl3.text = @"图标设计: https://t.me/RrrankkK";
-    lbl3.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    lbl3.textColor = [UIColor secondaryLabelColor];
-    
-    UIStackView *creditsStack = [[UIStackView alloc] initWithArrangedSubviews:@[lbl1, lbl2, lbl3]];
-    creditsStack.axis = UILayoutConstraintAxisVertical;
-    creditsStack.alignment = UIStackViewAlignmentLeading;
-    creditsStack.spacing = 4;
-    
-    UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsStack]];
+    UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsView]];
     mainVerticalStack.axis = UILayoutConstraintAxisVertical;
     mainVerticalStack.alignment = UIStackViewAlignmentCenter; 
-    mainVerticalStack.spacing = 12; 
+    mainVerticalStack.spacing = 10; 
     mainVerticalStack.translatesAutoresizingMaskIntoConstraints = NO;
     
     [headerView addSubview:mainVerticalStack];
@@ -394,7 +384,8 @@ static NSString * GetPrefsPlistPath() {
         // 🎬 视频壁纸模式纯代码 UI 构建 (完全独立)
         // ==========================================
         
-        PSSpecifier *g1 = [PSSpecifier preferenceSpecifierNamed:@"全局开关" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        // 【核心修复：与交互页完全一致的顶部布局】
+        PSSpecifier *g1 = [PSSpecifier emptyGroupSpecifier];
         [g1 setProperty:@"开启此开关应用全局，视频模式下交互壁纸将自动休眠并彻底释放内存。" forKey:@"footerText"];
         [_specifiers addObject:g1];
         
@@ -404,71 +395,73 @@ static NSString * GetPrefsPlistPath() {
         enableSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:enableSpec];
         
-        // --- 锁屏视频区域 ---
+        // --- 通用读取视频列表 ---
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *vidDir = GetVideoWallpapersDir();
+        NSArray *contents = [fm fileExistsAtPath:vidDir] ? [fm contentsOfDirectoryAtPath:vidDir error:nil] : @[];
+        contents = [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+        
+        NSString *plistPath = GetPrefsPlistPath();
+        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        NSString *currentLock = prefs[@"LockVideoPath"];
+        NSString *currentHome = prefs[@"HomeVideoPath"];
+        
+        // ================= 锁屏视频区域 =================
         PSSpecifier *gLock = [PSSpecifier preferenceSpecifierNamed:@"锁屏壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [gLock setProperty:@"点击应用为锁屏壁纸，向左滑动可删除或重命名。" forKey:@"footerText"];
         [_specifiers addObject:gLock];
         
-        PSSpecifier *lockStatus = [PSSpecifier preferenceSpecifierNamed:@"当前壁纸" target:self set:nil get:@selector(getVideoStateString:) detail:nil cell:PSTitleValueCell edit:nil];
-        [lockStatus setProperty:@"LockVideoPath" forKey:@"VideoKey"];
-        [_specifiers addObject:lockStatus];
-        
-        // 【核心合并：二合一导入按钮】
         PSSpecifier *btnLockImport = [PSSpecifier preferenceSpecifierNamed:@"导入锁屏素材" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
         btnLockImport->action = @selector(importLockMaterial);
         [_specifiers addObject:btnLockImport];
         
-        // --- 桌面视频区域 ---
+        // 将视频挂载到锁屏下方
+        for (NSString *name in contents) {
+            if ([name hasPrefix:@"."]) continue;
+            NSString *fullPath = [vidDir stringByAppendingPathComponent:name];
+            NSString *displayName = name;
+            
+            if ([currentLock isEqualToString:fullPath]) {
+                displayName = [NSString stringWithFormat:@"%@  ✓", name];
+            }
+            
+            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
+            spec->action = @selector(selectVideoWallpaper:);
+            [spec setProperty:name forKey:@"VideoName"];
+            [spec setProperty:@1 forKey:@"VideoTarget"]; // 标记目标是锁屏
+            [spec setProperty:@YES forKey:@"IsVideoCell"]; 
+            [_specifiers addObject:spec];
+        }
+        
+        // ================= 桌面视频区域 =================
         PSSpecifier *gHome = [PSSpecifier preferenceSpecifierNamed:@"桌面壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [gHome setProperty:@"同源优化: 锁屏和桌面选择同一个视频时，引擎会自动复用内存并降低占用。" forKey:@"footerText"];
+        [gHome setProperty:@"点击应用为桌面壁纸，向左滑动可删除或重命名。\n同源优化: 锁屏和桌面选择同一个视频时，引擎会自动复用内存并降低占用。" forKey:@"footerText"];
         [_specifiers addObject:gHome];
         
-        PSSpecifier *homeStatus = [PSSpecifier preferenceSpecifierNamed:@"当前壁纸" target:self set:nil get:@selector(getVideoStateString:) detail:nil cell:PSTitleValueCell edit:nil];
-        [homeStatus setProperty:@"HomeVideoPath" forKey:@"VideoKey"];
-        [_specifiers addObject:homeStatus];
-        
-        // 【核心合并：二合一导入按钮】
         PSSpecifier *btnHomeImport = [PSSpecifier preferenceSpecifierNamed:@"导入桌面素材" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
         btnHomeImport->action = @selector(importHomeMaterial);
         [_specifiers addObject:btnHomeImport];
         
-        // --- 独立的视频列表区域 ---
-        PSSpecifier *gList = [PSSpecifier preferenceSpecifierNamed:@"已导入的视频素材" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [gList setProperty:@"点击应用视频壁纸，向左滑动可删除或重命名。" forKey:@"footerText"];
-        [_specifiers addObject:gList];
-        
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSString *vidDir = GetVideoWallpapersDir();
-        if ([fm fileExistsAtPath:vidDir]) {
-            NSArray *contents = [fm contentsOfDirectoryAtPath:vidDir error:nil];
-            contents = [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+        // 将视频挂载到桌面下方
+        for (NSString *name in contents) {
+            if ([name hasPrefix:@"."]) continue;
+            NSString *fullPath = [vidDir stringByAppendingPathComponent:name];
+            NSString *displayName = name;
             
-            NSString *plistPath = GetPrefsPlistPath();
-            NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-            NSString *currentLock = prefs[@"LockVideoPath"];
-            NSString *currentHome = prefs[@"HomeVideoPath"];
-            
-            for (NSString *name in contents) {
-                if ([name hasPrefix:@"."]) continue;
-                NSString *fullPath = [vidDir stringByAppendingPathComponent:name];
-                
-                NSString *displayName = name;
-                BOOL isLock = [currentLock isEqualToString:fullPath];
-                BOOL isHome = [currentHome isEqualToString:fullPath];
-                
-                if (isLock && isHome) displayName = [NSString stringWithFormat:@"%@  ✓(全设)", name];
-                else if (isLock) displayName = [NSString stringWithFormat:@"%@  ✓(锁屏)", name];
-                else if (isHome) displayName = [NSString stringWithFormat:@"%@  ✓(桌面)", name];
-                
-                PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
-                spec->action = @selector(selectVideoWallpaper:);
-                [spec setProperty:name forKey:@"VideoName"];
-                [spec setProperty:@YES forKey:@"IsVideoCell"]; 
-                [_specifiers addObject:spec];
+            if ([currentHome isEqualToString:fullPath]) {
+                displayName = [NSString stringWithFormat:@"%@  ✓", name];
             }
+            
+            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
+            spec->action = @selector(selectVideoWallpaper:);
+            [spec setProperty:name forKey:@"VideoName"];
+            [spec setProperty:@2 forKey:@"VideoTarget"]; // 标记目标是桌面
+            [spec setProperty:@YES forKey:@"IsVideoCell"]; 
+            [_specifiers addObject:spec];
         }
         
-        // --- 清理/Filza区域 ---
-        PSSpecifier *gFilza = [PSSpecifier preferenceSpecifierNamed:@"" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        // ================= Filza 跳转区域 =================
+        PSSpecifier *gFilza = [PSSpecifier emptyGroupSpecifier];
         [_specifiers addObject:gFilza];
         
         PSSpecifier *btnFilza = [PSSpecifier preferenceSpecifierNamed:@"跳转 Filza 查看" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
@@ -530,20 +523,6 @@ static NSString * GetPrefsPlistPath() {
 // =======================================================
 // ==================== 视频壁纸专属逻辑 ====================
 // =======================================================
-
-- (id)getVideoStateString:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"VideoKey"];
-    if (!key) return @"未设置";
-    
-    NSString *plistPath = GetPrefsPlistPath();
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-    NSString *path = prefs[key];
-    
-    if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        return [path lastPathComponent];
-    }
-    return @"未设置";
-}
 
 // 【二合一导入菜单】
 - (void)importLockMaterial {
@@ -670,31 +649,14 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// 视频列表点击事件 (弹窗设置)
+// 视频列表点击事件 (精准命中目标区域)
 - (void)selectVideoWallpaper:(PSSpecifier *)spec {
     NSString *name = [spec propertyForKey:@"VideoName"];
+    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; // 1=锁屏, 2=桌面
     if (!name) return;
+    
     NSString *fullPath = [GetVideoWallpapersDir() stringByAppendingPathComponent:name];
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"设置壁纸" message:@"请选择要应用到的位置" preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:@"设为锁屏" style:UIAlertActionStyleDefault handler:^(id action) {
-        [self applyVideoPath:fullPath toTarget:1];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"设为桌面" style:UIAlertActionStyleDefault handler:^(id action) {
-        [self applyVideoPath:fullPath toTarget:2];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"同时设定" style:UIAlertActionStyleDefault handler:^(id action) {
-        [self applyVideoPath:fullPath toTarget:3];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    
-    UIViewController *topVC = self.view.window.rootViewController ?: self;
-    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-    if (alert.popoverPresentationController) {
-        alert.popoverPresentationController.sourceView = topVC.view;
-        alert.popoverPresentationController.sourceRect = CGRectMake(topVC.view.bounds.size.width/2, topVC.view.bounds.size.height, 0, 0);
-    }
-    [topVC presentViewController:alert animated:YES completion:nil];
+    [self applyVideoPath:fullPath toTarget:target];
 }
 
 // 全局底层应用视频核心
@@ -702,11 +664,10 @@ static NSString * GetPrefsPlistPath() {
     NSString *plistPath = GetPrefsPlistPath();
     NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
     
-    if (target == 1 || target == 3) {
+    if (target == 1) {
         prefs[@"LockVideoPath"] = path;
         CFPreferencesSetAppValue(CFSTR("LockVideoPath"), (__bridge CFStringRef)path, CFSTR("com.iosdump.zoneprefs"));
-    }
-    if (target == 2 || target == 3) {
+    } else if (target == 2) {
         prefs[@"HomeVideoPath"] = path;
         CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), (__bridge CFStringRef)path, CFSTR("com.iosdump.zoneprefs"));
     }
@@ -1102,7 +1063,7 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 视频专属侧滑删除保护
+// 视频专属侧滑删除双路清理保护
 - (void)deleteVideoWithSpecifier:(PSSpecifier *)spec {
     NSString *name = [spec propertyForKey:@"VideoName"];
     if (name) {
@@ -1130,7 +1091,7 @@ static NSString * GetPrefsPlistPath() {
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
         }
         
-        [self removeSpecifier:spec animated:YES];
+        [self reloadSpecifiers]; // 直接重载整个UI，因为同一个视频可能出现在锁屏和桌面两个分组里
     }
 }
 
@@ -1177,7 +1138,7 @@ static NSString * GetPrefsPlistPath() {
     [topVC presentViewController:alert animated:YES completion:nil];
 }
 
-// 视频专属安全重命名
+// 视频专属安全重命名 (自动接管两端数据)
 - (void)renameVideo:(NSString *)oldName specifier:(PSSpecifier *)spec {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名" message:@"请输入新的视频名称" preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
