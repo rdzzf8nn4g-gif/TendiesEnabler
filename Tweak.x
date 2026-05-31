@@ -224,7 +224,7 @@ static UIViewController* safelyGetIvarAsViewController(id object, const char* iv
 static BOOL g_enabled = NO;
 static BOOL g_enhanced_engine = NO;
 static BOOL g_hideTextShadow = NO;
-static BOOL g_lowPowerPause = NO; // 新增：低电量暂停开关
+static BOOL g_lowPowerPause = NO; 
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
@@ -241,6 +241,11 @@ static __weak _UIPortalView *g_portalView = nil;
 
 static void EnsureEngineViewIsMounted(); 
 
+// 全局内联函数：精准判定是否处于【双端同素材完美同步模式】
+static inline BOOL IsSingleVideoMode() {
+    return (g_isVideoMode && g_lockVideoPath && g_homeVideoPath && [g_lockVideoPath isEqualToString:g_homeVideoPath]);
+}
+
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     CFPreferencesAppSynchronize(appID);
@@ -249,8 +254,7 @@ static void reloadPrefs() {
     g_enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &valid) ? valid : NO;
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
     g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
-    g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO; // 新增读取
-    
+    g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO;
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
     
     CFPropertyListRef lockVidRef = CFPreferencesCopyAppValue(CFSTR("LockVideoPath"), appID);
@@ -306,13 +310,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineInternalReload" object:nil];
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
-        // 通知配置更改，可能需要立即暂停或恢复视频
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil]; 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil]; // 强制校验低电量
     });
 }
 
 // =========================================================================
-// ==================== 【全新模块】: 视频壁纸独立渲染引擎 ===================
+// ==================== 【全新模块】: 极致工业级视频引擎 ===================
 // =========================================================================
 
 @interface ZoneVideoPlayerView : UIView
@@ -320,6 +323,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) AVPlayerLooper *looper;
 @property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, copy) NSString *currentPath;
+@property (nonatomic, assign) BOOL isManuallyPaused; // 用于区别系统强杀和主动暂停
 - (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path;
 - (void)playVideo;
 - (void)pauseVideo;
@@ -336,14 +340,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
         if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
             NSURL *url = [NSURL fileURLWithPath:path];
-            AVAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+            // 关闭精准时序，全面拥抱硬件解码提速
+            AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
             AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+            
+            // 【4K内存防护】：限制预读缓冲秒数，即使 2GB 的原画也能控制在最低内存
+            if ([item respondsToSelector:@selector(setPreferredForwardBufferDuration:)]) {
+                item.preferredForwardBufferDuration = 1.0;
+            }
             
             self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
             self.player.muted = YES;
-            // 【核心防打断】：严格禁止外部媒体强占和影响播放器
-            self.player.allowsExternalPlayback = NO;
+            self.player.allowsExternalPlayback = NO; // 切断投屏和外界干扰
+            self.player.automaticallyWaitsToMinimizeStalling = NO; // 拒绝网络级防卡顿策略导致的假死
             self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
+            
             if (@available(iOS 12.0, *)) {
                 self.player.preventsDisplaySleepDuringVideoPlayback = NO;
             }
@@ -355,9 +366,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.playerLayer.frame = self.bounds;
             [self.layer addSublayer:self.playerLayer];
             
-            // 【防停止保护伞】：监听打断与停滞，在底层自动强制拉起
+            // 【系统级防死锁监听】
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:UIApplicationDidBecomeActiveNotification object:nil];
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:AVPlayerItemPlaybackStalledNotification object:nil];
+            
+            // KVO 底层速率监控（幽灵唤醒）
+            [self.player addObserver:self forKeyPath:@"rate" options:NSKeyValueObservingOptionNew context:nil];
         }
     }
     return self;
@@ -368,28 +382,40 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
-    // 【激进唤醒】：只要还在屏幕上渲染且屏幕亮着，强制保证视频没被系统冻结
+    // 渲染管线刷新时激进校验播放状态
     if (g_isScreenOn && g_enabled && g_isVideoMode) {
         [self playVideo];
+    }
+}
+
+// 核心 KVO 回调：只要不是我主动暂停的，谁敢停我视频我就秒开拉起
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
+    if ([keyPath isEqualToString:@"rate"]) {
+        if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
+            if (self.player.rate == 0.0) {
+                [self.player play];
+            }
+        }
     }
 }
 
 - (void)playVideo {
     if (!self.player) return;
     
-    // 【精准低电量拦截】
+    // 【电量哨兵检测】
     if (g_lowPowerPause && [[NSProcessInfo processInfo] isLowPowerModeEnabled]) {
         [self pauseVideo];
         return;
     }
     
-    // 若被意外挂起（rate == 0），则强制重新播放，做到卡顿后彻底无感恢复
+    self.isManuallyPaused = NO;
     if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
         [self.player play];
     }
 }
 
 - (void)pauseVideo {
+    self.isManuallyPaused = YES;
     if (self.player && self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
         [self.player pause];
     }
@@ -397,6 +423,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)cleanUpEngineSafely {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    @try {
+        [self.player removeObserver:self forKeyPath:@"rate"];
+    } @catch (NSException *e) {}
+    
     [self pauseVideo];
     if (self.looper) {
         [self.looper disableLooping];
@@ -417,10 +447,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 @end
 
+
 @interface ZoneVideoEngine : UIView
 @property (nonatomic, strong) ZoneVideoPlayerView *lockVideoView;
 @property (nonatomic, strong) ZoneVideoPlayerView *homeVideoView;
-@property (nonatomic, assign) BOOL isSingleVideoMode; 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 @end
@@ -438,7 +468,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
         
-        // 【动态电量监控】：监听电量模式突变
+        // 监听系统低电量状态突变
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(powerStateChanged) name:NSProcessInfoPowerStateDidChangeNotification object:nil];
     }
     return self;
@@ -458,7 +488,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)powerStateChanged {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_enabled && g_isVideoMode && g_isScreenOn) {
-            [self onWakeUp]; // 复用 onWakeUp 的逻辑来快速暂停或恢复
+            [self onWakeUp]; // 复用校验逻辑秒关/秒开
         }
     });
 }
@@ -466,15 +496,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onWakeUp {
     if (!g_enabled || !g_isVideoMode) return;
     
-    // 【电量哨兵】检测到低电量且开关开启，彻底抑制播放
+    // 【电量哨兵】低电量一键熔断
     if (g_lowPowerPause && [[NSProcessInfo processInfo] isLowPowerModeEnabled]) {
         [self.lockVideoView pauseVideo];
         [self.homeVideoView pauseVideo];
         return;
     }
     
-    if (self.isSingleVideoMode) {
-        [self.lockVideoView playVideo];
+    if (IsSingleVideoMode()) {
+        if (self.homeVideoView) [self.homeVideoView playVideo];
     } else {
         if (self.homeVideoView) [self.homeVideoView playVideo];
         if (self.lockVideoView) [self.lockVideoView playVideo];
@@ -488,7 +518,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onProgress:(NSNotification *)note {
-    // 【终极隔离】：在视频模式下，绝对不执行任何交叉透明度计算！
     // 物理层面上，Lock就是Lock，Home就是Home。滑动交由系统处理。
     if (!g_enabled || !g_isVideoMode) return;
 }
@@ -521,23 +550,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         self.backgroundColor = [UIColor clearColor];
-        // 这里会自动匹配我们 .m 中设置的 同素材选项 完美复用内存！
-        self.isSingleVideoMode = (hasLock && hasHome && [g_lockVideoPath isEqualToString:g_homeVideoPath]);
         
-        if (self.isSingleVideoMode) {
-            // 同一个视频：直接让它显示在底层（充当桌面），传送门镜像它（充当锁屏）
-            self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
-            if (self.lockVideoView) {
-                self.lockVideoView.alpha = 1.0;
-                [self addSubview:self.lockVideoView];
+        if (IsSingleVideoMode()) {
+            // 【同素材极限优化：显存直降 50%】
+            // 永远只实例化唯一的 homeVideoView 作为物理底板，锁屏那边靠 _UIPortalView 以纯显卡镜像拉出！
+            self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
+            if (self.homeVideoView) {
+                self.homeVideoView.alpha = 1.0;
+                [self addSubview:self.homeVideoView];
             }
-            if (g_isScreenOn) [self onWakeUp]; // 使用 onWakeUp 走低电量检查
+            if (g_isScreenOn) [self onWakeUp];
         } else {
-            // 【核心修复防鬼影】：锁屏和桌面分开。
             if (hasLock) {
                 self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
                 if (self.lockVideoView) {
-                    // 锁屏视频在底层引擎（桌面环境）中设为 0.0 隐身，但它会在传送门中现身！
+                    // 双视频模式：锁屏在这里隐身，只交给 CoverSheet 传送门显形
                     self.lockVideoView.alpha = 0.0;
                     [self addSubview:self.lockVideoView];
                 }
@@ -550,7 +577,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
             }
             if (g_isScreenOn) {
-                [self onWakeUp]; // 使用 onWakeUp 走低电量检查
+                [self onWakeUp];
             }
         }
     });
@@ -1518,10 +1545,17 @@ static void EnsureEngineViewIsMounted() {
 }
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled && !g_isVideoMode) return nil;
+    // 【保留原生地毛玻璃模糊】单素材同源视频时必须放行
+    if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
+    
+    if (g_enabled && g_isVideoMode) return nil;
     return %orig;
 }
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
     if (g_enabled && !g_isVideoMode) return NO;
+    if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
+    
+    if (g_enabled && g_isVideoMode) return NO;
     return %orig;
 }
 %end
@@ -1567,10 +1601,18 @@ static void EnsureEngineViewIsMounted() {
     if (engineView) {
         UIView *sourceForPortal = engineView;
         if (g_isVideoMode) {
-            if ([engineView respondsToSelector:@selector(lockVideoView)]) {
-                UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
-                if (lockView) sourceForPortal = lockView;
-                else sourceForPortal = nil; // 没设锁屏？直接不搞传送门！
+            // 【同素材极简通道】：只拿 Home 进行渲染投射
+            if (IsSingleVideoMode()) {
+                if ([engineView respondsToSelector:@selector(homeVideoView)]) {
+                    UIView *homeView = [engineView performSelector:@selector(homeVideoView)];
+                    if (homeView) sourceForPortal = homeView;
+                }
+            } else {
+                if ([engineView respondsToSelector:@selector(lockVideoView)]) {
+                    UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
+                    if (lockView) sourceForPortal = lockView;
+                    else sourceForPortal = nil; // 没设锁屏不搞传送门
+                }
             }
         }
         
@@ -1579,8 +1621,8 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            // 【滑动跟手的终极奥义】
-            portalView.matchesPosition = g_isVideoMode ? NO : YES;
+            // 同素材时必须绝对贴合底层坐标 (YES)
+            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
@@ -1593,7 +1635,10 @@ static void EnsureEngineViewIsMounted() {
             if (portalView.sourceView != sourceForPortal) {
                 portalView.sourceView = sourceForPortal; 
             }
-            if (g_isVideoMode && portalView.matchesPosition != NO) {
+            if (IsSingleVideoMode()) {
+                if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
+                portalView.alpha = 1.0;
+            } else if (g_isVideoMode && portalView.matchesPosition != NO) {
                 portalView.matchesPosition = NO;
                 portalView.alpha = 1.0;
             } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
@@ -1603,6 +1648,9 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidden = YES;
         }
 
+        // 【核心】：判断是否需要强制隐藏原生背景及其子视图
+        BOOL hideNativeBlurs = !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+
         if (bgVC && bgVC.view) {
             if (portalView.superview != bgVC.view) {
                 [portalView removeFromSuperview];
@@ -1611,13 +1659,16 @@ static void EnsureEngineViewIsMounted() {
             portalView.frame = bgVC.view.bounds;
             bgVC.view.clipsToBounds = YES;
             
-            BOOL hasLockVid = (g_isVideoMode && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-            BOOL shouldHideNative = !g_isVideoMode || hasLockVid;
-            
             for (UIView *sub in bgVC.view.subviews) {
                 if (sub != portalView) {
-                    sub.alpha = shouldHideNative ? 0.0 : 1.0;
-                    sub.hidden = shouldHideNative ? YES : NO;
+                    if (hideNativeBlurs) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    } else {
+                        // 解锁原生地毛玻璃控制权限
+                        sub.alpha = 1.0;
+                        sub.hidden = NO;
+                    }
                 }
             }
         } else {
@@ -1629,10 +1680,10 @@ static void EnsureEngineViewIsMounted() {
         }
         
         UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
-        if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+        if (dimmingView && hideNativeBlurs) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
         
         UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
-        if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
+        if (tintingView && hideNativeBlurs) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
     }
     
     UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
@@ -1716,7 +1767,7 @@ static void EnsureEngineViewIsMounted() {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
         
         if (g_portalView) {
-            // 【物理斩断】：视频模式完全不吃透明度，恒为 1.0，完全依靠原生拖拽动画遮盖！
+            // 【物理斩断】：视频模式完全不吃透明度，恒为 1.0，完全依靠原生拖拽动画遮盖与系统模糊
             if (g_isVideoMode) {
                 if (g_portalView.alpha != 1.0) {
                     [CATransaction begin];
@@ -1760,6 +1811,12 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     if (g_isVideoMode) {
+        // 放行同素材模式时的底板显示
+        if (IsSingleVideoMode()) {
+            self.hidden = NO;
+            self.alpha = 1.0;
+            return;
+        }
         long long variant = 0;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
         BOOL hide = NO;
@@ -1775,6 +1832,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setAlpha:(double)alpha {
     if (g_enabled) {
         if (!g_isVideoMode) { %orig(0.0); return; }
+        if (IsSingleVideoMode()) { %orig(1.0); return; }
         long long variant = 0;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
         if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
@@ -1785,6 +1843,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled) {
         if (!g_isVideoMode) { %orig(YES); return; }
+        if (IsSingleVideoMode()) { %orig(NO); return; }
         long long variant = 0;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
         if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
@@ -1906,10 +1965,17 @@ static void EnsureEngineViewIsMounted() {
     if (engineView) {
         UIView *sourceForPortal = engineView;
         if (g_isVideoMode) {
-            if ([engineView respondsToSelector:@selector(lockVideoView)]) {
-                UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
-                if (lockView) sourceForPortal = lockView;
-                else sourceForPortal = nil;
+            if (IsSingleVideoMode()) {
+                if ([engineView respondsToSelector:@selector(homeVideoView)]) {
+                    UIView *homeView = [engineView performSelector:@selector(homeVideoView)];
+                    if (homeView) sourceForPortal = homeView;
+                }
+            } else {
+                if ([engineView respondsToSelector:@selector(lockVideoView)]) {
+                    UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
+                    if (lockView) sourceForPortal = lockView;
+                    else sourceForPortal = nil;
+                }
             }
         }
 
@@ -1918,7 +1984,7 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            portalView.matchesPosition = g_isVideoMode ? NO : YES;
+            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
@@ -1931,7 +1997,10 @@ static void EnsureEngineViewIsMounted() {
             if (portalView.sourceView != sourceForPortal) {
                 portalView.sourceView = sourceForPortal; 
             }
-            if (g_isVideoMode && portalView.matchesPosition != NO) {
+            if (IsSingleVideoMode()) {
+                if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
+                portalView.alpha = 1.0;
+            } else if (g_isVideoMode && portalView.matchesPosition != NO) {
                 portalView.matchesPosition = NO;
                 portalView.alpha = 1.0;
             } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
@@ -1941,6 +2010,8 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidden = YES;
         }
 
+        BOOL hideNativeBlurs = !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+
         if (bgVC && bgVC.view) {
             if (portalView.superview != bgVC.view) {
                 [portalView removeFromSuperview];
@@ -1949,13 +2020,15 @@ static void EnsureEngineViewIsMounted() {
             portalView.frame = bgVC.view.bounds;
             bgVC.view.clipsToBounds = YES;
             
-            BOOL hasLockVid = (g_isVideoMode && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-            BOOL shouldHideNative = !g_isVideoMode || hasLockVid;
-            
             for (UIView *sub in bgVC.view.subviews) {
                 if (sub != portalView) {
-                    sub.alpha = shouldHideNative ? 0.0 : 1.0;
-                    sub.hidden = shouldHideNative ? YES : NO;
+                    if (hideNativeBlurs) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    } else {
+                        sub.alpha = 1.0;
+                        sub.hidden = NO;
+                    }
                 }
             }
         } else {
@@ -1971,10 +2044,10 @@ static void EnsureEngineViewIsMounted() {
         }
         
         UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
-        if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+        if (dimmingView && hideNativeBlurs) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
         
         UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
-        if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
+        if (tintingView && hideNativeBlurs) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
     }
     
     UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
@@ -2157,7 +2230,7 @@ static void EnsureEngineViewIsMounted() {
             presentationView.hidden = YES;
             presentationView.alpha = 0.0;
         } else if (g_enabled && g_isVideoMode) {
-            BOOL hasLockVid = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+            BOOL hasLockVid = (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
             presentationView.hidden = hasLockVid;
             presentationView.alpha = hasLockVid ? 0.0 : 1.0;
         } else {
