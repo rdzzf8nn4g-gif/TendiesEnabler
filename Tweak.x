@@ -1237,6 +1237,10 @@ static void EnsureEngineViewIsMounted() {
                 portalView.alpha = 0.0; 
                 portalView.matchesPosition = YES;
                 portalView.matchesTransform = YES;
+                
+                // 【核心修复防溢出】确保传送门的画布开启裁剪，绝不多画出任何区域
+                portalView.clipsToBounds = YES; 
+                
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 g_portalView = portalView;
@@ -1252,6 +1256,9 @@ static void EnsureEngineViewIsMounted() {
                     [bgVC.view addSubview:portalView];
                 }
                 portalView.frame = bgVC.view.bounds;
+                
+                // 【核心修复防溢出】确保容器也完全闭锁边缘
+                bgVC.view.clipsToBounds = YES;
                 
                 for (UIView *sub in bgVC.view.subviews) {
                     if (sub != portalView) {
@@ -1513,10 +1520,12 @@ static void EnsureEngineViewIsMounted() {
                 portalView.matchesAlpha = NO; 
                 portalView.alpha = 1.0; 
                 
-                // 【核心修复！！！】：这里必须设置为 NO
-                // 只有禁用绝对屏幕坐标强锁（MatchesPosition），Portal 才可以跟随滑动锁屏的 View 被下拉！
-                portalView.matchesPosition = NO;
-                portalView.matchesTransform = NO;
+                // 【核心修复！！！】：和 iOS 16-17 完全保持一致，使用 YES 锁死坐标系
+                portalView.matchesPosition = YES;
+                portalView.matchesTransform = YES;
+                
+                // 【绝不再溢出】：增加闭锁裁剪机制，配合 MatchesPosition=YES，完美切断超出锁屏外的内容
+                portalView.clipsToBounds = YES; 
                 
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1533,6 +1542,9 @@ static void EnsureEngineViewIsMounted() {
                     [bgVC.view addSubview:portalView];
                 }
                 portalView.frame = bgVC.view.bounds;
+                
+                // 【绝不再溢出】：增加容器级别闭锁，防御各种妖孽多层壁纸越界
+                bgVC.view.clipsToBounds = YES;
                 
                 for (UIView *sub in bgVC.view.subviews) {
                     if (sub != portalView) {
@@ -1828,16 +1840,24 @@ static void EnsureEngineViewIsMounted() {
             id wc = [wcClass sharedInstance];
             if ([wc respondsToSelector:@selector(legibilitySettingsForVariant:)]) {
                 id settings = [wc performSelector:@selector(legibilitySettingsForVariant:) withObject:@(1)]; // 1代表主屏幕
-                if (settings && [settings respondsToSelector:@selector(copy)]) {
-                    id newSettings = [settings copy];
-                    [iconManager performSelector:@selector(legibilitySettingsDidChange:) withObject:newSettings];
+                if (settings) {
+                    // 彻底熔断底层哈希缓存：传入一个全新的不同的实例强行清空重绘缓存
+                    id dummySettings = [[NSClassFromString(@"_UIMutableLegibilitySettings") alloc] initWithStyle:1];
+                    if (!dummySettings) dummySettings = [settings copy]; 
+                    
+                    [iconManager performSelector:@selector(legibilitySettingsDidChange:) withObject:dummySettings];
+                    
+                    // 下一次 RunLoop 把真实的还原回去，系统会被迫完全刷新，我们的拦截生效
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [iconManager performSelector:@selector(legibilitySettingsDidChange:) withObject:settings];
+                    });
                     return;
                 }
             }
         }
     }
     
-    // 如果上面的新方法因某些版本原因没触发，则保留此经典兜底方法
+    // 兜底方案
     if ([self respondsToSelector:@selector(_legibilitySettingsChanged)]) {
         [self performSelector:@selector(_legibilitySettingsChanged)];
     } else if ([self respondsToSelector:@selector(updateLegibility)]) {
