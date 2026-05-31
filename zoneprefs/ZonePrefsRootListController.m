@@ -58,8 +58,8 @@ static unsigned long long getDirectorySize(NSString *folderPath) {
     return fileSize;
 }
 
-// 采用 ImageIO 硬件流降维，新增 jpegQuality 参数动态控制画质
-static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor, CGFloat jpegQuality) {
+// 采用 ImageIO 硬件流降维，规避 UIImage 解压造成的内存核爆，完美保留 PNG 透明度
+static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor) {
     NSURL *imageURL = [NSURL fileURLWithPath:path];
     CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)imageURL, NULL);
     if (!source) return 0;
@@ -73,18 +73,12 @@ static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor, C
 
     CGFloat width = [widthNum doubleValue];
     CGFloat height = [heightNum doubleValue];
-    
-    // 获取原文件大小，用于后续比对
-    unsigned long long originalSize = [[[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil] fileSize];
-
-    // 计算缩放后的最大边长，并封顶 1500 像素 (防止 4K/8K 毒瘤素材)
     CGFloat maxDimension = MAX(width, height) * scaleFactor;
-    maxDimension = MIN(maxDimension, 1500.0);
 
-    // 防御性策略：如果是小于 500 像素的小图，且体积不到 1MB，放过它保清晰度
-    if (maxDimension < 500.0 && originalSize < 1 * 1024 * 1024) {
+    // 防御性策略：任何最大边长低于 500 像素的图片拒绝压缩，严保小图标/文字图层清晰度
+    if (maxDimension < 500) {
         CFRelease(source);
-        return 0;
+        return 0; // 0 表示没做处理
     }
 
     NSDictionary *downsampleOptions = @{
@@ -95,28 +89,24 @@ static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor, C
     };
 
     CGImageRef downsampledImage = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)downsampleOptions);
-    CFRelease(source); // 必须立即释放读取源，解除文件占用锁
+    CFRelease(source);
     if (!downsampledImage) return 0;
 
-    BOOL isPNG = [[path lowercaseString] hasSuffix:@"png"];
+    BOOL isPNG = [[path lowercaseString] hasSuffix:@".png"];
     CFStringRef uti = isPNG ? (__bridge CFStringRef)@"public.png" : (__bridge CFStringRef)@"public.jpeg";
     
-    // 【核心修复】：绝对不原地覆写，使用 .tmp 临时文件，规避系统底层读写锁导致的静默失败
-    NSString *tempPath = [path stringByAppendingPathExtension:@"tmp"];
-    NSURL *tempURL = [NSURL fileURLWithPath:tempPath];
-    
-    CGImageDestinationRef destination = CGImageDestinationCreateWithURL((__bridge CFURLRef)tempURL, uti, 1, NULL);
+    CGImageDestinationRef destination = CGImageDestinationCreateWithURL((__bridge CFURLRef)imageURL, uti, 1, NULL);
     if (!destination) {
         CGImageRelease(downsampledImage);
         return 0;
     }
 
     if (isPNG) {
-        // PNG 依旧无损保留 Alpha 通道 (透明度)
+        // PNG 无损，保留 Alpha 通道
         CGImageDestinationAddImage(destination, downsampledImage, NULL);
     } else {
-        // JPG 应用动态画质压缩
-        NSDictionary *destOptions = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @(jpegQuality)};
+        // JPG 质量保持在极佳的 0.85
+        NSDictionary *destOptions = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @0.85};
         CGImageDestinationAddImage(destination, downsampledImage, (__bridge CFDictionaryRef)destOptions);
     }
 
@@ -124,33 +114,22 @@ static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor, C
     CFRelease(destination);
     CGImageRelease(downsampledImage);
 
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (success && [fm fileExistsAtPath:tempPath]) {
-        unsigned long long tempSize = [[fm attributesOfItemAtPath:tempPath error:nil] fileSize];
-        
-        // 【关键防御】：只有当压缩后的临时文件真的比原文件小，才进行替换！
-        if (tempSize < originalSize) {
-            [fm removeItemAtPath:path error:nil]; // 销毁原图
-            [fm moveItemAtPath:tempPath toPath:path error:nil]; // 临时图转正
-            return tempSize;
-        } else {
-            // 如果压完反而变大了（遇到了被高度压缩过的JPG），扔掉临时文件，不改动原图
-            [fm removeItemAtPath:tempPath error:nil];
-            return 0;
-        }
+    // 返回压缩后的新文件大小
+    if (success) {
+        return [[[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil] fileSize];
     }
     return 0;
 }
 
 static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
-    unsigned long long targetLimit = 25ULL * 1024 * 1024; // 25MB 红线
+    unsigned long long targetLimit = 25ULL * 1024 * 1024; // 死守 25MB 物理红线
     unsigned long long currentTotalSize = getDirectorySize(unzipDir);
     
-    if (currentTotalSize <= targetLimit) return; // 容量合格，直接放行
+    if (currentTotalSize <= targetLimit) return;
     
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    // 最多 3 趟循环，从轻微压缩到极限求生
+    // 最多尝试 3 趟，防止遇到无法再压缩的极端图片陷入死循环导致 CPU 烧毁
     for (int pass = 1; pass <= 3; pass++) {
         if (currentTotalSize <= targetLimit) break;
         
@@ -167,38 +146,28 @@ static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
             }
         }
         
-        // 按文件大小降序排列，擒贼先擒王
+        // 核心：按文件大小降序排列，擒贼先擒王，直接干掉占空间最大的元凶
         [imageFiles sortUsingComparator:^NSComparisonResult(id obj1, id obj2) {
             return [obj2[@"size"] compare:obj1[@"size"]];
         }];
         
         for (NSDictionary *imgInfo in imageFiles) {
-            @autoreleasepool { // 绝对隔离：保证单张图片处理完立即释放图形上下文防漏
+            @autoreleasepool { // 绝对隔离：保证单张图片处理完立即释放图形上下文
                 NSString *path = imgInfo[@"path"];
                 unsigned long long oldSize = [imgInfo[@"size"] unsignedLongLongValue];
                 
-                CGFloat scale = 1.0;
-                CGFloat quality = 0.8;
+                // 第一趟 80% 像素尺寸，第二趟 60%，第三趟 50%
+                CGFloat scale = 1.0 - (pass * 0.2);
+                if (scale < 0.5) scale = 0.5;
                 
-                // 【动态打击策略】
-                // 面对几百张图组成的 150MB，随着趟数增加，手段越来越狠
-                if (pass == 1) { 
-                    scale = 0.6; quality = 0.6;   // 第 1 趟：中度压缩
-                } else if (pass == 2) { 
-                    scale = 0.4; quality = 0.4;   // 第 2 趟：重度压缩
-                } else if (pass == 3) { 
-                    scale = 0.25; quality = 0.25; // 第 3 趟：不顾一切把体积压下来保命
-                }
+                unsigned long long newSize = downsampleImage(path, scale);
                 
-                unsigned long long newSize = downsampleImage(path, scale, quality);
-                
-                // 如果成功缩减了体积，更新总容量进度
                 if (newSize > 0 && newSize < oldSize) {
                     currentTotalSize -= oldSize;
                     currentTotalSize += newSize;
                 }
                 
-                // 只要总体积跌破 25MB，立刻停止，不再牺牲剩下的图片画质
+                // 只要总体积达标，立刻中止所有任务，节省 CPU 算力
                 if (currentTotalSize <= targetLimit) {
                     return;
                 }
