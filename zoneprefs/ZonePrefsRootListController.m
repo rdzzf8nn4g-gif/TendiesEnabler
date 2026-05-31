@@ -260,7 +260,7 @@ static NSString * GetPrefsPlistPath() {
     topHorizontalStack.spacing = 15; 
     
     UITextView *creditsView = [[UITextView alloc] init];
-    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzzn图标设计: https://t.me/RrrankkK";
+    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
     creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     creditsView.textColor = [UIColor secondaryLabelColor];
     creditsView.textAlignment = NSTextAlignmentLeft; 
@@ -512,8 +512,8 @@ static NSString * GetPrefsPlistPath() {
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.delegate = self;
     picker.sourceType = source;
-    // 限制只选取视频
-    picker.mediaTypes = @[(NSString *)kUTTypeMovie, (NSString *)kUTTypeVideo, (NSString *)kUTTypeAVIMovie, (NSString *)kUTTypeMPEG4];
+    // 核心修复：直接使用底层 UTI 字符串绕过框架未包含的错误
+    picker.mediaTypes = @[@"public.movie", @"public.video", @"public.avi", @"public.mpeg-4"];
     picker.videoQuality = UIImagePickerControllerQualityTypeHigh; 
     
     UIViewController *topVC = self.view.window.rootViewController ?: self;
