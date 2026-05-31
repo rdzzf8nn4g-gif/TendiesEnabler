@@ -267,8 +267,11 @@ static NSString * GetPrefsPlistPath() {
     
     UIImageView *iconView = [[UIImageView alloc] init];
     NSBundle *bundle = [NSBundle bundleForClass:[self class]];
-    UIImage *icon = [UIImage imageNamed:@"icon" inBundle:bundle compatibleWithTraitCollection:nil];
-    if (!icon) icon = [UIImage imageNamed:@"icon@3x" inBundle:bundle compatibleWithTraitCollection:nil];
+    
+    NSString *iconName = self.isVideoMode ? @"icon1" : @"icon";
+    UIImage *icon = [UIImage imageNamed:iconName inBundle:bundle compatibleWithTraitCollection:nil];
+    if (!icon) icon = [UIImage imageNamed:[NSString stringWithFormat:@"%@@3x", iconName] inBundle:bundle compatibleWithTraitCollection:nil];
+    
     iconView.image = icon;
     iconView.layer.cornerRadius = 14;
     iconView.layer.masksToBounds = YES;
@@ -378,6 +381,8 @@ static NSString * GetPrefsPlistPath() {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
     [self updateRightMenu];
+    
+    [self setupHeaderView];
     
     if ([self respondsToSelector:@selector(table)]) {
         UITableView *tableView = [self performSelector:@selector(table)];
@@ -1162,180 +1167,4 @@ static NSString * GetPrefsPlistPath() {
     NSString *name = [spec propertyForKey:@"WallpaperName"];
     if (name) {
         NSString *path = [GetWallpapersDir() stringByAppendingPathComponent:name];
-        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-        
-        CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
-        if (pathRef) {
-            NSString *currentPath = (__bridge NSString *)pathRef;
-            if ([currentPath isEqualToString:path]) {
-                CFPreferencesSetAppValue(CFSTR("ZonePath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-                CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-            }
-            CFRelease(pathRef);
-        }
-        
-        NSString *resKey = [NSString stringWithFormat:@"ResFactor_%@", name];
-        CFPreferencesSetAppValue((__bridge CFStringRef)resKey, NULL, CFSTR("com.iosdump.zoneprefs"));
-        
-        [self removeSpecifier:spec animated:YES];
-    }
-}
-
-// 视频专属侧滑删除双路清理保护
-- (void)deleteVideoWithSpecifier:(PSSpecifier *)spec {
-    NSString *name = [spec propertyForKey:@"VideoName"];
-    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; // 1=锁屏, 2=桌面
-    if (name) {
-        NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
-        NSString *path = [videoDir stringByAppendingPathComponent:name];
-        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-        
-        NSString *plistPath = GetPrefsPlistPath();
-        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-        BOOL changed = NO;
-        
-        if ([prefs[@"LockVideoPath"] isEqualToString:path]) {
-            [prefs removeObjectForKey:@"LockVideoPath"];
-            CFPreferencesSetAppValue(CFSTR("LockVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-            changed = YES;
-        }
-        if ([prefs[@"HomeVideoPath"] isEqualToString:path]) {
-            [prefs removeObjectForKey:@"HomeVideoPath"];
-            CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-            changed = YES;
-        }
-        
-        if (changed) {
-            [prefs writeToFile:plistPath atomically:YES];
-            CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-        }
-        
-        [self reloadSpecifiers]; // 直接重载整个UI，因为同一个视频可能出现在锁屏和桌面两个分组里
-    }
-}
-
-- (void)renameWallpaper:(NSString *)oldName specifier:(PSSpecifier *)spec {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名" message:@"请输入新的壁纸名称" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-        textField.text = oldName;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        NSString *newName = alert.textFields.firstObject.text;
-        if (newName.length > 0 && ![newName isEqualToString:oldName]) {
-            NSString *oldPath = [GetWallpapersDir() stringByAppendingPathComponent:oldName];
-            NSString *newPath = [GetWallpapersDir() stringByAppendingPathComponent:newName];
-            
-            NSError *err = nil;
-            [[NSFileManager defaultManager] moveItemAtPath:oldPath toPath:newPath error:&err];
-            if (!err) {
-                NSString *oldResKey = [NSString stringWithFormat:@"ResFactor_%@", oldName];
-                NSString *newResKey = [NSString stringWithFormat:@"ResFactor_%@", newName];
-                CFPropertyListRef resRef = CFPreferencesCopyAppValue((__bridge CFStringRef)oldResKey, CFSTR("com.iosdump.zoneprefs"));
-                if (resRef) {
-                    CFPreferencesSetAppValue((__bridge CFStringRef)newResKey, resRef, CFSTR("com.iosdump.zoneprefs"));
-                    CFPreferencesSetAppValue((__bridge CFStringRef)oldResKey, NULL, CFSTR("com.iosdump.zoneprefs"));
-                    CFRelease(resRef);
-                }
-                
-                CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
-                if (pathRef) {
-                    NSString *currentPath = (__bridge NSString *)pathRef;
-                    if ([currentPath isEqualToString:oldPath]) {
-                        CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)newPath, CFSTR("com.iosdump.zoneprefs"));
-                        CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-                        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-                    }
-                    CFRelease(pathRef);
-                }
-                [self reloadSpecifiers];
-            }
-        }
-    }]];
-    UIViewController *topVC = self.view.window.rootViewController ?: self;
-    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-    [topVC presentViewController:alert animated:YES completion:nil];
-}
-
-// 视频专属安全重命名 (自动接管两端数据)
-- (void)renameVideo:(NSString *)oldName specifier:(PSSpecifier *)spec {
-    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; // 1=锁屏, 2=桌面
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名" message:@"请输入新的视频名称" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-        textField.text = oldName;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        NSString *newName = alert.textFields.firstObject.text;
-        if (newName.length > 0 && ![newName isEqualToString:oldName]) {
-            NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
-            NSString *oldPath = [videoDir stringByAppendingPathComponent:oldName];
-            NSString *newPath = [videoDir stringByAppendingPathComponent:newName];
-            
-            NSError *err = nil;
-            [[NSFileManager defaultManager] moveItemAtPath:oldPath toPath:newPath error:&err];
-            if (!err) {
-                NSString *plistPath = GetPrefsPlistPath();
-                NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-                BOOL changed = NO;
-                
-                if ([prefs[@"LockVideoPath"] isEqualToString:oldPath]) {
-                    prefs[@"LockVideoPath"] = newPath;
-                    CFPreferencesSetAppValue(CFSTR("LockVideoPath"), (__bridge CFStringRef)newPath, CFSTR("com.iosdump.zoneprefs"));
-                    changed = YES;
-                }
-                if ([prefs[@"HomeVideoPath"] isEqualToString:oldPath]) {
-                    prefs[@"HomeVideoPath"] = newPath;
-                    CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), (__bridge CFStringRef)newPath, CFSTR("com.iosdump.zoneprefs"));
-                    changed = YES;
-                }
-                
-                if (changed) {
-                    [prefs writeToFile:plistPath atomically:YES];
-                    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-                }
-                [self reloadSpecifiers];
-            }
-        }
-    }]];
-    UIViewController *topVC = self.view.window.rootViewController ?: self;
-    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-    [topVC presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)openFilzaPath:(PSSpecifier *)spec {
-    NSString *targetDir = GetZoneStorageDir(); // 直接打开上一级，既能看到交互也能看到视频素材库
-    NSString *filzaURLString = [NSString stringWithFormat:@"filza://%@", targetDir];
-    NSURL *filzaURL = [NSURL URLWithString:[filzaURLString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-    if ([[UIApplication sharedApplication] canOpenURL:filzaURL]) {
-        [[UIApplication sharedApplication] openURL:filzaURL options:@{} completionHandler:nil];
-    } else {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"设备未安装 Filza。" preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-}
-
-- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
-    [super setPreferenceValue:value specifier:specifier];
-    CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
-    
-    NSString *key = [specifier propertyForKey:@"key"];
-    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"]) {
-        CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, appID);
-        CFPreferencesAppSynchronize(appID);
-        
-        NSString *plistPath = GetPrefsPlistPath();
-        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-        prefs[key] = value;
-        [prefs writeToFile:plistPath atomically:YES];
-        [self forceOwnershipToMobile:plistPath];
-        
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    }
-}
-@end
+        [[NSFileManager defaultManager]
