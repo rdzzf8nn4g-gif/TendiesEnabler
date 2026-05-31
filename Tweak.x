@@ -62,7 +62,7 @@ typedef struct {
 @interface CSBackgroundContentView : UIView
 @end
 
-// ---------- 新增：兼容 iOS 14-15 必备头文件 ----------
+// ---------- iOS 14-15 必备头文件 ----------
 @interface SBLockScreenManager : NSObject
 + (id)sharedInstance;
 - (void)lockUIFromSource:(int)source withOptions:(id)options;
@@ -72,7 +72,7 @@ typedef struct {
 
 @interface SBFWallpaperView : UIView
 @end
-// --------------------------------------------------
+// ----------------------------------------
 
 static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     if ([layer.name isEqualToString:name]) return layer;
@@ -87,14 +87,14 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 // 全局变量与配置管理
 // ==========================================
 static BOOL g_enabled = NO;
-static BOOL g_enhanced_engine = NO; // 新增：增强引擎全局控制
+static BOOL g_enhanced_engine = NO;
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
 
 static __weak _UIPortalView *g_portalView = nil;
 
-static void EnsureEngineViewIsMounted(); // 提前声明
+static void EnsureEngineViewIsMounted(); 
 
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
@@ -115,7 +115,6 @@ static void reloadPrefs() {
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 设置变更后，强制检测并执行热切换引擎
         Class wc = NSClassFromString(@"SBWallpaperController");
         if ([wc respondsToSelector:@selector(sharedInstance)] && [wc sharedInstance]) {
             EnsureEngineViewIsMounted();
@@ -123,7 +122,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineInternalReload" object:nil];
     });
 }
-
 
 // =========================================================================
 // ==================== 【引擎 1】: 传统稳定引擎 (旧逻辑) ====================
@@ -395,14 +393,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
             
             [self setNeedsLayout];
-            [self layoutIfNeeded]; // 1. 强制系统立即排版，催促构建图层树
+            [self layoutIfNeeded];
 
             self.currentState = @"Init";
             
-            // 2. 延迟到下一个 RunLoop (约0.05秒)，确保 CoreAnimation 图层已完全解包就绪
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                
-                // 获取当前绝对准确的锁屏状态（防脱节）
                 BOOL realUnlocked = g_isUnlocked;
                 Class lsManager = NSClassFromString(@"SBLockScreenManager");
                 if ([lsManager respondsToSelector:@selector(sharedInstance)]) {
@@ -415,7 +410,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
                 
-                // 3. 主动广播一次当前应当处的进度，强迫引擎执行 onProgress 重新绑定图层映射
                 double currentProgress = realUnlocked ? 1.0 : 0.0;
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(currentProgress)}];
                 
@@ -426,7 +420,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     });
 }
 @end
-
 
 // =========================================================================
 // ==================== 【引擎 2】: 增强渲染引擎 (新逻辑) ====================
@@ -853,10 +846,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
             self.currentState = @"Init";
             
-            // 2. 延迟到下一个 RunLoop (约0.05秒)，确保 CoreAnimation 图层已完全解包就绪
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 
-                // 获取当前绝对准确的锁屏状态（防脱节）
                 BOOL realUnlocked = g_isUnlocked;
                 Class lsManager = NSClassFromString(@"SBLockScreenManager");
                 if ([lsManager respondsToSelector:@selector(sharedInstance)]) {
@@ -869,7 +860,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
                 
-                // 3. 主动广播一次当前应当处的进度，强迫引擎执行 onProgress 重新绑定图层映射
                 double currentProgress = realUnlocked ? 1.0 : 0.0;
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(currentProgress)}];
                 
@@ -896,12 +886,10 @@ static void EnsureEngineViewIsMounted() {
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
     
-    // 检查当前挂载的引擎类型是否与设置面板吻合
     BOOL isEnhancedClass = [existingEngine isKindOfClass:NSClassFromString(@"ZoneRenderEngineEnhanced")];
     
     if (existingEngine) {
         if ((g_enhanced_engine && !isEnhancedClass) || (!g_enhanced_engine && isEnhancedClass)) {
-            // 如果产生类型不匹配 (例如用户刚刚切换了开关) -> 执行绝对深层剥离
             if ([existingEngine respondsToSelector:@selector(clearCurrentViewsSafely)]) {
                 [existingEngine performSelector:@selector(clearCurrentViewsSafely)];
             }
@@ -912,7 +900,6 @@ static void EnsureEngineViewIsMounted() {
     }
     
     if (!existingEngine) {
-        // 根据实时设置动态指派新的类对象实例化
         if (g_enhanced_engine) {
             existingEngine = [[ZoneRenderEngineEnhanced alloc] initWithFrame:targetContainer.bounds];
         } else {
@@ -930,7 +917,6 @@ static void EnsureEngineViewIsMounted() {
     existingEngine.frame = targetContainer.bounds;
     [targetContainer bringSubviewToFront:existingEngine];
 }
-
 
 // =========================================================================
 // ==================== 【iOS 16+ 专属 Hook 区域】 ==========================
@@ -962,6 +948,78 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook CSCoverSheetViewController
+
+- (void)viewWillLayoutSubviews {
+    %orig;
+    EnsureEngineViewIsMounted(); 
+    
+    if (g_enabled) {
+        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        if (bgVC && bgVC.view) {
+            bgVC.view.alpha = 1.0;
+            bgVC.view.hidden = NO;
+        }
+        
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
+        
+        if (engineView) {
+            _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
+            if (!portalView) {
+                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
+                portalView.sourceView = engineView;
+                portalView.hidesSourceView = NO;
+                portalView.matchesAlpha = NO; 
+                portalView.alpha = 0.0; 
+                portalView.matchesPosition = YES;
+                portalView.matchesTransform = YES;
+                portalView.userInteractionEnabled = NO;
+                objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                g_portalView = portalView;
+            }
+            
+            if (portalView.sourceView != engineView) {
+                portalView.sourceView = engineView; 
+            }
+
+            if (bgVC && bgVC.view) {
+                if (portalView.superview != bgVC.view) {
+                    [portalView removeFromSuperview];
+                    [bgVC.view addSubview:portalView];
+                }
+                portalView.frame = bgVC.view.bounds;
+                
+                for (UIView *sub in bgVC.view.subviews) {
+                    if (sub != portalView) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    }
+                }
+            } else {
+                if (portalView.superview != self.view) {
+                    [self.view insertSubview:portalView atIndex:0];
+                }
+                portalView.frame = self.view.bounds;
+                [self.view sendSubviewToBack:portalView];
+            }
+            
+            @try {
+                UIView *dimmingView = [self valueForKey:@"_dimmingView"];
+                if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+                
+                UIView *tintingView = [self valueForKey:@"_tintingView"];
+                if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
+            } @catch(NSException* e) {}
+        }
+        
+        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+        if (floatingLayer) { 
+            floatingLayer.alpha = 0.0; 
+            floatingLayer.hidden = YES; 
+        }
+    }
+}
+
 - (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
 
 - (void)_prepareForPosterSwitcherPresentation {
@@ -1058,7 +1116,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-%end // end of iOS16Plus
+%end // 结束 iOS16Plus
 
 
 // =========================================================================
@@ -1089,29 +1147,11 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
-        // 在 iOS 14/15 中，CoverSheet 完全盖住屏幕代表已锁定（newProgress == 1.0）
-        // 所以我们用 1.0 减去它，就能换算成和 iOS16 引擎内部一致的 Progress（0.0=Locked，1.0=Unlock）
+        // iOS 14/15 的物理滑动：newProgress=1.0代表锁屏完全盖住，0.0代表完全解锁
+        // 这里进行反转以适配引擎的 Progress 标准（1.0 = Unlock, 0.0 = Locked）
         double convertedProgress = 1.0 - newProgress;
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(convertedProgress)}];
-            
-            if (g_portalView) {
-                double alpha = 0.0;
-                if (convertedProgress > 0.7) {
-                    alpha = (1.0 - convertedProgress) * (0.05 / 0.3);
-                } else if (convertedProgress > 0.6) {
-                    alpha = 0.05 + (0.7 - convertedProgress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - convertedProgress) / 0.6) * 0.85;
-                }
-                
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
         });
     }
 }
@@ -1139,7 +1179,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-%end // end of iOS14_15
+%end // 结束 iOS14_15
 
 
 // =========================================================================
@@ -1213,78 +1253,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)_scrollPanGestureBegan:(id)arg1 { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_scrollPanGestureChanged:(id)arg1 { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_scrollPanGestureEnded:(id)arg1 { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-
-- (void)viewWillLayoutSubviews {
-    %orig;
-    EnsureEngineViewIsMounted(); 
-    
-    if (g_enabled) {
-        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
-        if (bgVC && bgVC.view) {
-            bgVC.view.alpha = 1.0;
-            bgVC.view.hidden = NO;
-        }
-        
-        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-        // 这里的 engineView 取出来就是 UIView * 的父类，兼容两套新旧引擎视图
-        UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
-        
-        if (engineView) {
-            _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
-            if (!portalView) {
-                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-                portalView.sourceView = engineView;
-                portalView.hidesSourceView = NO;
-                portalView.matchesAlpha = NO; 
-                portalView.alpha = 0.0; 
-                portalView.matchesPosition = YES;
-                portalView.matchesTransform = YES;
-                portalView.userInteractionEnabled = NO;
-                objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                g_portalView = portalView;
-            }
-            
-            if (portalView.sourceView != engineView) {
-                portalView.sourceView = engineView; // 应对引擎热切换后刷新映射
-            }
-
-            if (bgVC && bgVC.view) {
-                if (portalView.superview != bgVC.view) {
-                    [portalView removeFromSuperview];
-                    [bgVC.view addSubview:portalView];
-                }
-                portalView.frame = bgVC.view.bounds;
-                
-                for (UIView *sub in bgVC.view.subviews) {
-                    if (sub != portalView) {
-                        sub.alpha = 0.0;
-                        sub.hidden = YES;
-                    }
-                }
-            } else {
-                if (portalView.superview != self.view) {
-                    [self.view insertSubview:portalView atIndex:0];
-                }
-                portalView.frame = self.view.bounds;
-                [self.view sendSubviewToBack:portalView];
-            }
-            
-            @try {
-                UIView *dimmingView = [self valueForKey:@"_dimmingView"];
-                if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
-                
-                UIView *tintingView = [self valueForKey:@"_tintingView"];
-                if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
-            } @catch(NSException* e) {}
-        }
-        
-        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-        if (floatingLayer) { 
-            floatingLayer.alpha = 0.0; 
-            floatingLayer.hidden = YES; 
-        }
-    }
-}
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
@@ -1380,13 +1348,15 @@ static void EnsureEngineViewIsMounted() {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
     
-    // 使用浮点数安全判断 iOS 跨越版本，智能挂载对应 Hook 分组
-    if ([[[UIDevice currentDevice] systemVersion] floatValue] >= 16.0) {
+    // 关键修正：使用类反射来安全、精准地判断系统版本，避免在 SpringBoard 启动早期调用 UIDevice 造成崩溃或判定失败
+    if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
+        // 如果存在 PBUIWallpaperViewController，说明是 iOS 16 及以上
         %init(iOS16Plus);
     } else {
+        // 否则 fallback 为 iOS 14 - 15 的直插模式
         %init(iOS14_15);
     }
     
-    // 加载未分组的通用全局 Hook
+    // 初始化无分组限制的全局通用 Hook
     %init;
 }
