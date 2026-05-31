@@ -46,6 +46,7 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
 // ========================================================
 // 内存守护系统：目录测算与底层 ImageIO 智能图像降维 (防漏/防热)
 // ========================================================
+
 static unsigned long long getDirectorySize(NSString *folderPath) {
     unsigned long long fileSize = 0;
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -235,7 +236,7 @@ static void respringDevice() {
     [self rebuildHeaderView];
 }
 
-// 每次进入页面时更新标题和菜单，保持完美同步
+// 【已修复】每次进入页面时只更新 UI 和菜单，绝不强制修改用户保存好的模式
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self setupNavigationMenu];
@@ -278,7 +279,7 @@ static void respringDevice() {
     topHorizontalStack.spacing = 15; 
     
     UITextView *creditsView = [[UITextView alloc] init];
-    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
+    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzzn图标设计: https://t.me/RrrankkK";
     creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     creditsView.textColor = [UIColor secondaryLabelColor];
     creditsView.textAlignment = NSTextAlignmentLeft; 
