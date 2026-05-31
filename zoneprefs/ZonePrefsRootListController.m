@@ -1,5 +1,6 @@
 #import "ZonePrefsRootListController.h"
 #import <Preferences/PSSpecifier.h>
+#import <Preferences/PSTableCell.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <ImageIO/ImageIO.h>
 #include <sys/stat.h>
@@ -30,13 +31,10 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
     }
 #endif
 
-    // 使用底层参数传递，-o: 覆盖, -q: 静默提速
     const char *argv[] = {"unzip", "-o", "-q", [source UTF8String], "-d", [destination UTF8String], NULL};
     
-    // posix_spawn 是 iOS 底层最高效的进程拉起方式，完美规避 NSTask 的所有缺陷
     if (posix_spawn(&pid, [unzipBin UTF8String], NULL, NULL, (char *const *)argv, environ) == 0) {
         if (waitpid(pid, &status, 0) != -1) {
-            // 返回 0 是成功，返回 1 通常是警告（比如内部有 macosx 缓存也会报 1，同样视为成功）
             return WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 1);
         }
     }
@@ -58,7 +56,6 @@ static unsigned long long getDirectorySize(NSString *folderPath) {
     return fileSize;
 }
 
-// 采用 ImageIO 硬件流降维，规避 UIImage 解压造成的内存核爆，完美保留 PNG 透明度
 static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor) {
     NSURL *imageURL = [NSURL fileURLWithPath:path];
     CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)imageURL, NULL);
@@ -75,10 +72,9 @@ static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor) {
     CGFloat height = [heightNum doubleValue];
     CGFloat maxDimension = MAX(width, height) * scaleFactor;
 
-    // 防御性策略：任何最大边长低于 500 像素的图片拒绝压缩，严保小图标/文字图层清晰度
     if (maxDimension < 500) {
         CFRelease(source);
-        return 0; // 0 表示没做处理
+        return 0; 
     }
 
     NSDictionary *downsampleOptions = @{
@@ -102,10 +98,8 @@ static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor) {
     }
 
     if (isPNG) {
-        // PNG 无损，保留 Alpha 通道
         CGImageDestinationAddImage(destination, downsampledImage, NULL);
     } else {
-        // JPG 质量保持在极佳的 0.85
         NSDictionary *destOptions = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @0.85};
         CGImageDestinationAddImage(destination, downsampledImage, (__bridge CFDictionaryRef)destOptions);
     }
@@ -114,7 +108,6 @@ static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor) {
     CFRelease(destination);
     CGImageRelease(downsampledImage);
 
-    // 返回压缩后的新文件大小
     if (success) {
         return [[[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil] fileSize];
     }
@@ -122,14 +115,13 @@ static unsigned long long downsampleImage(NSString *path, CGFloat scaleFactor) {
 }
 
 static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
-    unsigned long long targetLimit = 25ULL * 1024 * 1024; // 死守 25MB 物理红线
+    unsigned long long targetLimit = 25ULL * 1024 * 1024; 
     unsigned long long currentTotalSize = getDirectorySize(unzipDir);
     
     if (currentTotalSize <= targetLimit) return;
     
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    // 最多尝试 3 趟，防止遇到无法再压缩的极端图片陷入死循环导致 CPU 烧毁
     for (int pass = 1; pass <= 3; pass++) {
         if (currentTotalSize <= targetLimit) break;
         
@@ -146,17 +138,15 @@ static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
             }
         }
         
-        // 核心：按文件大小降序排列，擒贼先擒王，直接干掉占空间最大的元凶
         [imageFiles sortUsingComparator:^NSComparisonResult(id obj1, id obj2) {
             return [obj2[@"size"] compare:obj1[@"size"]];
         }];
         
         for (NSDictionary *imgInfo in imageFiles) {
-            @autoreleasepool { // 绝对隔离：保证单张图片处理完立即释放图形上下文
+            @autoreleasepool { 
                 NSString *path = imgInfo[@"path"];
                 unsigned long long oldSize = [imgInfo[@"size"] unsignedLongLongValue];
                 
-                // 第一趟 80% 像素尺寸，第二趟 60%，第三趟 50%
                 CGFloat scale = 1.0 - (pass * 0.2);
                 if (scale < 0.5) scale = 0.5;
                 
@@ -167,7 +157,6 @@ static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
                     currentTotalSize += newSize;
                 }
                 
-                // 只要总体积达标，立刻中止所有任务，节省 CPU 算力
                 if (currentTotalSize <= targetLimit) {
                     return;
                 }
@@ -211,8 +200,56 @@ static NSString * GetPrefsPlistPath() {
 @implementation ZonePrefsRootListController
 
 // =======================================
-// 强制使用 iOS 13+ 的 InsetGrouped 样式，自动实现原生圆角分区和标准小标题
+// 自定义UI注入区域
 // =======================================
+
+// 点击增强引擎旁的问号按钮后弹出的提示
+- (void)showEnhancedEngineInfo {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"增强复杂壁纸识别" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// 获取壁纸的实时大小并返回右侧文本
+- (id)getWallpaperSize:(PSSpecifier *)spec {
+    NSString *name = [spec propertyForKey:@"WallpaperName"];
+    NSString *fullWpPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
+    unsigned long long sizeBytes = getDirectorySize(fullWpPath);
+    double sizeMB = sizeBytes / (1024.0 * 1024.0);
+    return [NSString stringWithFormat:@"%.1f MB", sizeMB];
+}
+
+// 拦截 Cell 的渲染过程，实现在右侧追加问号图标，并让 PSTitleValueCell 具有点击高亮响应
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
+    PSSpecifier *spec = [(id)cell specifier];
+    
+    // 如果是增强引擎开关，注入一个问号图标
+    if ([[spec identifier] isEqualToString:@"EnhancedEngine"]) {
+        UIButton *existingBtn = [cell.contentView viewWithTag:888];
+        if (!existingBtn) {
+            UIButton *infoBtn = [UIButton buttonWithType:UIButtonTypeInfoLight];
+            infoBtn.tag = 888;
+            [infoBtn addTarget:self action:@selector(showEnhancedEngineInfo) forControlEvents:UIControlEventTouchUpInside];
+            infoBtn.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:infoBtn];
+            
+            // 将按钮锚定在ContentView的右侧外缘（由于 AccessoryView 占据最右，ContentView在它左边，完美呈现于文字与开关中间靠右位置）
+            [NSLayoutConstraint activateConstraints:@[
+                [infoBtn.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [infoBtn.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-8]
+            ]];
+        }
+    }
+    
+    // 强制赋予自带数值的 PSTitleValueCell 点击选中效果
+    if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) {
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
+    
+    return cell;
+}
+
 - (UITableViewStyle)tableViewStyle {
     if (@available(iOS 13.0, *)) {
         return UITableViewStyleInsetGrouped;
@@ -223,14 +260,9 @@ static NSString * GetPrefsPlistPath() {
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    // =======================================
-    // 极致完美的排版布局 (图左名右居中，文字左对齐块居中，缩小下巴留白)
-    // =======================================
-    // 将高度从220缩小到160，从而让下面的 Cell 整体上移
     UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     
-    // 1. 图标
     UIImageView *iconView = [[UIImageView alloc] init];
     NSBundle *bundle = [NSBundle bundleForClass:[self class]];
     UIImage *icon = [UIImage imageNamed:@"icon" inBundle:bundle compatibleWithTraitCollection:nil];
@@ -241,49 +273,40 @@ static NSString * GetPrefsPlistPath() {
     [iconView.widthAnchor constraintEqualToConstant:60].active = YES;
     [iconView.heightAnchor constraintEqualToConstant:60].active = YES;
     
-    // 2. 标题 (彩色涂鸦效果)
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
-    titleLabel.textAlignment = NSTextAlignmentLeft; // 配合横向Stack改为左对齐
+    titleLabel.textAlignment = NSTextAlignmentLeft; 
     
     NSMutableAttributedString *coloredTitle = [[NSMutableAttributedString alloc] initWithString:@"Zone"];
-    // 浅蓝
     [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1.0] range:NSMakeRange(0, 1)];
-    // 紫色
     [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.70 green:0.40 blue:0.90 alpha:1.0] range:NSMakeRange(1, 1)];
-    // 浅绿
     [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:0.50 green:0.90 blue:0.60 alpha:1.0] range:NSMakeRange(2, 1)];
-    // 浅粉
     [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:1.00 green:0.60 blue:0.80 alpha:1.0] range:NSMakeRange(3, 1)];
     titleLabel.attributedText = coloredTitle;
     
-    // 2.5 将图标和标题打包成一个水平的 StackView（图左、字右）
     UIStackView *topHorizontalStack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel]];
     topHorizontalStack.axis = UILayoutConstraintAxisHorizontal;
     topHorizontalStack.alignment = UIStackViewAlignmentCenter;
-    topHorizontalStack.spacing = 15; // 图标和文字的左右间距
+    topHorizontalStack.spacing = 15; 
     
-    // 3. 作者信息及频道 (使用 UITextView 实现多行，内部左对齐，外部Stack保证整体居中)
     UITextView *creditsView = [[UITextView alloc] init];
     creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
     creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     creditsView.textColor = [UIColor secondaryLabelColor];
-    creditsView.textAlignment = NSTextAlignmentLeft; // 内部文字开头对齐（左对齐）
+    creditsView.textAlignment = NSTextAlignmentLeft; 
     creditsView.editable = NO;
     creditsView.scrollEnabled = NO;
     creditsView.backgroundColor = [UIColor clearColor];
-    creditsView.dataDetectorTypes = UIDataDetectorTypeLink; // 开启自动识别超链接
+    creditsView.dataDetectorTypes = UIDataDetectorTypeLink; 
     
-    // 4. 打包进最终的主垂直弹性容器 (整体依然完美居中)
     UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsView]];
     mainVerticalStack.axis = UILayoutConstraintAxisVertical;
-    mainVerticalStack.alignment = UIStackViewAlignmentCenter; // 确保横向块和文字块作为一个整体居中
-    mainVerticalStack.spacing = 10; // 上下区域的间距
+    mainVerticalStack.alignment = UIStackViewAlignmentCenter; 
+    mainVerticalStack.spacing = 10; 
     mainVerticalStack.translatesAutoresizingMaskIntoConstraints = NO;
     
     [headerView addSubview:mainVerticalStack];
     
-    // 设置弹性容器在头部居中
     [NSLayoutConstraint activateConstraints:@[
         [mainVerticalStack.centerXAnchor constraintEqualToAnchor:headerView.centerXAnchor],
         [mainVerticalStack.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor]
@@ -321,15 +344,18 @@ static NSString * GetPrefsPlistPath() {
                 BOOL isDir;
                 if ([fm fileExistsAtPath:[wpDir stringByAppendingPathComponent:name] isDirectory:&isDir] && isDir) {
                     
-                    PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+                    NSString *fullWpPath = [wpDir stringByAppendingPathComponent:name];
+                    NSString *displayName = name;
+                    
+                    if ([currentPath isEqualToString:fullWpPath]) {
+                        displayName = [NSString stringWithFormat:@"%@  ✓", name];
+                    }
+                    
+                    // 改用 PSTitleValueCell 实现右侧文字靠右的效果，并赋予其专门的 getter 去获取容量数据
+                    PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getWallpaperSize:) detail:nil cell:PSTitleValueCell edit:nil];
                     spec->action = @selector(selectWallpaper:);
                     [spec setProperty:name forKey:@"WallpaperName"];
                     [spec setProperty:@YES forKey:@"IsWallpaperCell"]; 
-                    
-                    NSString *fullWpPath = [wpDir stringByAppendingPathComponent:name];
-                    if ([currentPath isEqualToString:fullWpPath]) {
-                        spec.name = [NSString stringWithFormat:@"%@  ✓", name];
-                    }
                     
                     [specs addObject:spec];
                 }
@@ -373,14 +399,55 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
+// 断点检查：计算预导入文件大小
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
 
-    // 添加几个空格留出右侧空间给菊花
+    // 丢入子线程测算欲导入的文件总体积
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        unsigned long long totalSizeBytes = 0;
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSURL *url in urls) {
+            BOOL isAccessing = [url startAccessingSecurityScopedResource];
+            BOOL isDir = NO;
+            if ([fm fileExistsAtPath:url.path isDirectory:&isDir]) {
+                if (isDir) {
+                    totalSizeBytes += getDirectorySize(url.path);
+                } else {
+                    totalSizeBytes += [[fm attributesOfItemAtPath:url.path error:nil] fileSize];
+                }
+            }
+            if (isAccessing) [url stopAccessingSecurityScopedResource];
+        }
+
+        double totalMB = totalSizeBytes / (1024.0 * 1024.0);
+        
+        // 延时一点确保 UIDocumentPicker 完全退出动画后再弹框，避免UI冲突
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (totalMB > 40.0) {
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"超大文件警告" 
+                                                                               message:[NSString stringWithFormat:@"检测到将要导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入此类超大体积引擎包可能会导致设备在锁屏严重发热、卡顿甚至死机。\n是否确认要继续导入？", totalMB] 
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+                [alert addAction:[UIAlertAction actionWithTitle:@"继续导入" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+                    [self proceedWithImportingURLs:urls];
+                }]];
+                
+                UIViewController *topVC = self.view.window.rootViewController;
+                if (!topVC) topVC = self;
+                while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+                [topVC presentViewController:alert animated:YES completion:nil];
+            } else {
+                [self proceedWithImportingURLs:urls];
+            }
+        });
+    });
+}
+
+// 实际负责搬运和解析的模块抽出独立方法
+- (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls {
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入...      " message:nil preferredStyle:UIAlertControllerStyleAlert];
-    // 改为 Medium 大小，使其与单行文字更加协调匹配
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    // X=205.0靠右，Y=31.0正好与系统 UIAlertController 的单行标题处于同一高度
     spinner.center = CGPointMake(205.0, 31.0);
     [spinner startAnimating];
     [loadingAlert.view addSubview:spinner];
@@ -420,19 +487,15 @@ static NSString * GetPrefsPlistPath() {
                         if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
                     }
                 } else {
-                    // 调用强大的底层 C 语言原生解压引擎
                     processSuccess = industrialUnzip(sourceURL.path, unzipDir);
                 }
                 
-                // ====== 注入策略 ======
-                // 只有在复制或解压成功后，才对目录进行体积清洗
                 if (processSuccess) {
                     optimizeZoneFolderIfNecessary(unzipDir);
                     anySuccess = YES;
                 }
                 
                 if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
-                // ====================
             }
             
             if (anySuccess) {
@@ -473,7 +536,7 @@ static NSString * GetPrefsPlistPath() {
     
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    [self reloadSpecifiers];
+    [self reloadSpecifiers]; // 刷新列表时会重新调用 getter，确保容量大小的数字也被实时重新测算
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
