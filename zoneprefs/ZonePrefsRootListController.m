@@ -385,7 +385,7 @@ static NSString * GetPrefsPlistPath() {
     CFPreferencesSetAppValue(CFSTR("VideoModeEnabled"), (__bridge CFNumberRef)@(self.isVideoMode), CFSTR("com.iosdump.zoneprefs"));
     CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
     
-    CFPreferencesPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
     [self updateRightMenu];
     [self setupHeaderView]; // 重建并重载带有新 icon1 图标的头部视图
