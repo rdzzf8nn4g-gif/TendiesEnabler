@@ -439,7 +439,7 @@ static NSString * GetPrefsPlistPath() {
         // ==========================================
         
         PSSpecifier *g1 = [PSSpecifier emptyGroupSpecifier];
-        [g1 setProperty:@"开启此开关应用全局，视频模式下交互壁纸将自动休眠并彻底释放内存。" forKey:@"footerText"];
+        [g1 setProperty:@"开启启用插件开关应用全局，视频模式下交互壁纸将自动休眠并彻底释放内存。\n开启锁屏桌面使用同素材时需在锁屏/壁纸素材内选择一个。" forKey:@"footerText"];
         [_specifiers addObject:g1];
         
         PSSpecifier *enableSpec = [PSSpecifier preferenceSpecifierNamed:@"启用插件" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
@@ -492,7 +492,7 @@ static NSString * GetPrefsPlistPath() {
         homeContents = [homeContents sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
         
         PSSpecifier *gHome = [PSSpecifier preferenceSpecifierNamed:@"桌面壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [gHome setProperty:@"点击应用为桌面壁纸，向左滑动可删除或重命名。\n同源优化: 锁屏和桌面选择同一个视频时，引擎会自动复用内存并降低占用。" forKey:@"footerText"];
+        [gHome setProperty:@"点击应用为桌面壁纸，向左滑动可删除或重命名。" forKey:@"footerText"];
         [_specifiers addObject:gHome];
         
         PSSpecifier *btnHomeImport = [PSSpecifier preferenceSpecifierNamed:@"导入桌面素材" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
@@ -757,7 +757,7 @@ static NSString * GetPrefsPlistPath() {
 // =======================================================
 
 - (void)showEnhancedEngineInfo {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启增强复杂交互壁纸识别以及适配壁纸暗黑模式适配等。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启增强引擎将提升识别复杂交互壁纸能力以及适配壁纸暗黑模式适配等。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
