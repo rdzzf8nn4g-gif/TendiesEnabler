@@ -185,7 +185,6 @@ static NSString * GetWallpapersDir() {
     return [GetZoneStorageDir() stringByAppendingPathComponent:@"Wallpapers"];
 }
 
-// 【修复需求1】分别获取锁屏与桌面的独立视频目录
 static NSString * GetVideoWallpapersLockDir() {
     return [GetZoneStorageDir() stringByAppendingPathComponent:@"VideoWallpapers/Lock"];
 }
@@ -203,7 +202,7 @@ static void EnsureVideoDirectoriesExist() {
     
     if (![fm fileExistsAtPath:lockDir]) {
         [fm createDirectoryAtPath:lockDir withIntermediateDirectories:YES attributes:nil error:nil];
-        // 如果是从旧版本升级上来，旧的视频都在 VideoWallpapers 根目录，帮用户迁移到 Lock 文件夹中
+        // 兼容老版本的数据迁移
         NSArray *contents = [fm contentsOfDirectoryAtPath:baseVideoDir error:nil];
         for (NSString *item in contents) {
             if ([item isEqualToString:@"Lock"] || [item isEqualToString:@"Home"]) continue;
@@ -292,7 +291,6 @@ static NSString * GetPrefsPlistPath() {
     topHorizontalStack.alignment = UIStackViewAlignmentCenter;
     topHorizontalStack.spacing = 15; 
     
-    // 【修复需求2：完美补齐 \n 图标设计】
     UITextView *creditsView = [[UITextView alloc] init];
     creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
     creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
@@ -394,10 +392,17 @@ static NSString * GetPrefsPlistPath() {
     [self reloadSpecifiers];
 }
 
+// 【修复需求5】：最强全系统兼容原生级注销 (Rootless/Roothide/Rootful)
 - (void)respringDevice {
     pid_t pid;
     const char *args[] = {"killall", "-9", "backboardd", NULL};
-    posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, environ);
+    
+    // 优先尝试无根越狱环境路径
+    int status = posix_spawn(&pid, "/var/jb/usr/bin/killall", NULL, NULL, (char *const *)args, environ);
+    if (status != 0) {
+        // 如果无根环境执行失败，再尝试有根环境绝对路径
+        posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, environ);
+    }
 }
 
 
@@ -426,15 +431,13 @@ static NSString * GetPrefsPlistPath() {
         enableSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:enableSpec];
         
-        // 【需求3】低电模式暂停开关
         PSSpecifier *lowPowerSpec = [PSSpecifier preferenceSpecifierNamed:@"低电模式暂停" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [lowPowerSpec setProperty:@"LowPowerPause" forKey:@"key"];
         [lowPowerSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
         lowPowerSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:lowPowerSpec];
         
-        // 【需求4】锁屏桌面使用同素材开关
-        PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面使用同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [sameMatSpec setProperty:@"SameVideoMaterial" forKey:@"key"];
         [sameMatSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
         sameMatSpec->action = @selector(setSameMaterialValue:specifier:); // 劫持 Setter，方便点击立刻刷新UI
@@ -442,11 +445,6 @@ static NSString * GetPrefsPlistPath() {
         
         
         NSFileManager *fm = [NSFileManager defaultManager];
-        NSString *plistPath = GetPrefsPlistPath();
-        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-        NSString *currentLock = prefs[@"LockVideoPath"];
-        NSString *currentHome = prefs[@"HomeVideoPath"];
-        BOOL isSameMaterialOn = [prefs[@"SameVideoMaterial"] boolValue];
         
         // ================= 锁屏视频区域 =================
         NSString *lockDir = GetVideoWallpapersLockDir();
@@ -463,20 +461,7 @@ static NSString * GetPrefsPlistPath() {
         
         for (NSString *name in lockContents) {
             if ([name hasPrefix:@"."]) continue;
-            NSString *fullPath = [lockDir stringByAppendingPathComponent:name];
-            NSString *displayName = name;
-            
-            // 【打勾逻辑防御与同步】
-            BOOL isChecked = NO;
-            if (isSameMaterialOn) {
-                isChecked = [currentLock isEqualToString:fullPath] || [currentHome isEqualToString:fullPath];
-            } else {
-                isChecked = [currentLock isEqualToString:fullPath];
-            }
-            
-            if (isChecked) displayName = [NSString stringWithFormat:@"%@  ✓", name];
-            
-            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
+            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
             spec->action = @selector(selectVideoWallpaper:);
             [spec setProperty:name forKey:@"VideoName"];
             [spec setProperty:@1 forKey:@"VideoTarget"]; // 标记目标是锁屏
@@ -499,19 +484,7 @@ static NSString * GetPrefsPlistPath() {
         
         for (NSString *name in homeContents) {
             if ([name hasPrefix:@"."]) continue;
-            NSString *fullPath = [homeDir stringByAppendingPathComponent:name];
-            NSString *displayName = name;
-            
-            BOOL isChecked = NO;
-            if (isSameMaterialOn) {
-                isChecked = [currentLock isEqualToString:fullPath] || [currentHome isEqualToString:fullPath];
-            } else {
-                isChecked = [currentHome isEqualToString:fullPath];
-            }
-            
-            if (isChecked) displayName = [NSString stringWithFormat:@"%@  ✓", name];
-            
-            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
+            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
             spec->action = @selector(selectVideoWallpaper:);
             [spec setProperty:name forKey:@"VideoName"];
             [spec setProperty:@2 forKey:@"VideoTarget"]; // 标记目标是桌面
@@ -545,26 +518,12 @@ static NSString * GetPrefsPlistPath() {
             NSArray *contents = [fm contentsOfDirectoryAtPath:wpDir error:nil];
             contents = [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
             
-            NSString *currentPath = nil;
-            CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
-            if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
-                currentPath = (__bridge NSString *)pathRef;
-                CFRelease(pathRef);
-            }
-
             for (NSString *name in contents) {
                 if ([name hasPrefix:@"."]) continue; 
                 BOOL isDir;
                 if ([fm fileExistsAtPath:[wpDir stringByAppendingPathComponent:name] isDirectory:&isDir] && isDir) {
                     
-                    NSString *fullWpPath = [wpDir stringByAppendingPathComponent:name];
-                    NSString *displayName = name;
-                    
-                    if ([currentPath isEqualToString:fullWpPath]) {
-                        displayName = [NSString stringWithFormat:@"%@  ✓", name];
-                    }
-                    
-                    PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getWallpaperSize:) detail:nil cell:PSTitleValueCell edit:nil];
+                    PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:@selector(getWallpaperSize:) detail:nil cell:PSTitleValueCell edit:nil];
                     spec->action = @selector(selectWallpaper:);
                     [spec setProperty:name forKey:@"WallpaperName"];
                     [spec setProperty:@YES forKey:@"IsWallpaperCell"]; 
@@ -660,7 +619,7 @@ static NSString * GetPrefsPlistPath() {
     [picker dismissViewControllerAnimated:YES completion:nil];
 }
 
-// 将挑选好的视频无损搬运到对应路径下
+// 将挑选好的视频无损搬运到对应路径下 (绝对零压缩)
 - (void)processVideoURL:(NSURL *)url target:(NSInteger)target {
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在搬运素材..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
@@ -692,6 +651,7 @@ static NSString * GetPrefsPlistPath() {
             NSString *destPath = [videoDir stringByAppendingPathComponent:fileName];
             
             NSError *err = nil;
+            // 完全零损耗的底层文件 Copy，保障 4K 画质绝不被压缩
             [fm copyItemAtPath:url.path toPath:destPath error:&err];
             
             if (isAccessing) [url stopAccessingSecurityScopedResource];
@@ -728,7 +688,6 @@ static NSString * GetPrefsPlistPath() {
     NSString *plistPath = GetPrefsPlistPath();
     NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
     
-    // 【防御与逻辑整合】读取同素材开关
     BOOL isSameMaterialOn = [prefs[@"SameVideoMaterial"] boolValue];
     
     if (isSameMaterialOn) {
@@ -811,13 +770,47 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 拦截 Cell 的渲染过程 (交互模式专用注入)
+// 【修复需求2】：拦截 Cell 的渲染过程，使用系统原生的蓝色选中打勾视觉
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
     PSSpecifier *spec = [(id)cell specifier];
     NSString *specKey = [spec propertyForKey:@"key"];
     
-    if (self.isVideoMode) return cell; // 视频模式绝对屏障保护
+    // ======== 视频壁纸专门的打勾渲染机制 ========
+    if ([[spec propertyForKey:@"IsVideoCell"] boolValue]) {
+        NSString *name = [spec propertyForKey:@"VideoName"];
+        NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue];
+        NSString *fullPath = [(target == 1 ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir()) stringByAppendingPathComponent:name];
+
+        NSString *plistPath = GetPrefsPlistPath();
+        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        NSString *currentLock = prefs[@"LockVideoPath"];
+        NSString *currentHome = prefs[@"HomeVideoPath"];
+        BOOL isSameMaterialOn = [prefs[@"SameVideoMaterial"] boolValue];
+
+        BOOL isChecked = NO;
+        if (isSameMaterialOn) {
+            isChecked = [currentLock isEqualToString:fullPath] || [currentHome isEqualToString:fullPath];
+        } else {
+            if (target == 1) isChecked = [currentLock isEqualToString:fullPath];
+            if (target == 2) isChecked = [currentHome isEqualToString:fullPath];
+        }
+
+        if (isChecked) {
+            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+            cell.textLabel.textColor = [UIColor systemBlueColor];
+        } else {
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.textLabel.textColor = [UIColor labelColor];
+        }
+        
+        // 隐藏不需要的 detail 文字区域
+        cell.detailTextLabel.hidden = YES;
+        cell.detailTextLabel.text = @"";
+        return cell;
+    }
+    
+    if (self.isVideoMode) return cell; // 屏蔽后续交互模式UI注入
     
     if ([specKey isEqualToString:@"EnhancedEngine"]) {
         UIButton *existingBtn = [cell.contentView viewWithTag:881];
@@ -843,15 +836,29 @@ static NSString * GetPrefsPlistPath() {
         }
     }
     
+    // 交互模式打勾
     if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         NSString *name = [spec propertyForKey:@"WallpaperName"];
+        NSString *fullWpPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
+        
+        NSString *plistPath = GetPrefsPlistPath();
+        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        NSString *currentPath = prefs[@"ZonePath"];
+        
+        if ([currentPath isEqualToString:fullWpPath]) {
+            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+            cell.textLabel.textColor = [UIColor systemBlueColor];
+        } else {
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.textLabel.textColor = [UIColor labelColor];
+        }
         
         UIView *accView = cell.accessoryView;
         UIButton *resBtn = nil;
         UILabel *sizeLabel = nil;
         
-        if (!accView || accView.frame.size.width != 115) {
+        if (![accView isKindOfClass:[UIView class]] || accView.frame.size.width != 115) {
             accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 115, 30)];
             
             sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 65, 30)];
@@ -872,13 +879,14 @@ static NSString * GetPrefsPlistPath() {
             resBtn.tag = 777;
             [accView addSubview:resBtn];
             
+            // 如果选中了，需要把打勾图标和这个自定义视图融合（原生做不到，我们这里使用保留按钮覆盖策略）
+            // 简单处理：放弃右侧打勾，因为自定义 accessoryView 会覆盖它。我们在名字上做颜色区分。
             cell.accessoryView = accView;
         } else {
             sizeLabel = [accView viewWithTag:888];
             resBtn = [accView viewWithTag:777];
         }
         
-        NSString *fullWpPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
         double sizeMB = getDirectorySize(fullWpPath) / (1024.0 * 1024.0);
         sizeLabel.text = [NSString stringWithFormat:@"%.1f MB", sizeMB];
         
