@@ -728,14 +728,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 
+// 【核心修改】修复画面放大问题，无视 Padding 直接读取真实屏幕大小
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.bounds;
-    CGSize targetSize = self.logicalScreenSize;
-    if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
     
-    CGFloat scaleX = bounds.size.width / targetSize.width;
-    CGFloat scaleY = bounds.size.height / targetSize.height;
+    // 强制使用真实物理屏幕尺寸进行计算，忽略系统给定的带有 Padding 的 Bounds
+    CGSize screenSize = [UIScreen mainScreen].bounds.size; 
+    CGSize targetSize = self.logicalScreenSize;
+    if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = screenSize;
+    
+    CGFloat scaleX = screenSize.width / targetSize.width;
+    CGFloat scaleY = screenSize.height / targetSize.height;
     CGFloat scale = MAX(scaleX, scaleY);
     
     BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
@@ -756,6 +760,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
             v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
+            // 无论父视图有多大 Padding，壁纸主体强制在真实父视图 Bounds 中心显示
             rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
             rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
         }
@@ -793,6 +798,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
+// 【核心修改】修复发热和 CPU 满载问题，移除高开销异常捕获
 - (void)applyProgress:(double)progress parser:(ZoneCAMLParserEnhanced *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     
@@ -815,19 +821,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             if (lockVal && unlockVal) {
                 [layer removeAnimationForKey:keyPath];
-                @try {
-                    if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
-                        double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
-                        [layer setValue:@(currentVal) forKeyPath:keyPath];
-                    } 
-                    else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
-                        CGPoint lockPt = [lockVal CGPointValue];
-                        CGPoint unlockPt = [unlockVal CGPointValue];
-                        CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
-                                                        lockPt.y + (unlockPt.y - lockPt.y) * progress);
-                        [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
-                    }
-                } @catch (NSException *e) {}
+                // 替换 @try-catch 为更加安全的运行期类型判定，极大减小 60FPS 渲染时的资源开销
+                if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
+                    double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
+                    [layer setValue:@(currentVal) forKeyPath:keyPath];
+                } 
+                else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
+                    CGPoint lockPt = [lockVal CGPointValue];
+                    CGPoint unlockPt = [unlockVal CGPointValue];
+                    CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
+                                                    lockPt.y + (unlockPt.y - lockPt.y) * progress);
+                    [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
+                }
             }
         }
     }
@@ -1281,7 +1286,7 @@ static void EnsureEngineViewIsMounted() {
 
 %hook CSCoverSheetViewController
 
-// 【核心修复 1：通过传送门恢复下拉模糊】
+// 【核心修复 1：利用真实的物理 Y 轴偏移进行动画追踪，同时防止死循环 Layout】
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted(); 
@@ -1297,7 +1302,6 @@ static void EnsureEngineViewIsMounted() {
                 portalView.sourceView = engineView;
                 portalView.hidesSourceView = NO;
                 portalView.matchesAlpha = NO; 
-                // iOS14默认在锁屏上完全显示Portal层
                 portalView.alpha = 1.0; 
                 portalView.matchesPosition = YES;
                 portalView.matchesTransform = YES;
@@ -1310,14 +1314,15 @@ static void EnsureEngineViewIsMounted() {
                 portalView.sourceView = engineView; 
             }
 
-            // 直接垫底插入到 CoverSheet 背景中
+            // 修复严重发热与卡顿：只有当 portal 没挂载或不在最底层时，才操作子视图。防止反复触发 Layout 死循环！
             if (portalView.superview != self.view) {
                 [self.view insertSubview:portalView atIndex:0];
+            } else if ([self.view.subviews firstObject] != portalView) {
+                [self.view sendSubviewToBack:portalView];
             }
-            portalView.frame = self.view.bounds;
-            [self.view sendSubviewToBack:portalView];
             
-            // 屏蔽原生自带的老旧滤镜，让我们的传送门接管
+            portalView.frame = self.view.bounds;
+            
             UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
             if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
             
@@ -1330,43 +1335,49 @@ static void EnsureEngineViewIsMounted() {
             floatingLayer.alpha = 0.0; 
             floatingLayer.hidden = YES; 
         }
-    }
-}
-
-// 【核心修复 2：物理拽动同步与模糊通道控制】
-- (void)overlayController:(id)controller didChangePresentationProgress:(double)oldProgress newPresentationProgress:(double)newProgress fromLeading:(BOOL)leading {
-    %orig;
-    EnsureEngineViewIsMounted();
-    if (g_enabled) {
-        // iOS14 的 newProgress：1.0 是完全锁屏(Locked)，0.0 是完全桌面(Unlock)
-        // 翻转成我们引擎习惯的 Progress (1.0 = Unlock)
-        double convertedProgress = 1.0 - newProgress;
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(convertedProgress)}];
+        // 【物理位移交互接管】：
+        // 当用户上滑锁屏时，CoverSheet 本身的 origin.y 会向负向移动 (从 0 滑到 -屏幕高度)
+        double yOffset = self.view.frame.origin.y;
+        double screenHeight = [UIScreen mainScreen].bounds.size.height;
+        
+        // progress = 0.0 处于完全锁住
+        // progress = 1.0 处于完全打开
+        double engineProgress = ABS(yOffset) / screenHeight;
+        engineProgress = MAX(0.0, MIN(1.0, engineProgress));
+        
+        // 使用静态变量减缓发信频率（防卡防烫）
+        static double lastProgress = -1;
+        if (ABS(engineProgress - lastProgress) > 0.005) {
+            lastProgress = engineProgress;
             
-            // 同步控制传送门模糊渐变 (和iOS16算法完全一致)
-            if (g_portalView) {
-                double alpha = 0.0;
-                if (convertedProgress > 0.7) {
-                    alpha = (1.0 - convertedProgress) * (0.05 / 0.3);
-                } else if (convertedProgress > 0.6) {
-                    alpha = 0.05 + (0.7 - convertedProgress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - convertedProgress) / 0.6) * 0.85;
-                }
+            // 使用 dispatch_async 防止在 Layout 中阻塞当前渲染队列
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
                 
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
-        });
+                // 同步渐变 portal 透明度
+                if (g_portalView) {
+                    double alpha = 0.0;
+                    if (engineProgress > 0.7) {
+                        alpha = (1.0 - engineProgress) * (0.05 / 0.3);
+                    } else if (engineProgress > 0.6) {
+                        alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
+                    } else {
+                        alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
+                    }
+                    alpha = MAX(0.0, MIN(1.0, alpha));
+                    
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    g_portalView.alpha = alpha;
+                    [CATransaction commit];
+                }
+            });
+        }
     }
 }
 
-// 【核心修复 3：进出桌面的生命周期强制锁死状态，绝不脱节】
+// 【核心修复 2：进出桌面的生命周期强制锁死状态，绝不脱节】
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
@@ -1484,9 +1495,10 @@ static void EnsureEngineViewIsMounted() {
 
 %hook CSCoverSheetViewController
 
-- (void)_scrollPanGestureBegan:(id)arg1 { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
-- (void)_scrollPanGestureChanged:(id)arg1 { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
-- (void)_scrollPanGestureEnded:(id)arg1 { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
+// 【核心清算】删除多余及无用的方法，杜绝只要手一放上去就触发重绘耗电的问题
+- (void)_scrollPanGestureBegan:(id)arg1 { %orig; }
+- (void)_scrollPanGestureChanged:(id)arg1 { %orig; }
+- (void)_scrollPanGestureEnded:(id)arg1 { %orig; }
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
