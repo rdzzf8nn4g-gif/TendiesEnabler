@@ -11,7 +11,8 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = Zone
 Zone_FILES = Tweak.x
 Zone_CFLAGS = -fobjc-arc
-Zone_FRAMEWORKS = Foundation UIKit
+# 【修改这里】：追加了 AVFoundation
+Zone_FRAMEWORKS = Foundation UIKit AVFoundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 SUBPROJECTS += zoneprefs
