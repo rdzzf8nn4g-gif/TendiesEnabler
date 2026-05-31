@@ -213,17 +213,23 @@ static NSString * GetPrefsPlistPath() {
 // =======================================
 // UI 生命周期与右上角核弹菜单注入
 // =======================================
+
+// 【核心修复】：将模式状态读取提前到底层初始化阶段，彻底解决切换后退出不保存状态的问题
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        NSString *plistPath = GetPrefsPlistPath();
+        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        _isVideoMode = [prefs[@"VideoModeEnabled"] boolValue];
+    }
+    return self;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    // 初始化读取当前模式
-    NSString *plistPath = GetPrefsPlistPath();
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-    self.isVideoMode = [prefs[@"VideoModeEnabled"] boolValue];
-    
-    // 【全新注入】右上角系统级菜单按钮
-    UIBarButtonItem *menuBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] style:UIBarButtonItemStylePlain target:self action:@selector(showZoneMenu)];
-    self.navigationItem.rightBarButtonItem = menuBtn;
+    // 初始化右上角气泡菜单
+    [self updateRightMenu];
     
     // 构建头部视图 (HeadView保持不变且全模式通用)
     [self setupHeaderView];
@@ -260,7 +266,7 @@ static NSString * GetPrefsPlistPath() {
     topHorizontalStack.spacing = 15; 
     
     UITextView *creditsView = [[UITextView alloc] init];
-    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
+    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzzn图标设计: https://t.me/RrrankkK";
     creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     creditsView.textColor = [UIColor secondaryLabelColor];
     creditsView.textAlignment = NSTextAlignmentLeft; 
@@ -288,25 +294,48 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 【无缝弹窗及物理级转场引擎】
-- (void)showZoneMenu {
+// 【核心修复】：注入原生气泡菜单 (UIMenu)
+- (void)updateRightMenu {
+    if (@available(iOS 14.0, *)) {
+        NSString *switchTitle = self.isVideoMode ? @"切换为交互模式" : @"切换为视频模式";
+        UIAction *switchAction = [UIAction actionWithTitle:switchTitle 
+                                                     image:[UIImage systemImageNamed:@"arrow.left.arrow.right"] 
+                                                identifier:nil 
+                                                   handler:^(__kindof UIAction * _Nonnull action) {
+            [self executeSmoothModeTransition];
+        }];
+        
+        UIAction *respringAction = [UIAction actionWithTitle:@"注销 (Respring)" 
+                                                       image:[UIImage systemImageNamed:@"arrow.clockwise"] 
+                                                  identifier:nil 
+                                                     handler:^(__kindof UIAction * _Nonnull action) {
+            [self respringDevice];
+        }];
+        respringAction.attributes = UIMenuElementAttributesDestructive;
+        
+        UIMenu *menu = [UIMenu menuWithTitle:@"" children:@[switchAction, respringAction]];
+        UIBarButtonItem *menuBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:menu];
+        self.navigationItem.rightBarButtonItem = menuBtn;
+    } else {
+        // iOS 13 备用降级方案
+        UIBarButtonItem *menuBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] style:UIBarButtonItemStylePlain target:self action:@selector(showZoneMenuFallback)];
+        self.navigationItem.rightBarButtonItem = menuBtn;
+    }
+}
+
+- (void)showZoneMenuFallback {
     UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"Zone 引擎控制台" message:@"选择你需要操作的模式与功能" preferredStyle:UIAlertControllerStyleActionSheet];
-    
-    NSString *switchTitle = self.isVideoMode ? @"🕹️ 切换为交互壁纸模式" : @"🎬 切换为视频壁纸模式";
+    NSString *switchTitle = self.isVideoMode ? @"切换为交互模式" : @"切换为视频模式";
     [menu addAction:[UIAlertAction actionWithTitle:switchTitle style:UIAlertActionStyleDefault handler:^(id action) {
         [self executeSmoothModeTransition];
     }]];
-    
-    [menu addAction:[UIAlertAction actionWithTitle:@"🔄 极速注销 (Respring)" style:UIAlertActionStyleDestructive handler:^(id action) {
+    [menu addAction:[UIAlertAction actionWithTitle:@"注销 (Respring)" style:UIAlertActionStyleDestructive handler:^(id action) {
         [self respringDevice];
     }]];
-    
     [menu addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    
     if (menu.popoverPresentationController) {
         menu.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
     }
-    
     [self presentViewController:menu animated:YES completion:nil];
 }
 
@@ -326,12 +355,14 @@ static NSString * GetPrefsPlistPath() {
     // 通知引擎立即热拔插
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    // 【核心】注入 CATransition 创造进入二级页面的物理错觉
+    // 刷新气泡菜单的状态文字
+    [self updateRightMenu];
+    
+    // 注入 CATransition 创造进入二级页面的物理错觉
     if ([self respondsToSelector:@selector(table)]) {
         UITableView *tableView = [self performSelector:@selector(table)];
         CATransition *transition = [CATransition animation];
         transition.type = kCATransitionPush;
-        // 视频从右推入，交互从左推入
         transition.subtype = self.isVideoMode ? kCATransitionFromRight : kCATransitionFromLeft; 
         transition.duration = 0.35;
         transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
@@ -374,35 +405,35 @@ static NSString * GetPrefsPlistPath() {
         [_specifiers addObject:enableSpec];
         
         // --- 锁屏视频区域 ---
-        PSSpecifier *gLock = [PSSpecifier preferenceSpecifierNamed:@"锁屏视频专属设定" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        PSSpecifier *gLock = [PSSpecifier preferenceSpecifierNamed:@"锁屏壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
         [_specifiers addObject:gLock];
         
-        PSSpecifier *lockStatus = [PSSpecifier preferenceSpecifierNamed:@"当前锁屏视频" target:self set:nil get:@selector(getVideoStateString:) detail:nil cell:PSTitleValueCell edit:nil];
+        PSSpecifier *lockStatus = [PSSpecifier preferenceSpecifierNamed:@"当前壁纸" target:self set:nil get:@selector(getVideoStateString:) detail:nil cell:PSTitleValueCell edit:nil];
         [lockStatus setProperty:@"LockVideoPath" forKey:@"VideoKey"];
         [_specifiers addObject:lockStatus];
         
-        PSSpecifier *btnLockPhotos = [PSSpecifier preferenceSpecifierNamed:@"📸 从相册导入 (锁屏)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        PSSpecifier *btnLockPhotos = [PSSpecifier preferenceSpecifierNamed:@"从相册导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
         btnLockPhotos->action = @selector(importLockVideoFromPhotos);
         [_specifiers addObject:btnLockPhotos];
         
-        PSSpecifier *btnLockFiles = [PSSpecifier preferenceSpecifierNamed:@"📁 从文件导入 (锁屏)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        PSSpecifier *btnLockFiles = [PSSpecifier preferenceSpecifierNamed:@"从文件导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
         btnLockFiles->action = @selector(importLockVideoFromFiles);
         [_specifiers addObject:btnLockFiles];
         
         // --- 桌面视频区域 ---
-        PSSpecifier *gHome = [PSSpecifier preferenceSpecifierNamed:@"桌面视频专属设定" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [gHome setProperty:@"同源优化: 锁屏和桌面选择同一个视频时，引擎会自动复用内存并砍掉50%资源占用。" forKey:@"footerText"];
+        PSSpecifier *gHome = [PSSpecifier preferenceSpecifierNamed:@"桌面壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [gHome setProperty:@"同源优化: 锁屏和桌面选择同一个视频时，引擎会自动复用内存并降低占用。" forKey:@"footerText"];
         [_specifiers addObject:gHome];
         
-        PSSpecifier *homeStatus = [PSSpecifier preferenceSpecifierNamed:@"当前桌面视频" target:self set:nil get:@selector(getVideoStateString:) detail:nil cell:PSTitleValueCell edit:nil];
+        PSSpecifier *homeStatus = [PSSpecifier preferenceSpecifierNamed:@"当前壁纸" target:self set:nil get:@selector(getVideoStateString:) detail:nil cell:PSTitleValueCell edit:nil];
         [homeStatus setProperty:@"HomeVideoPath" forKey:@"VideoKey"];
         [_specifiers addObject:homeStatus];
         
-        PSSpecifier *btnHomePhotos = [PSSpecifier preferenceSpecifierNamed:@"📸 从相册导入 (桌面)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        PSSpecifier *btnHomePhotos = [PSSpecifier preferenceSpecifierNamed:@"从相册导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
         btnHomePhotos->action = @selector(importHomeVideoFromPhotos);
         [_specifiers addObject:btnHomePhotos];
         
-        PSSpecifier *btnHomeFiles = [PSSpecifier preferenceSpecifierNamed:@"📁 从文件导入 (桌面)" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        PSSpecifier *btnHomeFiles = [PSSpecifier preferenceSpecifierNamed:@"从文件导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
         btnHomeFiles->action = @selector(importHomeVideoFromFiles);
         [_specifiers addObject:btnHomeFiles];
         
@@ -410,8 +441,8 @@ static NSString * GetPrefsPlistPath() {
         PSSpecifier *gClear = [PSSpecifier preferenceSpecifierNamed:@"" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
         [_specifiers addObject:gClear];
         
-        PSSpecifier *btnClear = [PSSpecifier preferenceSpecifierNamed:@"🗑️ 清除所有已设视频" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-        [btnClear setProperty:[UIColor systemRedColor] forKey:@"titleColor"]; // 给文字上色，可选
+        PSSpecifier *btnClear = [PSSpecifier preferenceSpecifierNamed:@"清除所有视频" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        [btnClear setProperty:[UIColor systemRedColor] forKey:@"titleColor"]; 
         btnClear->action = @selector(clearAllVideos);
         [_specifiers addObject:btnClear];
         
@@ -549,7 +580,7 @@ static NSString * GetPrefsPlistPath() {
 
 // 将挑选好的视频无损搬运到插件绝对路径下
 - (void)processVideoURL:(NSURL *)url {
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在搬运视频...      " message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在搬运视频..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.center = CGPointMake(215.0, 31.0);
     [spinner startAnimating];
@@ -844,7 +875,7 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls {
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入...      " message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.center = CGPointMake(205.0, 31.0);
     [spinner startAnimating];
