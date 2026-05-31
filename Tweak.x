@@ -105,9 +105,11 @@ typedef struct {
     self = [super initWithFrame:CGRectZero];
     if (self) {
         NSURL *dirURL = [url copy];
+        // 尝试使用最高效的 _UICAPackageView
         Class UICPClass = NSClassFromString(@"_UICAPackageView");
         if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
             @try {
+                // 安全强转消除编译报错
                 _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
                 if (_uiPackageView) {
                     _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -117,9 +119,11 @@ typedef struct {
             } @catch (NSException *e) {}
         }
         
+        // 若失败，启用终极底层 CAPackage 暴力读取
         Class CAPackageClass = NSClassFromString(@"CAPackage");
         if (CAPackageClass) {
             NSError *err = nil;
+            // 安全强转消除编译报错
             _package = [(id)CAPackageClass packageWithContentsOfURL:dirURL type:@"com.apple.coreanimation-package" options:nil error:&err];
             if (!_package) {
                 NSURL *camlURL = [dirURL URLByAppendingPathComponent:@"main.caml"];
@@ -226,6 +230,7 @@ static BOOL g_enhanced_engine = NO;
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
+static BOOL g_is_iOS16 = NO; // 全局系统版本标记
 
 static __weak _UIPortalView *g_portalView = nil;
 
@@ -988,7 +993,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.currentState = @"Init";
             
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                
                 BOOL realUnlocked = g_isUnlocked;
                 Class lsManager = NSClassFromString(@"SBLockScreenManager");
                 if ([lsManager respondsToSelector:@selector(sharedInstance)]) {
@@ -1029,7 +1033,6 @@ static void EnsureEngineViewIsMounted() {
     if (!targetContainer) return;
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
-    
     BOOL isEnhancedClass = [existingEngine isKindOfClass:NSClassFromString(@"ZoneRenderEngineEnhanced")];
     
     if (existingEngine) {
@@ -1059,7 +1062,14 @@ static void EnsureEngineViewIsMounted() {
         [targetContainer addSubview:existingEngine];
     }
     existingEngine.frame = targetContainer.bounds;
-    [targetContainer bringSubviewToFront:existingEngine];
+    
+    // 【架构差异】：iOS 16+ 需要在顶层，iOS 14-15 必须在最底层以便 _UIPortalView 捕捉和处理系统原生模糊
+    if (g_is_iOS16) {
+        [targetContainer bringSubviewToFront:existingEngine];
+    } else {
+        [targetContainer sendSubviewToBack:existingEngine];
+        existingEngine.alpha = 0.01; // 防止其遮挡物理图层，只供 Portal 投射
+    }
 }
 
 // =========================================================================
@@ -1262,111 +1272,57 @@ static void EnsureEngineViewIsMounted() {
 %group iOS14_15
 
 %hook SBFWallpaperView
+// 【核心修改】不要隐藏原生的 SBFWallpaperView，而是将引擎嵌入到其中！
+// 这样可以完美复用系统原生视差和原生的下拉高斯模糊
 - (void)layoutSubviews {
     %orig;
     if (g_enabled) {
-        self.hidden = YES;
-        self.alpha = 0.0;
+        EnsureEngineViewIsMounted();
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
+        if (engineView) {
+            _UIPortalView *portal = objc_getAssociatedObject(self, "ZoneWallpaperPortal");
+            if (!portal) {
+                portal = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.bounds];
+                portal.hidesSourceView = NO;
+                portal.matchesPosition = YES;
+                portal.matchesTransform = YES;
+                portal.userInteractionEnabled = NO;
+                objc_setAssociatedObject(self, "ZoneWallpaperPortal", portal, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            portal.sourceView = engineView;
+            
+            UIView *contentView = safelyGetIvarAsView(self, "_contentView");
+            if (!contentView) contentView = self;
+            
+            if (portal.superview != contentView) {
+                [portal removeFromSuperview];
+                [contentView addSubview:portal];
+            }
+            portal.frame = contentView.bounds;
+            
+            // 将 Portal 移到图层最前端，盖住系统自带的静态壁纸
+            [contentView bringSubviewToFront:portal];
+        }
     }
-}
-- (void)setAlpha:(double)alpha {
-    if (g_enabled) { %orig(0.0); return; }
-    %orig;
-}
-- (void)setHidden:(BOOL)hidden {
-    if (g_enabled) { %orig(YES); return; }
-    %orig;
 }
 %end
 
 %hook CSCoverSheetViewController
-
-// 【核心修复 1：通过传送门恢复下拉模糊】
-- (void)viewWillLayoutSubviews {
-    %orig;
-    EnsureEngineViewIsMounted(); 
-    
-    if (g_enabled) {
-        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-        UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
-        
-        if (engineView) {
-            _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
-            if (!portalView) {
-                portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-                portalView.sourceView = engineView;
-                portalView.hidesSourceView = NO;
-                portalView.matchesAlpha = NO; 
-                // iOS14默认在锁屏上完全显示Portal层
-                portalView.alpha = 1.0; 
-                portalView.matchesPosition = YES;
-                portalView.matchesTransform = YES;
-                portalView.userInteractionEnabled = NO;
-                objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                g_portalView = portalView;
-            }
-            
-            if (portalView.sourceView != engineView) {
-                portalView.sourceView = engineView; 
-            }
-
-            // 直接垫底插入到 CoverSheet 背景中
-            if (portalView.superview != self.view) {
-                [self.view insertSubview:portalView atIndex:0];
-            }
-            portalView.frame = self.view.bounds;
-            [self.view sendSubviewToBack:portalView];
-            
-            // 屏蔽原生自带的老旧滤镜，让我们的传送门接管
-            UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
-            if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
-            
-            UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
-            if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
-        }
-        
-        UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
-        if (floatingLayer) { 
-            floatingLayer.alpha = 0.0; 
-            floatingLayer.hidden = YES; 
-        }
-    }
-}
-
-// 【核心修复 2：物理拽动同步与模糊通道控制】
+// 接管系统原生下拉进度的数值，并按比例转换喂给引擎
 - (void)overlayController:(id)controller didChangePresentationProgress:(double)oldProgress newPresentationProgress:(double)newProgress fromLeading:(BOOL)leading {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
-        // iOS14 的 newProgress：1.0 是完全锁屏(Locked)，0.0 是完全桌面(Unlock)
-        // 翻转成我们引擎习惯的 Progress (1.0 = Unlock)
+        // newProgress 1.0=完全锁屏，0.0=进入桌面
         double convertedProgress = 1.0 - newProgress;
-        
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(convertedProgress)}];
-            
-            // 同步控制传送门模糊渐变 (和iOS16算法完全一致)
-            if (g_portalView) {
-                double alpha = 0.0;
-                if (convertedProgress > 0.7) {
-                    alpha = (1.0 - convertedProgress) * (0.05 / 0.3);
-                } else if (convertedProgress > 0.6) {
-                    alpha = 0.05 + (0.7 - convertedProgress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - convertedProgress) / 0.6) * 0.85;
-                }
-                
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
         });
     }
 }
 
-// 【核心修复 3：进出桌面的生命周期强制锁死状态，绝不脱节】
+// 物理锁死进入桌面的生命周期，杜绝状态脱节导致“桌面显示锁屏背景”
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
@@ -1401,6 +1357,7 @@ static void EnsureEngineViewIsMounted() {
         });
     }
 }
+
 - (void)unlockUIFromSource:(int)source withOptions:(id)options {
     %orig;
     g_isUnlocked = YES;
@@ -1421,10 +1378,10 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 
 %hook SBWallpaperEffectView
-
 - (void)didMoveToSuperview {
     %orig;
-    if (g_enabled && self.superview) {
+    // 仅针对 iOS 16+ 隐藏这层旧式蒙版，iOS 14-15 必须保留用于虚化
+    if (g_enabled && g_is_iOS16 && self.superview) {
         UIView *view = self;
         BOOL isCoverSheetRelated = NO;
         while (view) {
@@ -1446,7 +1403,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)layoutSubviews {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_is_iOS16) {
         NSString *superviewName = NSStringFromClass([self.superview class]);
         if ([superviewName containsString:@"Wallpaper"] || 
             [superviewName containsString:@"CoverSheet"] ||
@@ -1457,7 +1414,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) {
+    if (g_enabled && g_is_iOS16) {
         NSString *superviewName = NSStringFromClass([self.superview class]);
         if ([superviewName containsString:@"Wallpaper"] || 
             [superviewName containsString:@"CoverSheet"] ||
@@ -1469,7 +1426,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
+    if (g_enabled && g_is_iOS16) {
         NSString *superviewName = NSStringFromClass([self.superview class]);
         if ([superviewName containsString:@"Wallpaper"] || 
             [superviewName containsString:@"CoverSheet"] ||
@@ -1490,7 +1447,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_is_iOS16) {
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
             floatingLayer.hidden = YES;
@@ -1501,7 +1458,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_updateFloatingLayerOrdering {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_is_iOS16) {
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
             floatingLayer.hidden = YES;
@@ -1510,7 +1467,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-- (void)viewDidLayoutSubviews { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)viewDidLayoutSubviews { %orig; if (g_enabled && g_is_iOS16) [self viewWillLayoutSubviews]; }
 - (void)_updateBackgroundContentView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaper { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
@@ -1529,7 +1486,7 @@ static void EnsureEngineViewIsMounted() {
 %hook CSBackgroundContentView
 - (void)layoutSubviews {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_is_iOS16) {
         UIView *presentationView = safelyGetIvarAsView(self, "presentationView"); 
         if (!presentationView && [self respondsToSelector:@selector(presentationView)]) {
             presentationView = [self performSelector:@selector(presentationView)];
@@ -1586,8 +1543,10 @@ static void EnsureEngineViewIsMounted() {
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
     
     if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
+        g_is_iOS16 = YES;
         %init(iOS16Plus);
     } else {
+        g_is_iOS16 = NO;
         %init(iOS14_15);
     }
     
