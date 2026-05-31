@@ -846,6 +846,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
             self.currentState = @"Init";
             
+            // 2. 延迟到下一个 RunLoop (约0.05秒)，确保 CoreAnimation 图层已完全解包就绪
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 
                 BOOL realUnlocked = g_isUnlocked;
@@ -880,8 +881,17 @@ static void EnsureEngineViewIsMounted() {
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
-    UIView *targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
-    if (!targetContainer) targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+    UIView *targetContainer = nil;
+    @try {
+        targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
+    } @catch (NSException *e) {}
+    
+    if (!targetContainer) {
+        @try {
+            targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
+        } @catch (NSException *e) {}
+    }
+    
     if (!targetContainer) return;
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
@@ -954,7 +964,11 @@ static void EnsureEngineViewIsMounted() {
     EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
-        UIViewController *bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        UIViewController *bgVC = nil;
+        @try {
+            bgVC = [self valueForKey:@"_backgroundContentViewController"];
+        } @catch (NSException *e) {}
+        
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
@@ -1012,11 +1026,13 @@ static void EnsureEngineViewIsMounted() {
             } @catch(NSException* e) {}
         }
         
-        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-        if (floatingLayer) { 
-            floatingLayer.alpha = 0.0; 
-            floatingLayer.hidden = YES; 
-        }
+        @try {
+            UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+            if (floatingLayer) { 
+                floatingLayer.alpha = 0.0; 
+                floatingLayer.hidden = YES; 
+            }
+        } @catch(NSException *e) {}
     }
 }
 
@@ -1250,36 +1266,39 @@ static void EnsureEngineViewIsMounted() {
 
 %hook CSCoverSheetViewController
 
-- (void)_scrollPanGestureBegan:(id)arg1 { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_scrollPanGestureChanged:(id)arg1 { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_scrollPanGestureEnded:(id)arg1 { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)_scrollPanGestureBegan:(id)arg1 { %orig; if (g_enabled) { EnsureEngineViewIsMounted(); } }
+- (void)_scrollPanGestureChanged:(id)arg1 { %orig; if (g_enabled) { EnsureEngineViewIsMounted(); } }
+- (void)_scrollPanGestureEnded:(id)arg1 { %orig; if (g_enabled) { EnsureEngineViewIsMounted(); } }
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
     if (g_enabled) {
-        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-        if (floatingLayer) {
-            floatingLayer.hidden = YES;
-            floatingLayer.alpha = 0.0;
-        }
+        @try {
+            UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+            if (floatingLayer) {
+                floatingLayer.hidden = YES;
+                floatingLayer.alpha = 0.0;
+            }
+        } @catch(NSException *e) {}
     }
 }
 
 - (void)_updateFloatingLayerOrdering {
     %orig;
     if (g_enabled) {
-        UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-        if (floatingLayer) {
-            floatingLayer.hidden = YES;
-            floatingLayer.alpha = 0.0;
-        }
+        @try {
+            UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
+            if (floatingLayer) {
+                floatingLayer.hidden = YES;
+                floatingLayer.alpha = 0.0;
+            }
+        } @catch(NSException *e) {}
     }
 }
 
-- (void)viewDidLayoutSubviews { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_updateBackgroundContentView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)_updateBackgroundContentView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
+- (void)_updateWallpaperEffectView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
+- (void)_updateWallpaper { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
@@ -1296,11 +1315,13 @@ static void EnsureEngineViewIsMounted() {
 - (void)layoutSubviews {
     %orig;
     if (g_enabled) {
-        UIView *presentationView = [self valueForKey:@"presentationView"];
-        if (presentationView) {
-            presentationView.hidden = YES;
-            presentationView.alpha = 0.0;
-        }
+        @try {
+            UIView *presentationView = [self valueForKey:@"presentationView"];
+            if (presentationView) {
+                presentationView.hidden = YES;
+                presentationView.alpha = 0.0;
+            }
+        } @catch(NSException *e) {}
     }
 }
 %end
