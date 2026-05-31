@@ -584,19 +584,19 @@ static void respringDevice() {
 // 【新增】导航栏右上角菜单构建
 - (void)setupNavigationMenu {
     if (@available(iOS 14.0, *)) {
-        UIAction *videoAction = [UIAction actionWithTitle:@"视频壁纸模式" image:[UIImage systemName:@"video"] identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
+        UIAction *videoAction = [UIAction actionWithTitle:@"视频壁纸模式" image:[UIImage systemImageNamed:@"video"] identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
             [self switchWallpaperMode:1];
             ZoneVideoPrefsController *videoVC = [[ZoneVideoPrefsController alloc] init];
             [self.navigationController pushViewController:videoVC animated:YES];
         }];
         
-        UIAction *respringAction = [UIAction actionWithTitle:@"注销设备" image:[UIImage systemName:@"arrow.clockwise"] identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
+        UIAction *respringAction = [UIAction actionWithTitle:@"注销设备" image:[UIImage systemImageNamed:@"arrow.clockwise"] identifier:nil handler:^(__kindof UIAction * _Nonnull action) {
             respringDevice();
         }];
         respringAction.attributes = UIMenuElementAttributesDestructive;
         
         UIMenu *menu = [UIMenu menuWithTitle:@"" children:@[videoAction, respringAction]];
-        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemName:@"ellipsis.circle"] menu:menu];
+        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:menu];
     } else {
         self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"注销" style:UIBarButtonItemStylePlain target:self action:@selector(fallbackRespring)];
     }
