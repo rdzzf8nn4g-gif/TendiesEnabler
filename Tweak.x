@@ -74,7 +74,7 @@ typedef struct {
 @end
 
 // =========================================================================
-// 核心修复：纯血 CoreAnimation 底层解析器 (拯救 iOS14/15 崩溃与颠倒问题)
+// 核心修复：纯血 CoreAnimation 底层解析器 (拯救 iOS14/15 崩溃)
 // =========================================================================
 @interface CAStateController : NSObject
 - (instancetype)initWithLayer:(CALayer *)layer;
@@ -86,7 +86,13 @@ typedef struct {
 @property (readonly) CALayer *rootLayer;
 @end
 
+@interface _UICAPackageView : UIView
+- (instancetype)initWithContentsOfURL:(NSURL *)url publishedObjectViewClassMap:(NSDictionary *)map;
+- (BOOL)setState:(NSString *)state;
+@end
+
 @interface ZonePackageFallbackView : UIView
+@property (nonatomic, strong) UIView *uiPackageView; 
 @property (nonatomic, strong) id package;            
 @property (nonatomic, strong) id stateController;    
 - (instancetype)initWithURL:(NSURL *)url;
@@ -99,8 +105,18 @@ typedef struct {
     self = [super initWithFrame:CGRectZero];
     if (self) {
         NSURL *dirURL = [url copy];
+        Class UICPClass = NSClassFromString(@"_UICAPackageView");
+        if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
+            @try {
+                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
+                if (_uiPackageView) {
+                    _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                    [self addSubview:_uiPackageView];
+                    return self;
+                }
+            } @catch (NSException *e) {}
+        }
         
-        // 【核心大手术】：彻底移除了有 Bug 的 _UICAPackageView，全盘走纯血 CoreAnimation！
         Class CAPackageClass = NSClassFromString(@"CAPackage");
         if (CAPackageClass) {
             NSError *err = nil;
@@ -113,10 +129,6 @@ typedef struct {
                 CALayer *root = [_package valueForKey:@"rootLayer"];
                 if (root) {
                     [self.layer addSublayer:root];
-                    
-                    // 【这就是为什么你的壁纸不再颠倒了】：继承 CA 最底层的坐标系翻转！
-                    self.layer.geometryFlipped = root.geometryFlipped;
-                    
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
                         _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:self.layer];
@@ -128,10 +140,43 @@ typedef struct {
     return self;
 }
 
+// 【终极排版拦截器】：无论走哪个底层类，强制进行坐标系翻转与居中缩放铺满
 - (void)layoutSubviews {
     [super layoutSubviews];
-    // 【重要留空】：去除了 root.frame = self.bounds;
-    // 强制把控制权移交给 EnhancedEngine，保留最正确的物理缩放比例！
+    
+    if (_uiPackageView) {
+        _uiPackageView.frame = self.bounds;
+    }
+    
+    CALayer *targetRoot = nil;
+    CALayer *hostLayer = nil;
+    
+    // 取出真正渲染内容的包裹层与宿主层
+    if (_uiPackageView) {
+        targetRoot = [_uiPackageView.layer.sublayers firstObject];
+        hostLayer = _uiPackageView.layer;
+    } else if (_package) {
+        targetRoot = [_package valueForKey:@"rootLayer"];
+        hostLayer = self.layer;
+    }
+    
+    if (targetRoot && hostLayer) {
+        // 1. 同步坐标系：完美解决“底部元素跑天上”与“动画倒转视觉错觉”
+        hostLayer.geometryFlipped = targetRoot.geometryFlipped;
+        
+        // 2. 居中与缩放：为 iOS 14-15 提供类似 iOS 16 BSUICAPackageView 的自适应全屏能力
+        CGSize originalSize = targetRoot.bounds.size;
+        if (originalSize.width > 0 && originalSize.height > 0) {
+            CGFloat scaleX = self.bounds.size.width / originalSize.width;
+            CGFloat scaleY = self.bounds.size.height / originalSize.height;
+            CGFloat scale = MAX(scaleX, scaleY); // 等比缩放，铺满屏幕
+            
+            targetRoot.position = CGPointMake(self.bounds.size.width / 2.0, self.bounds.size.height / 2.0);
+            targetRoot.transform = CATransform3DMakeScale(scale, scale, 1.0);
+        } else {
+            targetRoot.frame = self.bounds;
+        }
+    }
 }
 
 - (BOOL)setState:(NSString *)state {
@@ -139,6 +184,9 @@ typedef struct {
 }
 
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated {
+    if (_uiPackageView && [_uiPackageView respondsToSelector:@selector(setState:)]) {
+        return (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
+    }
     if (_stateController && _package) {
         CALayer *root = [_package valueForKey:@"rootLayer"];
         if (root) {
@@ -477,10 +525,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             
-            // 【精准切分器】保留 iOS16-17 原版，强迫 iOS14-15 全体走底层 CoreAnimation 降级渲染，从根本上隔离颠倒 Bug！
-            if (NSClassFromString(@"PBUIWallpaperViewController") == Nil) {
-                PackageViewClass = [ZonePackageFallbackView class];
-            } else if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
+            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
                 PackageViewClass = [ZonePackageFallbackView class];
             }
             if (!PackageViewClass) return;
@@ -945,10 +990,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
             
-            // 【精准切分器】保留 iOS16-17 原版，强迫 iOS14-15 全体走底层 CoreAnimation 降级渲染，从根本上隔离颠倒 Bug！
-            if (NSClassFromString(@"PBUIWallpaperViewController") == Nil) {
-                PackageViewClass = [ZonePackageFallbackView class];
-            } else if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
+            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
                 PackageViewClass = [ZonePackageFallbackView class];
             }
             if (!PackageViewClass) return;
@@ -1304,14 +1346,17 @@ static void EnsureEngineViewIsMounted() {
     // CoreAnimation 底层 presentationLayer：包含系统正处于运动回弹状态的每一帧
     CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
     
-    // 【核弹级突破】：直接打穿组件树，获取在全屏幕上绝对的、包含物理减速的最终弹簧坐标！
+    // 【核弹级突破】：不要读自己的坐标！在 iOS 14 中滑动的是它的老祖宗（系统盖板），
+    // 必须直接利用 `convertRect:toLayer:nil` 打穿组件树，获取在全屏幕上绝对的、包含物理减速的最终弹簧坐标！
     CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
     
     double yOffset = absoluteRect.origin.y;
     double screenHeight = [UIScreen mainScreen].bounds.size.height;
     
-    // 【保留极其精准的下拉正负判断】：
-    // 将滑动位移精确转换为进度，负向下拉会被严格掐断为 0 避免错乱假解锁！
+    // ==========================================
+    // 【iOS 14-15 严谨版】：负号锁定真正的解锁进程
+    // 下滑 (扯皮筋) 产生正向位移，用负号拦截使其变为 0，防止假解锁
+    // ==========================================
     double engineProgress = -yOffset / screenHeight;
     engineProgress = MAX(0.0, MIN(1.0, engineProgress));
     
