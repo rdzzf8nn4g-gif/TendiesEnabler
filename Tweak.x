@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <QuartzCore/QuartzCore.h>
+#import <AVFoundation/AVFoundation.h> // 【新增】视频壁纸引擎底层支持
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -74,6 +75,7 @@ typedef struct {
 @end
 
 @interface SBFWallpaperView : UIView
+@property (nonatomic, assign) long long variant; // 【新增】用于区分锁屏和桌面
 @end
 
 // =========================================================================
@@ -221,9 +223,14 @@ static UIViewController* safelyGetIvarAsViewController(id object, const char* iv
 // 全局变量与配置管理
 // ==========================================
 static BOOL g_enabled = NO;
+static NSInteger g_wallpaperMode = 0; // 【新增】0:交互壁纸, 1:视频壁纸
 static BOOL g_enhanced_engine = NO;
 static BOOL g_hideTextShadow = NO;
 static NSString *g_zonePath = nil;
+
+static NSString *g_lsVideoPath = nil; // 【新增】锁屏视频路径
+static NSString *g_hsVideoPath = nil; // 【新增】桌面视频路径
+
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
 
@@ -246,6 +253,28 @@ static void reloadPrefs() {
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
     g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
     
+    // 【新增】读取壁纸模式以及视频壁纸路径配置
+    CFPropertyListRef modeRef = CFPreferencesCopyAppValue(CFSTR("WallpaperMode"), appID);
+    if (modeRef && CFGetTypeID(modeRef) == CFNumberGetTypeID()) {
+        g_wallpaperMode = [(__bridge NSNumber *)modeRef integerValue];
+    } else {
+        g_wallpaperMode = 0;
+    }
+    if (modeRef) CFRelease(modeRef);
+
+    CFPropertyListRef lsRef = CFPreferencesCopyAppValue(CFSTR("LSVideoPath"), appID);
+    if (lsRef && CFGetTypeID(lsRef) == CFStringGetTypeID()) {
+        g_lsVideoPath = [(__bridge NSString *)lsRef copy];
+    } else { g_lsVideoPath = nil; }
+    if (lsRef) CFRelease(lsRef);
+
+    CFPropertyListRef hsRef = CFPreferencesCopyAppValue(CFSTR("HSVideoPath"), appID);
+    if (hsRef && CFGetTypeID(hsRef) == CFStringGetTypeID()) {
+        g_hsVideoPath = [(__bridge NSString *)hsRef copy];
+    } else { g_hsVideoPath = nil; }
+    if (hsRef) CFRelease(hsRef);
+
+    // 交互壁纸专属路径与降采样解析
     CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), appID);
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
         g_zonePath = [(__bridge NSString *)pathRef copy];
@@ -278,11 +307,16 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        Class wc = NSClassFromString(@"SBWallpaperController");
-        if ([wc respondsToSelector:@selector(sharedInstance)] && [wc sharedInstance]) {
-            EnsureEngineViewIsMounted();
+        if (g_wallpaperMode == 0) {
+            Class wc = NSClassFromString(@"SBWallpaperController");
+            if ([wc respondsToSelector:@selector(sharedInstance)] && [wc sharedInstance]) {
+                EnsureEngineViewIsMounted();
+            }
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineInternalReload" object:nil];
+        } else {
+            // 【新增】热重载通知到独立的视频引擎
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneVideoEngineReload" object:nil];
         }
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineInternalReload" object:nil];
     });
 }
 
@@ -419,13 +453,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onWakeUp {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     self.isUnlocking = NO;
     [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
 }
 
 - (void)onSleep {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:NO];
 }
@@ -470,7 +504,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onProgress:(NSNotification *)note {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
@@ -485,7 +519,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
@@ -515,7 +549,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSInteger currentGen = self.reloadGeneration;
     
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        if (!g_enabled || !g_zonePath || ![[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]) {
+        if (!g_enabled || g_wallpaperMode == 1 || !g_zonePath || ![[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]) { // 【隔离拦截】
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (currentGen != self.reloadGeneration) return;
                 [self clearCurrentViewsSafely];
@@ -866,13 +900,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onWakeUp {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     self.isUnlocking = NO;
     [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
 }
 
 - (void)onSleep {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:NO];
 }
@@ -937,7 +971,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onProgress:(NSNotification *)note {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
@@ -952,7 +986,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
-    if (!g_enabled || !self.bgView) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !self.bgView) return; // 【隔离拦截】
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
@@ -999,7 +1033,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSInteger currentGen = self.reloadGeneration;
     
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        if (!g_enabled || !g_zonePath || ![[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]) {
+        if (!g_enabled || g_wallpaperMode == 1 || !g_zonePath || ![[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]) { // 【隔离拦截】
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (currentGen != self.reloadGeneration) return;
                 [self clearCurrentViewsSafely];
@@ -1138,6 +1172,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
+    if (g_wallpaperMode == 1) return; // 【核心保护】视频模式下，交互引擎彻底休眠不挂载
+
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
@@ -1184,7 +1220,112 @@ static void EnsureEngineViewIsMounted() {
 }
 
 // =========================================================================
-// ==================== 【iOS 16+ 专属 Hook 区域 (严禁修改)】==================
+// ==================== 【引擎 3】: 独立高性能视频引擎 ========================
+// =========================================================================
+@interface ZoneVideoRenderEngine : UIView
+@property (nonatomic, strong) AVQueuePlayer *player;
+@property (nonatomic, strong) AVPlayerLayer *playerLayer;
+@property (nonatomic, strong) AVPlayerLooper *looper;
+@property (nonatomic, copy) NSString *currentPath;
+@property (nonatomic, assign) BOOL isLockscreen;
+- (instancetype)initWithFrame:(CGRect)frame isLockscreen:(BOOL)isLS;
+- (void)reloadVideo;
+- (void)clearVideo;
+@end
+
+@implementation ZoneVideoRenderEngine
+- (instancetype)initWithFrame:(CGRect)frame isLockscreen:(BOOL)isLS {
+    if (self = [super initWithFrame:frame]) {
+        self.isLockscreen = isLS;
+        self.backgroundColor = [UIColor clearColor]; // 防闪烁
+        self.clipsToBounds = YES;
+        self.userInteractionEnabled = NO;
+
+        // 【极度省电】与原生系统息屏深度绑定
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadVideo) name:@"ZoneVideoEngineReload" object:nil];
+        
+        [self reloadVideo];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self clearVideo];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.playerLayer) {
+        self.playerLayer.frame = self.bounds;
+    }
+}
+
+- (void)clearVideo {
+    if (self.player) {
+        [self.player pause];
+        [self.player removeAllItems];
+        self.player = nil;
+        self.looper = nil;
+    }
+    if (self.playerLayer) {
+        [self.playerLayer removeFromSuperlayer];
+        self.playerLayer = nil;
+    }
+    self.currentPath = nil;
+}
+
+- (void)reloadVideo {
+    NSString *targetPath = self.isLockscreen ? g_lsVideoPath : g_hsVideoPath;
+    
+    if (!g_enabled || g_wallpaperMode == 0 || !targetPath || ![[NSFileManager defaultManager] fileExistsAtPath:targetPath]) {
+        [self clearVideo];
+        return;
+    }
+    
+    if ([self.currentPath isEqualToString:targetPath] && self.player) {
+        self.playerLayer.hidden = NO;
+        if (g_isScreenOn) [self.player play];
+        return;
+    }
+    
+    [self clearVideo];
+    self.currentPath = targetPath;
+    
+    // 【硬件解码：AVQueuePlayer循环】
+    NSURL *url = [NSURL fileURLWithPath:targetPath];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
+    self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
+    self.player.muted = YES; 
+    self.player.preventsDisplaySleepDuringVideoPlayback = NO; 
+    
+    self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
+    
+    self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
+    self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
+    self.playerLayer.frame = self.bounds;
+    [self.layer addSublayer:self.playerLayer];
+    
+    if (g_isScreenOn) {
+        [self.player play];
+    }
+}
+
+- (void)onSleep { 
+    if (self.player) [self.player pause]; 
+}
+- (void)onWakeUp { 
+    if (g_enabled && g_wallpaperMode == 1 && self.player) {
+        [self.player play]; 
+    }
+}
+@end
+
+
+// =========================================================================
+// ==================== 【iOS 16+ 专属 Hook 区域】===========================
 // =========================================================================
 %group iOS16Plus
 
@@ -1192,22 +1333,48 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewWillLayoutSubviews {
     %orig;
     if (g_enabled) {
-        if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
-            UIView *homeView = [self homescreenWallpaperView];
-            if (homeView) homeView.alpha = 0.0;
-        }
-        if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
-            UIView *lockView = [self lockscreenWallpaperView];
-            if (lockView) lockView.alpha = 0.0;
+        if (g_wallpaperMode == 0) { // 【交互壁纸保护】
+            if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
+                UIView *homeView = [self homescreenWallpaperView];
+                if (homeView) homeView.alpha = 0.0;
+            }
+            if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
+                UIView *lockView = [self lockscreenWallpaperView];
+                if (lockView) lockView.alpha = 0.0;
+            }
+        } else {
+            // 【新增：视频壁纸层挂载】
+            UIView *homeView = [self respondsToSelector:@selector(homescreenWallpaperView)] ? [self homescreenWallpaperView] : nil;
+            UIView *lockView = [self respondsToSelector:@selector(lockscreenWallpaperView)] ? [self lockscreenWallpaperView] : nil;
+            
+            if (lockView) {
+                ZoneVideoRenderEngine *lsEngine = objc_getAssociatedObject(lockView, "ZoneLSVideoEngine");
+                if (!lsEngine) {
+                    lsEngine = [[ZoneVideoRenderEngine alloc] initWithFrame:lockView.bounds isLockscreen:YES];
+                    objc_setAssociatedObject(lockView, "ZoneLSVideoEngine", lsEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    [lockView addSubview:lsEngine];
+                }
+                lsEngine.frame = lockView.bounds;
+            }
+            
+            if (homeView) {
+                ZoneVideoRenderEngine *hsEngine = objc_getAssociatedObject(homeView, "ZoneHSVideoEngine");
+                if (!hsEngine) {
+                    hsEngine = [[ZoneVideoRenderEngine alloc] initWithFrame:homeView.bounds isLockscreen:NO];
+                    objc_setAssociatedObject(homeView, "ZoneHSVideoEngine", hsEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    [homeView addSubview:hsEngine];
+                }
+                hsEngine.frame = homeView.bounds;
+            }
         }
     }
 }
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
-    if (g_enabled) return nil;
+    if (g_enabled && g_wallpaperMode == 0) return nil; // 【保护交互】
     return %orig;
 }
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
-    if (g_enabled) return NO;
+    if (g_enabled && g_wallpaperMode == 0) return NO; // 【保护交互】
     return %orig;
 }
 %end
@@ -1217,7 +1384,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     EnsureEngineViewIsMounted(); 
     
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【交互壁纸保护隔离】
         UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
@@ -1289,11 +1456,14 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
+- (void)updatePosterSwitcherSnapshots { 
+    if (g_enabled && g_wallpaperMode == 0) return; // 【隔离保护】
+    %orig; 
+}
 
 - (void)_prepareForPosterSwitcherPresentation {
     %orig;
-    if (g_enabled && g_portalView) {
+    if (g_enabled && g_wallpaperMode == 0 && g_portalView) { // 【隔离保护】
         g_portalView.hidden = YES;
         g_portalView.alpha = 0.0;
     }
@@ -1301,7 +1471,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_dismissPosterSwitcherViewController {
     %orig;
-    if (g_enabled && g_portalView) {
+    if (g_enabled && g_wallpaperMode == 0 && g_portalView) { // 【隔离保护】
         g_portalView.hidden = NO;
         [self viewWillLayoutSubviews];
         
@@ -1316,7 +1486,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
     %orig;
-    if (g_enabled && g_portalView) {
+    if (g_enabled && g_wallpaperMode == 0 && g_portalView) { // 【隔离保护】
         g_portalView.hidden = NO;
         [self viewWillLayoutSubviews];
         
@@ -1332,7 +1502,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled && g_wallpaperMode == 0 && g_isScreenOn) { // 【隔离保护】
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
@@ -1343,7 +1513,7 @@ static void EnsureEngineViewIsMounted() {
 
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离保护】
         if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
         return; 
     }
@@ -1351,14 +1521,14 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)updatePosterSwitcherSnapshots {
-    if (g_enabled) return;
+    if (g_enabled && g_wallpaperMode == 0) return; // 【隔离保护】
     %orig;
 }
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     EnsureEngineViewIsMounted();
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离保护】
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
             
@@ -1393,16 +1563,31 @@ static void EnsureEngineViewIsMounted() {
 - (void)layoutSubviews {
     %orig;
     if (g_enabled) {
-        self.hidden = YES;
-        self.alpha = 0.0;
+        if (g_wallpaperMode == 0) { // 【交互模式】
+            self.hidden = YES;
+            self.alpha = 0.0;
+        } else { // 【视频模式：直接搭载至底层壁纸试图】
+            self.hidden = NO;
+            self.alpha = 1.0;
+            long long variant = [self respondsToSelector:@selector(variant)] ? [self variant] : 0;
+            BOOL isLS = (variant == 0);
+            
+            ZoneVideoRenderEngine *engine = objc_getAssociatedObject(self, "ZoneVideoEngine_14");
+            if (!engine) {
+                engine = [[ZoneVideoRenderEngine alloc] initWithFrame:self.bounds isLockscreen:isLS];
+                objc_setAssociatedObject(self, "ZoneVideoEngine_14", engine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [self addSubview:engine];
+            }
+            engine.frame = self.bounds;
+        }
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) { %orig(0.0); return; }
+    if (g_enabled && g_wallpaperMode == 0) { %orig(0.0); return; } // 【隔离保护】
     %orig;
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) { %orig(YES); return; }
+    if (g_enabled && g_wallpaperMode == 0) { %orig(YES); return; } // 【隔离保护】
     %orig;
 }
 %end
@@ -1443,7 +1628,7 @@ static void EnsureEngineViewIsMounted() {
 // 【物理位置提取引擎】：真正捕获到了导致弹跳的根源！
 %new
 - (void)zone_tickProgress {
-    if (!g_enabled || !g_isScreenOn) return;
+    if (!g_enabled || g_wallpaperMode == 1 || !g_isScreenOn) return; // 【隔离保护】
     
     // CoreAnimation 底层 presentationLayer：包含系统正处于运动回弹状态的每一帧
     CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
@@ -1501,7 +1686,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     EnsureEngineViewIsMounted(); 
     
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【交互壁纸保护隔离】
         UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
@@ -1581,7 +1766,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【交互壁纸保护隔离】
         g_isUnlocked = NO;
         g_lastTickProgress = -1; // 强制熔断缓存
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1593,7 +1778,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【交互壁纸保护隔离】
         g_isUnlocked = YES;
         g_lastTickProgress = -1; // 强制熔断缓存
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1609,7 +1794,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     g_isUnlocked = NO;
     g_lastTickProgress = -1; // 强制熔断缓存
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled && g_wallpaperMode == 0 && g_isScreenOn) { // 【交互壁纸保护隔离】
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
@@ -1620,7 +1805,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     g_isUnlocked = YES;
     g_lastTickProgress = -1; // 强制熔断缓存
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled && g_wallpaperMode == 0 && g_isScreenOn) { // 【交互壁纸保护隔离】
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
@@ -1640,7 +1825,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)didMoveToSuperview {
     %orig;
-    if (g_enabled && self.superview) {
+    if (g_enabled && g_wallpaperMode == 0 && self.superview) { // 【隔离拦截】
         UIView *view = self;
         BOOL isCoverSheetRelated = NO;
         while (view) {
@@ -1662,7 +1847,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)layoutSubviews {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离拦截】
         NSString *superviewName = NSStringFromClass([self.superview class]);
         if ([superviewName containsString:@"Wallpaper"] || 
             [superviewName containsString:@"CoverSheet"] ||
@@ -1673,7 +1858,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离拦截】
         NSString *superviewName = NSStringFromClass([self.superview class]);
         if ([superviewName containsString:@"Wallpaper"] || 
             [superviewName containsString:@"CoverSheet"] ||
@@ -1685,7 +1870,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离拦截】
         NSString *superviewName = NSStringFromClass([self.superview class]);
         if ([superviewName containsString:@"Wallpaper"] || 
             [superviewName containsString:@"CoverSheet"] ||
@@ -1707,7 +1892,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离拦截】
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
             floatingLayer.hidden = YES;
@@ -1718,7 +1903,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_updateFloatingLayerOrdering {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离拦截】
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
             floatingLayer.hidden = YES;
@@ -1734,7 +1919,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled && g_wallpaperMode == 0 && g_isScreenOn) { // 【隔离拦截】
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
@@ -1746,7 +1931,7 @@ static void EnsureEngineViewIsMounted() {
 %hook CSBackgroundContentView
 - (void)layoutSubviews {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_wallpaperMode == 0) { // 【隔离拦截】
         UIView *presentationView = safelyGetIvarAsView(self, "presentationView"); 
         if (!presentationView && [self respondsToSelector:@selector(presentationView)]) {
             presentationView = [self performSelector:@selector(presentationView)];
@@ -1759,6 +1944,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+// 无论在什么模式下，息屏与亮屏事件必须抛出！视频引擎同样需要省电通知
 %hook SBBacklightController
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
