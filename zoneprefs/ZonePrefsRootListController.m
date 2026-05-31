@@ -203,20 +203,52 @@ static NSString * GetPrefsPlistPath() {
 // 自定义UI注入区域
 // =======================================
 
-// 点击增强引擎旁的问号按钮后弹出的提示
 - (void)showEnhancedEngineInfo {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后增强复杂交互壁纸识别" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后增强复杂交互壁纸识别\n(同时支持自动切换日间/暗黑动画)" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 获取壁纸的实时大小并返回右侧文本
+// 获取壁纸的实时大小并返回右侧文本 (保留以便未加载出自定义view时做回退)
 - (id)getWallpaperSize:(PSSpecifier *)spec {
-    NSString *name = [spec propertyForKey:@"WallpaperName"];
-    NSString *fullWpPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
-    unsigned long long sizeBytes = getDirectorySize(fullWpPath);
-    double sizeMB = sizeBytes / (1024.0 * 1024.0);
-    return [NSString stringWithFormat:@"%.1f MB", sizeMB];
+    return @"";
+}
+
+// 分辨率调节点击动作
+- (void)cycleResolution:(UIButton *)sender {
+    NSString *name = sender.accessibilityIdentifier;
+    if (!name) return;
+    
+    NSString *key = [NSString stringWithFormat:@"ResFactor_%@", name];
+    CFPropertyListRef resRef = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.iosdump.zoneprefs"));
+    double currentFactor = 1.0;
+    if (resRef) {
+        if (CFGetTypeID(resRef) == CFNumberGetTypeID()) currentFactor = [(__bridge NSNumber *)resRef doubleValue];
+        CFRelease(resRef);
+    }
+    
+    double nextFactor = 1.0;
+    if (currentFactor >= 0.99) nextFactor = 0.70;
+    else if (currentFactor >= 0.69) nextFactor = 0.50;
+    else if (currentFactor >= 0.49) nextFactor = 0.25;
+    else nextFactor = 1.0;
+    
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFNumberRef)@(nextFactor), CFSTR("com.iosdump.zoneprefs"));
+    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+    
+    NSString *plistPath = GetPrefsPlistPath();
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+    prefs[key] = @(nextFactor);
+    [prefs writeToFile:plistPath atomically:YES];
+    [self forceOwnershipToMobile:plistPath];
+    
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    
+    if (nextFactor >= 0.99) {
+        [sender setTitle:@"原画" forState:UIControlStateNormal];
+    } else {
+        [sender setTitle:[NSString stringWithFormat:@"%.0f%%", nextFactor * 100] forState:UIControlStateNormal];
+    }
 }
 
 // 拦截 Cell 的渲染过程，实现在右侧追加问号图标，并让 PSTitleValueCell 具有点击高亮响应
@@ -234,8 +266,6 @@ static NSString * GetPrefsPlistPath() {
             infoBtn.translatesAutoresizingMaskIntoConstraints = NO;
             [cell.contentView addSubview:infoBtn];
             
-            // 【终极方案】：不依赖 textLabel 的 AutoLayout（会被系统重写清空）。
-            // 直接采用距离 cell 左边距 105 的固定位置（"增强引擎"四字大约占用 80~90），完美显示且防覆盖。
             [NSLayoutConstraint activateConstraints:@[
                 [infoBtn.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
                 [infoBtn.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:105]
@@ -243,9 +273,60 @@ static NSString * GetPrefsPlistPath() {
         }
     }
     
-    // 强制赋予自带数值的 PSTitleValueCell 点击选中效果
+    // 自定义壁纸单元格右侧视图
     if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        NSString *name = [spec propertyForKey:@"WallpaperName"];
+        
+        UIView *accView = cell.accessoryView;
+        UIButton *resBtn = nil;
+        UILabel *sizeLabel = nil;
+        
+        if (!accView || accView.frame.size.width != 115) {
+            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 115, 30)];
+            
+            sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 65, 30)];
+            sizeLabel.font = [UIFont systemFontOfSize:14];
+            sizeLabel.textColor = [UIColor secondaryLabelColor];
+            sizeLabel.textAlignment = NSTextAlignmentRight;
+            sizeLabel.tag = 888;
+            [accView addSubview:sizeLabel];
+            
+            resBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+            resBtn.frame = CGRectMake(72, 1, 40, 28);
+            resBtn.layer.cornerRadius = 14;
+            resBtn.layer.borderWidth = 1;
+            resBtn.layer.borderColor = [UIColor systemBlueColor].CGColor;
+            resBtn.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+            [resBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+            [resBtn addTarget:self action:@selector(cycleResolution:) forControlEvents:UIControlEventTouchUpInside];
+            resBtn.tag = 777;
+            [accView addSubview:resBtn];
+            
+            cell.accessoryView = accView;
+        } else {
+            sizeLabel = [accView viewWithTag:888];
+            resBtn = [accView viewWithTag:777];
+        }
+        
+        NSString *fullWpPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
+        double sizeMB = getDirectorySize(fullWpPath) / (1024.0 * 1024.0);
+        sizeLabel.text = [NSString stringWithFormat:@"%.1f MB", sizeMB];
+        
+        resBtn.accessibilityIdentifier = name;
+        NSString *key = [NSString stringWithFormat:@"ResFactor_%@", name];
+        CFPropertyListRef resRef = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.iosdump.zoneprefs"));
+        double factor = 1.0;
+        if (resRef) {
+            if (CFGetTypeID(resRef) == CFNumberGetTypeID()) factor = [(__bridge NSNumber *)resRef doubleValue];
+            CFRelease(resRef);
+        }
+        
+        if (factor >= 0.99) [resBtn setTitle:@"原画" forState:UIControlStateNormal];
+        else [resBtn setTitle:[NSString stringWithFormat:@"%.0f%%", factor * 100] forState:UIControlStateNormal];
+        
+        cell.detailTextLabel.hidden = YES;
+        cell.detailTextLabel.text = @"";
     }
     
     return cell;
@@ -325,7 +406,7 @@ static NSString * GetPrefsPlistPath() {
         NSMutableArray *specs = [[self loadSpecifiersFromPlistName:@"Root" target:self] mutableCopy];
         
         PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [group setProperty:@"点击切换壁纸，实时生效。向左滑动可删除不再需要的壁纸。" forKey:@"footerText"];
+        [group setProperty:@"点击切换壁纸，实时生效。向左滑动可删除不再需要的壁纸。\n点击对应壁纸旁边的按钮可设置每帧重绘降采样的程度(原画/70%/50%/25%)，以节约电量和发热。" forKey:@"footerText"];
         [specs addObject:group];
         
         NSFileManager *fm = [NSFileManager defaultManager];
@@ -352,7 +433,6 @@ static NSString * GetPrefsPlistPath() {
                         displayName = [NSString stringWithFormat:@"%@  ✓", name];
                     }
                     
-                    // 改用 PSTitleValueCell 实现右侧文字靠右的效果，并赋予其专门的 getter 去获取容量数据
                     PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getWallpaperSize:) detail:nil cell:PSTitleValueCell edit:nil];
                     spec->action = @selector(selectWallpaper:);
                     [spec setProperty:name forKey:@"WallpaperName"];
