@@ -84,6 +84,33 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
+// 绝对安全的底层变量获取函数 (防止 Safe Mode)
+// ==========================================
+static UIView* safelyGetIvarAsView(id object, const char* ivarName) {
+    if (!object) return nil;
+    Ivar ivar = class_getInstanceVariable([object class], ivarName);
+    if (ivar) {
+        id val = object_getIvar(object, ivar);
+        if ([val isKindOfClass:[UIView class]]) {
+            return (UIView *)val;
+        }
+    }
+    return nil;
+}
+
+static UIViewController* safelyGetIvarAsViewController(id object, const char* ivarName) {
+    if (!object) return nil;
+    Ivar ivar = class_getInstanceVariable([object class], ivarName);
+    if (ivar) {
+        id val = object_getIvar(object, ivar);
+        if ([val isKindOfClass:[UIViewController class]]) {
+            return (UIViewController *)val;
+        }
+    }
+    return nil;
+}
+
+// ==========================================
 // 全局变量与配置管理
 // ==========================================
 static BOOL g_enabled = NO;
@@ -881,15 +908,10 @@ static void EnsureEngineViewIsMounted() {
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
-    UIView *targetContainer = nil;
-    @try {
-        targetContainer = [wallpaperController valueForKey:@"_wallpaperWindow"];
-    } @catch (NSException *e) {}
-    
+    // 安全获取容器变量，告别 valueForKey 带来的崩溃
+    UIView *targetContainer = safelyGetIvarAsView(wallpaperController, "_wallpaperWindow");
     if (!targetContainer) {
-        @try {
-            targetContainer = [wallpaperController valueForKey:@"_wallpaperContainerView"];
-        } @catch (NSException *e) {}
+        targetContainer = safelyGetIvarAsView(wallpaperController, "_wallpaperContainerView");
     }
     
     if (!targetContainer) return;
@@ -964,11 +986,8 @@ static void EnsureEngineViewIsMounted() {
     EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
-        UIViewController *bgVC = nil;
-        @try {
-            bgVC = [self valueForKey:@"_backgroundContentViewController"];
-        } @catch (NSException *e) {}
-        
+        // 安全获取变量，避免崩溃
+        UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
         if (bgVC && bgVC.view) {
             bgVC.view.alpha = 1.0;
             bgVC.view.hidden = NO;
@@ -1017,22 +1036,18 @@ static void EnsureEngineViewIsMounted() {
                 [self.view sendSubviewToBack:portalView];
             }
             
-            @try {
-                UIView *dimmingView = [self valueForKey:@"_dimmingView"];
-                if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
-                
-                UIView *tintingView = [self valueForKey:@"_tintingView"];
-                if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
-            } @catch(NSException* e) {}
+            UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
+            if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+            
+            UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
+            if (tintingView) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
         }
         
-        @try {
-            UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-            if (floatingLayer) { 
-                floatingLayer.alpha = 0.0; 
-                floatingLayer.hidden = YES; 
-            }
-        } @catch(NSException *e) {}
+        UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
+        if (floatingLayer) { 
+            floatingLayer.alpha = 0.0; 
+            floatingLayer.hidden = YES; 
+        }
     }
 }
 
@@ -1163,8 +1178,6 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     EnsureEngineViewIsMounted();
     if (g_enabled) {
-        // iOS 14/15 的物理滑动：newProgress=1.0代表锁屏完全盖住，0.0代表完全解锁
-        // 这里进行反转以适配引擎的 Progress 标准（1.0 = Unlock, 0.0 = Locked）
         double convertedProgress = 1.0 - newProgress;
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(convertedProgress)}];
@@ -1266,36 +1279,35 @@ static void EnsureEngineViewIsMounted() {
 
 %hook CSCoverSheetViewController
 
-- (void)_scrollPanGestureBegan:(id)arg1 { %orig; if (g_enabled) { EnsureEngineViewIsMounted(); } }
-- (void)_scrollPanGestureChanged:(id)arg1 { %orig; if (g_enabled) { EnsureEngineViewIsMounted(); } }
-- (void)_scrollPanGestureEnded:(id)arg1 { %orig; if (g_enabled) { EnsureEngineViewIsMounted(); } }
+- (void)_scrollPanGestureBegan:(id)arg1 { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
+- (void)_scrollPanGestureChanged:(id)arg1 { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
+- (void)_scrollPanGestureEnded:(id)arg1 { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
     if (g_enabled) {
-        @try {
-            UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-            if (floatingLayer) {
-                floatingLayer.hidden = YES;
-                floatingLayer.alpha = 0.0;
-            }
-        } @catch(NSException *e) {}
+        // 安全获取变量
+        UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
     }
 }
 
 - (void)_updateFloatingLayerOrdering {
     %orig;
     if (g_enabled) {
-        @try {
-            UIView *floatingLayer = [self valueForKey:@"_floatingLayerView"];
-            if (floatingLayer) {
-                floatingLayer.hidden = YES;
-                floatingLayer.alpha = 0.0;
-            }
-        } @catch(NSException *e) {}
+        // 安全获取变量
+        UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
+        if (floatingLayer) {
+            floatingLayer.hidden = YES;
+            floatingLayer.alpha = 0.0;
+        }
     }
 }
 
+- (void)viewDidLayoutSubviews { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_updateBackgroundContentView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaper { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
@@ -1315,13 +1327,14 @@ static void EnsureEngineViewIsMounted() {
 - (void)layoutSubviews {
     %orig;
     if (g_enabled) {
-        @try {
-            UIView *presentationView = [self valueForKey:@"presentationView"];
-            if (presentationView) {
-                presentationView.hidden = YES;
-                presentationView.alpha = 0.0;
-            }
-        } @catch(NSException *e) {}
+        UIView *presentationView = safelyGetIvarAsView(self, "presentationView"); 
+        if (!presentationView && [self respondsToSelector:@selector(presentationView)]) {
+            presentationView = [self performSelector:@selector(presentationView)];
+        }
+        if (presentationView && [presentationView isKindOfClass:[UIView class]]) {
+            presentationView.hidden = YES;
+            presentationView.alpha = 0.0;
+        }
     }
 }
 %end
@@ -1369,15 +1382,11 @@ static void EnsureEngineViewIsMounted() {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
     
-    // 关键修正：使用类反射来安全、精准地判断系统版本，避免在 SpringBoard 启动早期调用 UIDevice 造成崩溃或判定失败
     if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
-        // 如果存在 PBUIWallpaperViewController，说明是 iOS 16 及以上
         %init(iOS16Plus);
     } else {
-        // 否则 fallback 为 iOS 14 - 15 的直插模式
         %init(iOS14_15);
     }
     
-    // 初始化无分组限制的全局通用 Hook
     %init;
 }
