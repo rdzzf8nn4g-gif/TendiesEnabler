@@ -219,6 +219,7 @@ static UIViewController* safelyGetIvarAsViewController(id object, const char* iv
 // ==========================================
 static BOOL g_enabled = NO;
 static BOOL g_enhanced_engine = NO;
+static BOOL g_hideTextShadow = NO;
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
@@ -226,8 +227,8 @@ static BOOL g_isScreenOn = YES;
 static double g_resolutionFactor = 1.0;
 
 // 【核心修复：全局缓存熔断器】
-// 专门用来打破“息屏点亮时画面卡死不刷新”的伪静止状态
 static double g_lastTickProgress = -1; 
+static BOOL old_hideTextShadow = NO; 
 
 static __weak _UIPortalView *g_portalView = nil;
 
@@ -240,6 +241,7 @@ static void reloadPrefs() {
     
     g_enabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), appID, &valid) ? valid : NO;
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
+    g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
     
     CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), appID);
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
@@ -263,6 +265,15 @@ static void reloadPrefs() {
 
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     reloadPrefs();
+    
+    // 【文字阴影实时刷新拦截】
+    if (old_hideTextShadow != g_hideTextShadow) {
+        old_hideTextShadow = g_hideTextShadow;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceIconRefresh" object:nil];
+        });
+    }
+    
     dispatch_async(dispatch_get_main_queue(), ^{
         Class wc = NSClassFromString(@"SBWallpaperController");
         if ([wc respondsToSelector:@selector(sharedInstance)] && [wc sharedInstance]) {
@@ -782,11 +793,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 
+// 【暗黑模式热切换核弹】无缝捕捉系统深色/浅色变换，熔断缓存直接执行动画！
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
         if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
-            [self transitionToState:self.currentState animated:NO];
+            NSString *savedState = [self.currentState copy];
+            self.currentState = nil; // 强行解除去重拦截
+            [self transitionToState:savedState animated:YES]; // 实时执行新外观动画
         }
     }
 }
@@ -1071,6 +1085,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     }
                 }
                 
+                // 【性能释放核爆】：核心降采样引擎挂载，限制重绘像素提升流畅度
                 double factor = g_resolutionFactor;
                 if (factor < 0.99) {
                     CGFloat scale = [UIScreen mainScreen].scale * factor;
@@ -1743,6 +1758,41 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
+
+// 【全新功能：应用透明文本阴影与实时重绘支持】
+@interface _UILegibilitySettings : NSObject
+@property (nonatomic, assign) CGFloat shadowAlpha;
+@property (nonatomic, assign) CGFloat shadowRadius;
+@property (nonatomic, strong) UIColor *shadowColor;
+@end
+
+%hook SBIconLegibilityLabelView
+- (void)updateIconLabelWithSettings:(_UILegibilitySettings *)settings imageParameters:(id)params {
+    if (g_enabled && g_hideTextShadow && settings) {
+        settings.shadowAlpha = 0.0;
+        settings.shadowRadius = 0.0;
+        settings.shadowColor = [UIColor clearColor];
+    }
+    %orig(settings, params);
+}
+%end
+
+%hook SBIconController
+- (instancetype)init {
+    id res = %orig;
+    [[NSNotificationCenter defaultCenter] addObserver:res selector:@selector(zone_forceIconRefresh) name:@"ZoneForceIconRefresh" object:nil];
+    return res;
+}
+%new
+- (void)zone_forceIconRefresh {
+    if ([self respondsToSelector:@selector(_legibilitySettingsChanged)]) {
+        [self performSelector:@selector(_legibilitySettingsChanged)];
+    } else if ([self respondsToSelector:@selector(updateLegibility)]) {
+        [self performSelector:@selector(updateLegibility)];
+    }
+}
+%end
+
 
 %ctor {
     reloadPrefs();
