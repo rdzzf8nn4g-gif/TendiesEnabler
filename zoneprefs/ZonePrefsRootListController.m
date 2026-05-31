@@ -49,7 +49,7 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
 static unsigned long long getDirectorySize(NSString *folderPath) {
     unsigned long long fileSize = 0;
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:folderPath];
+    SDirectoryEnumerator *enumerator = [fm enumeratorAtPath:folderPath];
     for (NSString *subpath in enumerator) {
         NSDictionary *attrs = [fm attributesOfItemAtPath:[folderPath stringByAppendingPathComponent:subpath] error:nil];
         fileSize += [attrs fileSize];
@@ -261,14 +261,23 @@ static NSString * GetPrefsPlistPath() {
     [self setupHeaderView];
 }
 
+// 【修改点 1】：动态化头部图标加载逻辑，完美适配多路径越狱下的 icon1 图标切换
 - (void)setupHeaderView {
     UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     
     UIImageView *iconView = [[UIImageView alloc] init];
     NSBundle *bundle = [NSBundle bundleForClass:[self class]];
-    UIImage *icon = [UIImage imageNamed:@"icon" inBundle:bundle compatibleWithTraitCollection:nil];
-    if (!icon) icon = [UIImage imageNamed:@"icon@3x" inBundle:bundle compatibleWithTraitCollection:nil];
+    
+    // 根据当前是否为视频模式，动态流控选择对应的图标基础名称
+    NSString *targetIconName = self.isVideoMode ? @"icon1" : @"icon";
+    
+    // 使用 NSBundle 原生 API 动态加载，系统会自动在 Bundle 根目录下适配 @2x / @3x
+    UIImage *icon = [UIImage imageNamed:targetIconName inBundle:bundle compatibleWithTraitCollection:nil];
+    if (!icon) {
+        icon = [UIImage imageNamed:[NSString stringWithFormat:@"%@@3x", targetIconName] inBundle:bundle compatibleWithTraitCollection:nil];
+    }
+    
     iconView.image = icon;
     iconView.layer.cornerRadius = 14;
     iconView.layer.masksToBounds = YES;
@@ -363,6 +372,7 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:menu animated:YES completion:nil];
 }
 
+// 【修改点 2】：在执行平滑模式转换时，同步触发刷新 Header 视图，使图标跟随机件转场动画一起更新
 - (void)executeSmoothModeTransition {
     self.isVideoMode = !self.isVideoMode;
     
@@ -375,9 +385,10 @@ static NSString * GetPrefsPlistPath() {
     CFPreferencesSetAppValue(CFSTR("VideoModeEnabled"), (__bridge CFNumberRef)@(self.isVideoMode), CFSTR("com.iosdump.zoneprefs"));
     CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
     
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    CFPreferencesPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
     [self updateRightMenu];
+    [self setupHeaderView]; // 重建并重载带有新 icon1 图标的头部视图
     
     if ([self respondsToSelector:@selector(table)]) {
         UITableView *tableView = [self performSelector:@selector(table)];
@@ -392,7 +403,7 @@ static NSString * GetPrefsPlistPath() {
     [self reloadSpecifiers];
 }
 
-// 【修复需求5】：最强全系统兼容原生级注销 (双重保险机制)
+// 最强全系统兼容原生级注销 (双重保险机制)
 - (void)respringDevice {
     pid_t pid;
     
@@ -559,7 +570,7 @@ static NSString * GetPrefsPlistPath() {
 // ==================== 视频壁纸专属逻辑 ====================
 // =======================================================
 
-// 【修复需求】自定义 Setter：开启同素材时，清空之前所有的打勾标记并刷新UI
+// 自定义 Setter：开启同素材时，清空之前所有的打勾标记并刷新UI
 - (void)setSameMaterialValue:(id)value specifier:(PSSpecifier *)specifier {
     [self setPreferenceValue:value specifier:specifier];
     
@@ -675,7 +686,7 @@ static NSString * GetPrefsPlistPath() {
             // 【精确分流】获取对应存储目录
             NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
             
-            // 智能防覆盖命名逻辑
+            // 智能防覆盖命名 logic
             NSString *originalName = [url lastPathComponent];
             NSString *baseName = [originalName stringByDeletingPathExtension];
             NSString *ext = [originalName pathExtension];
