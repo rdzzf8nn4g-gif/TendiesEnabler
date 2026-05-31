@@ -341,7 +341,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
             self.player.muted = YES;
             self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
-            // 严禁视频播放时阻止系统息屏
             if (@available(iOS 12.0, *)) {
                 self.player.preventsDisplaySleepDuringVideoPlayback = NO;
             }
@@ -436,7 +435,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onWakeUp {
     if (!g_enabled || !g_isVideoMode) return;
     
-    // 智能调度：只播放当前需要的视频，节省CPU
     if (self.isSingleVideoMode) {
         [self.lockVideoView playVideo];
     } else {
@@ -456,24 +454,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self.homeVideoView pauseVideo];
 }
 
+// 【彻底隔离】视频模式不需要透明度计算，依靠层级切断鬼影
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !g_isVideoMode) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
-    progress = MAX(0.0, MIN(1.0, progress));
     
-    if (self.isSingleVideoMode) {
-        // 单视频模式，无需交叉淡入淡出
-        return;
-    }
+    if (self.isSingleVideoMode) return; // 单视频模式常亮播放，无需调度
     
-    // 交叉淡入淡出动画处理锁屏到桌面的平滑转场
-    [CATransaction begin]; 
-    [CATransaction setDisableActions:YES];
-    if (self.lockVideoView) self.lockVideoView.alpha = 1.0 - progress;
-    if (self.homeVideoView) self.homeVideoView.alpha = progress;
-    [CATransaction commit];
-    
-    // 性能优化：当完全不可见时暂停播放
     if (progress >= 1.0) {
         [self.lockVideoView pauseVideo];
         [self.homeVideoView playVideo];
@@ -481,7 +468,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.homeVideoView pauseVideo];
         [self.lockVideoView playVideo];
     } else {
-        // 拖动过程中两个都要播放
         [self.lockVideoView playVideo];
         [self.homeVideoView playVideo];
     }
@@ -511,7 +497,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         if (!hasLock && !hasHome) return;
         
-        // 内存同源智能复用判断
         self.isSingleVideoMode = (hasLock && hasHome && [g_lockVideoPath isEqualToString:g_homeVideoPath]);
         
         if (self.isSingleVideoMode) {
@@ -519,25 +504,23 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (self.lockVideoView) [self addSubview:self.lockVideoView];
             if (g_isScreenOn) [self.lockVideoView playVideo];
         } else {
-            // 独立模式，先添加Home在底层，Lock在顶层
-            if (hasHome) {
-                self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
-                if (self.homeVideoView) {
-                    self.homeVideoView.alpha = g_isUnlocked ? 1.0 : 0.0;
-                    [self addSubview:self.homeVideoView];
-                }
-            }
+            // 注意层级：Home必须在前面，以保证原生桌面能透视出来
             if (hasLock) {
                 self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
                 if (self.lockVideoView) {
-                    self.lockVideoView.alpha = g_isUnlocked ? 0.0 : 1.0;
                     [self addSubview:self.lockVideoView];
+                }
+            }
+            if (hasHome) {
+                self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
+                if (self.homeVideoView) {
+                    [self addSubview:self.homeVideoView]; // Home 在顶层
                 }
             }
             
             if (g_isScreenOn) {
-                if (g_isUnlocked) [self.homeVideoView playVideo];
-                else [self.lockVideoView playVideo];
+                [self.lockVideoView playVideo];
+                [self.homeVideoView playVideo];
             }
         }
     });
@@ -548,8 +531,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // =========================================================================
 // ==================== 【引擎 1】: 传统稳定引擎 (旧逻辑) ====================
 // =========================================================================
-// (保留原有所有 ZoneCAMLParserLegacy 和 ZoneRenderEngineLegacy 逻辑)
-
+// (交互逻辑原封不动保留)
 @interface ZoneCAMLParserLegacy : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
@@ -887,8 +869,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // =========================================================================
 // ==================== 【引擎 2】: 增强渲染引擎 (新逻辑) ====================
 // =========================================================================
-// (保留原有所有 ZoneCAMLParserEnhanced 和 ZoneRenderEngineEnhanced 逻辑)
-
+// (交互逻辑原封不动保留)
 @interface ZoneCAMLParserEnhanced : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
@@ -1408,13 +1389,11 @@ static void EnsureEngineViewIsMounted() {
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
     
-    // 【修改】识别当前加载的引擎身份
     BOOL isEnhancedClass = [existingEngine isKindOfClass:NSClassFromString(@"ZoneRenderEngineEnhanced")];
     BOOL isLegacyClass = [existingEngine isKindOfClass:NSClassFromString(@"ZoneRenderEngineLegacy")];
     BOOL isVideoClass = [existingEngine isKindOfClass:NSClassFromString(@"ZoneVideoEngine")];
     
     if (existingEngine) {
-        // 如果模式发生了变更，将彻底销毁原有的引擎
         BOOL shouldDestroy = NO;
         if (g_isVideoMode && !isVideoClass) shouldDestroy = YES;
         if (!g_isVideoMode && isVideoClass) shouldDestroy = YES;
@@ -1431,7 +1410,6 @@ static void EnsureEngineViewIsMounted() {
         }
     }
     
-    // 【修改】根据全局开关实例化指定的独立引擎
     if (!existingEngine) {
         if (g_isVideoMode) {
             existingEngine = [[ZoneVideoEngine alloc] initWithFrame:targetContainer.bounds];
@@ -1458,7 +1436,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 // =========================================================================
-// ==================== 【iOS 16+ 专属 Hook 区域 (严禁修改)】==================
+// ==================== 【iOS 16+ 专属 Hook 区域】===========================
 // =========================================================================
 %group iOS16Plus
 
@@ -1502,23 +1480,40 @@ static void EnsureEngineViewIsMounted() {
         UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
         
         if (engineView) {
+            // 【核心重构：绝对隔离层级提取】
+            UIView *sourceForPortal = engineView;
+            if (g_isVideoMode && [engineView respondsToSelector:@selector(lockVideoView)]) {
+                UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
+                if (lockView) sourceForPortal = lockView; // 专门只吸取锁屏Video！
+            }
+            
             _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
             if (!portalView) {
                 portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-                portalView.sourceView = engineView;
+                portalView.sourceView = sourceForPortal;
                 portalView.hidesSourceView = NO;
                 portalView.matchesAlpha = NO; 
-                portalView.alpha = 0.0; 
-                portalView.matchesPosition = YES;
+                portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
+                
+                // 【核心修复：视频模式下切断坐标锁死，让壁纸可以跟着手势滑动！】
+                portalView.matchesPosition = g_isVideoMode ? NO : YES;
+                
                 portalView.matchesTransform = YES;
                 portalView.clipsToBounds = YES; 
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 g_portalView = portalView;
-            }
-            
-            if (portalView.sourceView != engineView) {
-                portalView.sourceView = engineView; 
+            } else {
+                if (portalView.sourceView != sourceForPortal) {
+                    portalView.sourceView = sourceForPortal; 
+                }
+                // 热切换兼容刷新
+                if (g_isVideoMode && portalView.matchesPosition != NO) {
+                    portalView.matchesPosition = NO;
+                    portalView.alpha = 1.0;
+                } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
+                    portalView.matchesPosition = YES;
+                }
             }
 
             if (bgVC && bgVC.view) {
@@ -1631,20 +1626,28 @@ static void EnsureEngineViewIsMounted() {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
             
+            // 【核心修复：视频模式绝对隔离透明度交叉渐变】
             if (g_portalView) {
-                double alpha = 0.0;
-                if (progress > 0.7) {
-                    alpha = (1.0 - progress) * (0.05 / 0.3);
-                } else if (progress > 0.6) {
-                    alpha = 0.05 + (0.7 - progress) * 1.0; 
+                if (g_isVideoMode) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    g_portalView.alpha = 1.0;
+                    [CATransaction commit];
                 } else {
-                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+                    double alpha = 0.0;
+                    if (progress > 0.7) {
+                        alpha = (1.0 - progress) * (0.05 / 0.3);
+                    } else if (progress > 0.6) {
+                        alpha = 0.05 + (0.7 - progress) * 1.0; 
+                    } else {
+                        alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+                    }
+                    alpha = MAX(0.0, MIN(1.0, alpha));
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    g_portalView.alpha = alpha;
+                    [CATransaction commit];
                 }
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
             }
         });
     }
@@ -1718,20 +1721,27 @@ static void EnsureEngineViewIsMounted() {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
         
         if (g_portalView) {
-            double alpha = 0.0;
-            if (engineProgress > 0.7) {
-                alpha = (1.0 - engineProgress) * (0.05 / 0.3);
-            } else if (engineProgress > 0.6) {
-                alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
+            if (g_isVideoMode) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = 1.0;
+                [CATransaction commit];
             } else {
-                alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
+                double alpha = 0.0;
+                if (engineProgress > 0.7) {
+                    alpha = (1.0 - engineProgress) * (0.05 / 0.3);
+                } else if (engineProgress > 0.6) {
+                    alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
+                } else {
+                    alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
+                }
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
             }
-            alpha = MAX(0.0, MIN(1.0, alpha));
-            
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            g_portalView.alpha = alpha;
-            [CATransaction commit];
         }
     }
 }
@@ -1764,23 +1774,34 @@ static void EnsureEngineViewIsMounted() {
         UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
         
         if (engineView) {
+            UIView *sourceForPortal = engineView;
+            if (g_isVideoMode && [engineView respondsToSelector:@selector(lockVideoView)]) {
+                UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
+                if (lockView) sourceForPortal = lockView;
+            }
+
             _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
             if (!portalView) {
                 portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-                portalView.sourceView = engineView;
+                portalView.sourceView = sourceForPortal;
                 portalView.hidesSourceView = NO;
                 portalView.matchesAlpha = NO; 
                 portalView.alpha = 1.0; 
-                portalView.matchesPosition = YES;
+                portalView.matchesPosition = g_isVideoMode ? NO : YES;
                 portalView.matchesTransform = YES;
                 portalView.clipsToBounds = YES; 
                 portalView.userInteractionEnabled = NO;
                 objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 g_portalView = portalView;
-            }
-            
-            if (portalView.sourceView != engineView) {
-                portalView.sourceView = engineView; 
+            } else {
+                if (portalView.sourceView != sourceForPortal) {
+                    portalView.sourceView = sourceForPortal; 
+                }
+                if (g_isVideoMode && portalView.matchesPosition != NO) {
+                    portalView.matchesPosition = NO;
+                } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
+                    portalView.matchesPosition = YES;
+                }
             }
 
             if (bgVC && bgVC.view) {
@@ -2100,7 +2121,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
-
 
 %ctor {
     reloadPrefs();
