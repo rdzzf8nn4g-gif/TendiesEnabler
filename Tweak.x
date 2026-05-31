@@ -223,6 +223,8 @@ static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
 
+static double g_resolutionFactor = 1.0;
+
 // 【核心修复：全局缓存熔断器】
 // 专门用来打破“息屏点亮时画面卡死不刷新”的伪静止状态
 static double g_lastTickProgress = -1; 
@@ -242,9 +244,21 @@ static void reloadPrefs() {
     CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), appID);
     if (pathRef && CFGetTypeID(pathRef) == CFStringGetTypeID()) {
         g_zonePath = [(__bridge NSString *)pathRef copy];
+        
+        NSString *wpName = [g_zonePath lastPathComponent];
+        NSString *resKey = [NSString stringWithFormat:@"ResFactor_%@", wpName];
+        CFPropertyListRef resRef = CFPreferencesCopyAppValue((__bridge CFStringRef)resKey, appID);
+        if (resRef && CFGetTypeID(resRef) == CFNumberGetTypeID()) {
+            g_resolutionFactor = [(__bridge NSNumber *)resRef doubleValue];
+        } else {
+            g_resolutionFactor = 1.0;
+        }
+        if (resRef) CFRelease(resRef);
     } else {
         g_zonePath = nil; 
+        g_resolutionFactor = 1.0;
     }
+    if (pathRef) CFRelease(pathRef);
 }
 
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -554,6 +568,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                         [self.fgParser parseFile:[foundFg stringByAppendingPathComponent:@"main.caml"]];
                     }
                 }
+                
+                double factor = g_resolutionFactor;
+                if (factor < 0.99) {
+                    CGFloat scale = [UIScreen mainScreen].scale * factor;
+                    if (self.bgView) { self.bgView.layer.shouldRasterize = YES; self.bgView.layer.rasterizationScale = scale; }
+                    if (self.floatingView) { self.floatingView.layer.shouldRasterize = YES; self.floatingView.layer.rasterizationScale = scale; }
+                    if (self.fgView) { self.fgView.layer.shouldRasterize = YES; self.fgView.layer.rasterizationScale = scale; }
+                } else {
+                    if (self.bgView) { self.bgView.layer.shouldRasterize = NO; }
+                    if (self.floatingView) { self.floatingView.layer.shouldRasterize = NO; }
+                    if (self.fgView) { self.fgView.layer.shouldRasterize = NO; }
+                }
             }
             
             [self setNeedsLayout];
@@ -600,7 +626,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) UIColor *rootBackgroundColor;
 @property (nonatomic, assign) BOOL isGeometryFlipped;
 - (void)parseFile:(NSString *)path;
-- (NSString *)resolveRealStateNameFor:(NSString *)logicalState;
+- (NSString *)resolveRealStateNameFor:(NSString *)logicalState isDark:(BOOL)isDark;
 @end
 
 @implementation ZoneCAMLParserEnhanced
@@ -681,7 +707,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
     else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
 }
-- (NSString *)resolveRealStateNameFor:(NSString *)logicalState {
+- (NSString *)resolveRealStateNameFor:(NSString *)logicalState isDark:(BOOL)isDark {
     if ([self.availableStates containsObject:logicalState]) return logicalState;
     NSString *keyword = logicalState;
     if ([logicalState isEqualToString:@"Unlock"]) keyword = @"Home"; 
@@ -702,8 +728,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
     if (candidates.count == 0) return logicalState;
-    for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"] && [s containsString:@"Light"]) return s; }
-    for (NSString *s in candidates) { if ([s containsString:@"Light"]) return s; }
+    
+    NSString *styleKey = isDark ? @"Dark" : @"Light";
+    for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"] && [s localizedCaseInsensitiveContainsString:styleKey]) return s; }
+    for (NSString *s in candidates) { if ([s localizedCaseInsensitiveContainsString:styleKey]) return s; }
     for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"]) return s; }
     return candidates.firstObject; 
 }
@@ -753,6 +781,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
+        if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
+            [self transitionToState:self.currentState animated:NO];
+        }
+    }
+}
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -845,8 +882,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)applyProgress:(double)progress parser:(ZoneCAMLParserEnhanced *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     
-    NSString *realLockedState = [parser resolveRealStateNameFor:@"Locked"];
-    NSString *realUnlockState = [parser resolveRealStateNameFor:@"Unlock"];
+    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *realLockedState = [parser resolveRealStateNameFor:@"Locked" isDark:isDark];
+    NSString *realUnlockState = [parser resolveRealStateNameFor:@"Unlock" isDark:isDark];
     
     [CATransaction begin]; 
     [CATransaction setDisableActions:YES]; 
@@ -913,9 +951,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
     }
     
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName] ?: stateName;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName] ?: stateName;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName] ?: stateName;
+    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:realBgState animated:animated]; 
@@ -1029,6 +1069,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                         self.fgParser = [ZoneCAMLParserEnhanced new]; 
                         [self.fgParser parseFile:[foundFg stringByAppendingPathComponent:@"main.caml"]];
                     }
+                }
+                
+                double factor = g_resolutionFactor;
+                if (factor < 0.99) {
+                    CGFloat scale = [UIScreen mainScreen].scale * factor;
+                    if (self.bgView) { self.bgView.layer.shouldRasterize = YES; self.bgView.layer.rasterizationScale = scale; }
+                    if (self.floatingView) { self.floatingView.layer.shouldRasterize = YES; self.floatingView.layer.rasterizationScale = scale; }
+                    if (self.fgView) { self.fgView.layer.shouldRasterize = YES; self.fgView.layer.rasterizationScale = scale; }
+                } else {
+                    if (self.bgView) { self.bgView.layer.shouldRasterize = NO; }
+                    if (self.floatingView) { self.floatingView.layer.shouldRasterize = NO; }
+                    if (self.fgView) { self.fgView.layer.shouldRasterize = NO; }
                 }
             }
             
