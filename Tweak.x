@@ -129,6 +129,12 @@ typedef struct {
                 CALayer *root = [_package valueForKey:@"rootLayer"];
                 if (root) {
                     [self.layer addSublayer:root];
+                    
+                    // ==========================================
+                    // 【iOS 14-15 修复 1/2】：强制继承 CoreAnimation 的翻转系，防止桌面壁纸上下颠倒
+                    // ==========================================
+                    self.layer.geometryFlipped = root.geometryFlipped;
+                    
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
                         _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:self.layer];
@@ -1326,8 +1332,12 @@ static void EnsureEngineViewIsMounted() {
     double yOffset = absoluteRect.origin.y;
     double screenHeight = [UIScreen mainScreen].bounds.size.height;
     
-    // yOffset: 锁屏时为 0；在桌面时为 -screenHeight。完美的线性映射。
-    double engineProgress = ABS(yOffset) / screenHeight;
+    // ==========================================
+    // 【iOS 14-15 修复 2/2】：使用负号严格限定解锁滑动方向
+    // 原来：ABS(yOffset) 会把下拉的回弹也计算为解锁进度
+    // 现在：下拉 (正数) 变为负，会被下方的 MAX(0.0, ...) 彻底屏蔽归零
+    // ==========================================
+    double engineProgress = -yOffset / screenHeight;
     engineProgress = MAX(0.0, MIN(1.0, engineProgress));
     
     static double lastProgress = -1;
