@@ -49,7 +49,7 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
 static unsigned long long getDirectorySize(NSString *folderPath) {
     unsigned long long fileSize = 0;
     NSFileManager *fm = [NSFileManager defaultManager];
-    SDirectoryEnumerator *enumerator = [fm enumeratorAtPath:folderPath];
+        SDirectoryEnumerator *enumerator = [fm enumeratorAtPath:folderPath];
     for (NSString *subpath in enumerator) {
         NSDictionary *attrs = [fm attributesOfItemAtPath:[folderPath stringByAppendingPathComponent:subpath] error:nil];
         fileSize += [attrs fileSize];
