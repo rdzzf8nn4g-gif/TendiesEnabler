@@ -26,6 +26,13 @@ typedef struct {
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)state newState:(void *)state oldEffectView:(id *)view newEffectView:(id *)view;
 @end
 
+// 新增：iOS 14-15 专属壁纸控制器声明
+@interface SBWWallpaperViewController : UIViewController
+@property (nonatomic, retain) UIView *homescreenWallpaperView;
+@property (nonatomic, retain) UIView *lockscreenWallpaperView;
+@property (nonatomic, retain) UIView *sharedWallpaperView;
+@end
+
 @interface BSUICAPackageView : UIView
 - (id)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
@@ -921,8 +928,14 @@ static void EnsureEngineViewIsMounted() {
 
 
 // =========================================================================
-// ==================== 以下 Hook 内容自动适配由于类型多态的 UIView ==================
+// ==================== 动态按系统版本隔离 Hook 注入层 =====================
 // =========================================================================
+
+
+// ----------------------------------------------------
+// 【组 1】 iOS 16 - 17+ 专属高版本方法 Hook (包含 PosterUI)
+// ----------------------------------------------------
+%group iOS16_17_Support
 
 %hook PBUIWallpaperViewController
 - (void)viewWillLayoutSubviews {
@@ -947,6 +960,127 @@ static void EnsureEngineViewIsMounted() {
     return %orig;
 }
 %end
+
+%hook CSCoverSheetViewController
+- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
+
+- (void)_prepareForPosterSwitcherPresentation {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = YES;
+        g_portalView.alpha = 0.0;
+    }
+}
+
+- (void)_dismissPosterSwitcherViewController {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+
+- (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
+    %orig;
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+            }
+        });
+    }
+}
+%end
+
+%hook SBWallpaperController
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
+    %orig;
+}
+
+- (void)updatePosterSwitcherSnapshots {
+    if (g_enabled) return;
+    %orig;
+}
+
+- (void)updateWallpaperAnimationWithProgress:(double)progress {
+    %orig;
+    EnsureEngineViewIsMounted();
+    if (g_enabled) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+            
+            if (g_portalView) {
+                double alpha = 0.0;
+                
+                if (progress > 0.7) {
+                    alpha = (1.0 - progress) * (0.05 / 0.3);
+                } else if (progress > 0.6) {
+                    alpha = 0.05 + (0.7 - progress) * 1.0; 
+                } else {
+                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+                }
+                
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
+            }
+        });
+    }
+}
+%end
+%end // end iOS16_17_Support
+
+
+// ----------------------------------------------------
+// 【组 2】 iOS 14 - 15 专属传统壁纸控制器 Hook (规避安全模式)
+// ----------------------------------------------------
+%group iOS14_15_Support
+
+%hook SBWWallpaperViewController
+- (void)viewWillLayoutSubviews {
+    %orig;
+    if (g_enabled) {
+        if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
+            UIView *homeView = [self homescreenWallpaperView];
+            if (homeView) homeView.alpha = 0.0;
+        }
+        if ([self respondsToSelector:@selector(lockscreenWallpaperView)]) {
+            UIView *lockView = [self lockscreenWallpaperView];
+            if (lockView) lockView.alpha = 0.0;
+        }
+        if ([self respondsToSelector:@selector(sharedWallpaperView)]) {
+            UIView *sharedView = [self sharedWallpaperView];
+            if (sharedView) sharedView.alpha = 0.0;
+        }
+    }
+}
+%end
+
+%end // end iOS14_15_Support
+
+
+// ----------------------------------------------------
+// 【组 3】 iOS 14 - 17 跨版本通用生命周期与图层 Hook 
+// ----------------------------------------------------
+%group Common_Support
 
 %hook SBWallpaperEffectView
 
@@ -1114,45 +1248,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateBackgroundContentView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 - (void)_updateWallpaper { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
-
-- (void)_prepareForPosterSwitcherPresentation {
-    %orig;
-    if (g_enabled && g_portalView) {
-        g_portalView.hidden = YES;
-        g_portalView.alpha = 0.0;
-    }
-}
-
-- (void)_dismissPosterSwitcherViewController {
-    %orig;
-    if (g_enabled && g_portalView) {
-        g_portalView.hidden = NO;
-        [self viewWillLayoutSubviews];
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
-    }
-}
-
-- (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
-    %orig;
-    if (g_enabled && g_portalView) {
-        g_portalView.hidden = NO;
-        [self viewWillLayoutSubviews];
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
-    }
-}
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
@@ -1185,50 +1280,6 @@ static void EnsureEngineViewIsMounted() {
             presentationView.hidden = YES;
             presentationView.alpha = 0.0;
         }
-    }
-}
-%end
-
-%hook SBWallpaperController
-- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
-    if (g_enabled) {
-        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
-        return; 
-    }
-    %orig;
-}
-
-- (void)updatePosterSwitcherSnapshots {
-    if (g_enabled) return;
-    %orig;
-}
-
-- (void)updateWallpaperAnimationWithProgress:(double)progress {
-    %orig;
-    EnsureEngineViewIsMounted();
-    if (g_enabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-            
-            if (g_portalView) {
-                double alpha = 0.0;
-                
-                if (progress > 0.7) {
-                    alpha = (1.0 - progress) * (0.05 / 0.3);
-                } else if (progress > 0.6) {
-                    alpha = 0.05 + (0.7 - progress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-                }
-                
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
-        });
     }
 }
 %end
@@ -1271,8 +1322,24 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
+%end // end Common_Support
 
+// ----------------------------------------------------
+// 【初始化】 根据系统版本执行自动分派
+// ----------------------------------------------------
 %ctor {
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+    
+    // 初始化通用Hook组 (所有版本生效)
+    %init(Common_Support);
+    
+    // 判断系统版本动态装载剩余拦截组
+    if (@available(iOS 16.0, *)) {
+        // iOS 16, 17 及后续版本 (搭载 PosterBoardUI/PaperBoardUI)
+        %init(iOS16_17_Support);
+    } else {
+        // iOS 14 - 15 版本 (传统 SBWWallpaperViewController)
+        %init(iOS14_15_Support);
+    }
 }
