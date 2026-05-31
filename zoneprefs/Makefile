@@ -5,7 +5,8 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = ZonePrefs
 ZonePrefs_FILES = ZonePrefsRootListController.m
-ZonePrefs_FRAMEWORKS = UIKit Foundation
+# 【修改这里】：追加了 AVFoundation 和 PhotosUI
+ZonePrefs_FRAMEWORKS = UIKit Foundation AVFoundation PhotosUI
 ZonePrefs_PRIVATE_FRAMEWORKS = Preferences
 ZonePrefs_INSTALL_PATH = /Library/PreferenceBundles
 ZonePrefs_CFLAGS = -fobjc-arc
