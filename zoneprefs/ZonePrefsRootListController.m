@@ -49,7 +49,7 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
 static unsigned long long getDirectorySize(NSString *folderPath) {
     unsigned long long fileSize = 0;
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:folderPath];
+        SDirectoryEnumerator *enumerator = [fm enumeratorAtPath:folderPath];
     for (NSString *subpath in enumerator) {
         NSDictionary *attrs = [fm attributesOfItemAtPath:[folderPath stringByAppendingPathComponent:subpath] error:nil];
         fileSize += [attrs fileSize];
@@ -301,7 +301,7 @@ static NSString * GetPrefsPlistPath() {
     topHorizontalStack.spacing = 15; 
     
     UITextView *creditsView = [[UITextView alloc] init];
-    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK";
+    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK\n越狱源地址：https://iosdumpzzz.github.io/iosdump.repo/";
     creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     creditsView.textColor = [UIColor secondaryLabelColor];
     creditsView.textAlignment = NSTextAlignmentLeft; 
