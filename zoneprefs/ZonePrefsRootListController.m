@@ -212,7 +212,7 @@ static NSString * GetPrefsPlistPath() {
 
 // 点击文字阴影旁的问号按钮后弹出的提示
 - (void)showHideTextShadowInfo {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"关闭文字阴影" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"关闭文字阴影，使锁屏界面的文字更加纯净无阴影干扰。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -265,41 +265,35 @@ static NSString * GetPrefsPlistPath() {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
     PSSpecifier *spec = [(id)cell specifier];
     
+    // 核心修复：通过 propertyForKey:@"key" 绝对能抓取到对应项
+    NSString *specKey = [spec propertyForKey:@"key"];
+    
     // 1. 增强引擎开关，注入问号图标
-    if ([[spec identifier] isEqualToString:@"EnhancedEngine"]) {
-        UIButton *existingBtn = [cell.contentView viewWithTag:881]; // 使用独立Tag: 881
+    if ([specKey isEqualToString:@"EnhancedEngine"]) {
+        UIButton *existingBtn = [cell.contentView viewWithTag:881];
         if (!existingBtn) {
             UIButton *infoBtn = [UIButton buttonWithType:UIButtonTypeInfoLight];
             infoBtn.tag = 881;
+            // 核心修复：舍弃 Auto Layout，直接绝对坐标定位，完美规避系统约束冲突
+            // X=100 是 4个中文字符(约68pt) + 左边距(约16pt) + 间距的安全距离
+            infoBtn.frame = CGRectMake(100, (cell.bounds.size.height - 22) / 2.0, 22, 22);
+            infoBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
             [infoBtn addTarget:self action:@selector(showEnhancedEngineInfo) forControlEvents:UIControlEventTouchUpInside];
-            infoBtn.translatesAutoresizingMaskIntoConstraints = NO;
             [cell.contentView addSubview:infoBtn];
-            [cell.contentView bringSubviewToFront:infoBtn]; // 强制移到最前端，防止被背景遮挡
-            
-            [NSLayoutConstraint activateConstraints:@[
-                [infoBtn.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-                // 动态锚定：始终距离文字右侧 8 个点，绝对不会因为写死距离而错位
-                [infoBtn.leadingAnchor constraintEqualToAnchor:cell.textLabel.trailingAnchor constant:8]
-            ]];
         }
     }
     
     // 2. 文字阴影开关，注入问号图标
-    if ([[spec identifier] isEqualToString:@"HideTextShadow"]) {
-        UIButton *existingBtn = [cell.contentView viewWithTag:882]; // 使用独立Tag: 882
+    if ([specKey isEqualToString:@"HideTextShadow"]) {
+        UIButton *existingBtn = [cell.contentView viewWithTag:882];
         if (!existingBtn) {
             UIButton *infoBtn = [UIButton buttonWithType:UIButtonTypeInfoLight];
             infoBtn.tag = 882;
+            // 同样使用绝对坐标
+            infoBtn.frame = CGRectMake(100, (cell.bounds.size.height - 22) / 2.0, 22, 22);
+            infoBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
             [infoBtn addTarget:self action:@selector(showHideTextShadowInfo) forControlEvents:UIControlEventTouchUpInside];
-            infoBtn.translatesAutoresizingMaskIntoConstraints = NO;
             [cell.contentView addSubview:infoBtn];
-            [cell.contentView bringSubviewToFront:infoBtn]; // 强制移到最前端
-            
-            [NSLayoutConstraint activateConstraints:@[
-                [infoBtn.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-                // 同样动态锚定在文字标签右侧
-                [infoBtn.leadingAnchor constraintEqualToAnchor:cell.textLabel.trailingAnchor constant:8]
-            ]];
         }
     }
     
