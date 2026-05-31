@@ -234,10 +234,11 @@ static NSString * GetPrefsPlistPath() {
             infoBtn.translatesAutoresizingMaskIntoConstraints = NO;
             [cell.contentView addSubview:infoBtn];
             
-            // 【核心修正点】：绑定在文字标签的右侧，彻底避开 Switch 开关的图层遮挡
+            // 【终极方案】：不依赖 textLabel 的 AutoLayout（会被系统重写清空）。
+            // 直接采用距离 cell 左边距 105 的固定位置（"增强引擎"四字大约占用 80~90），完美显示且防覆盖。
             [NSLayoutConstraint activateConstraints:@[
-                [infoBtn.centerYAnchor constraintEqualToAnchor:cell.textLabel.centerYAnchor],
-                [infoBtn.leadingAnchor constraintEqualToAnchor:cell.textLabel.trailingAnchor constant:10] // 距离文字右侧 10 像素
+                [infoBtn.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [infoBtn.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:105]
             ]];
         }
     }
