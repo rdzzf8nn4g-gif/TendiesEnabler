@@ -2,7 +2,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <Preferences/PSTableCell.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#import <MobileCoreServices/MobileCoreServices.h> // 兼容旧版视频类型识别
+#import <MobileCoreServices/MobileCoreServices.h> 
 #import <ImageIO/ImageIO.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -213,8 +213,6 @@ static NSString * GetPrefsPlistPath() {
 // =======================================
 // UI 生命周期与右上角核弹菜单注入
 // =======================================
-
-// 【核心修复】：将模式状态读取提前到底层初始化阶段，彻底解决切换后退出不保存状态的问题
 - (instancetype)init {
     self = [super init];
     if (self) {
@@ -228,10 +226,7 @@ static NSString * GetPrefsPlistPath() {
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    // 初始化右上角气泡菜单
     [self updateRightMenu];
-    
-    // 构建头部视图 (HeadView保持不变且全模式通用)
     [self setupHeaderView];
 }
 
@@ -265,20 +260,31 @@ static NSString * GetPrefsPlistPath() {
     topHorizontalStack.alignment = UIStackViewAlignmentCenter;
     topHorizontalStack.spacing = 15; 
     
-    UITextView *creditsView = [[UITextView alloc] init];
-    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzzn图标设计: https://t.me/RrrankkK";
-    creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    creditsView.textColor = [UIColor secondaryLabelColor];
-    creditsView.textAlignment = NSTextAlignmentLeft; 
-    creditsView.editable = NO;
-    creditsView.scrollEnabled = NO;
-    creditsView.backgroundColor = [UIColor clearColor];
-    creditsView.dataDetectorTypes = UIDataDetectorTypeLink; 
+    // 【核心修复：彻底解决 \n 不见或者排版乱掉的 Bug，改用三个独立 Label 加入垂直 StackView】
+    UILabel *lbl1 = [[UILabel alloc] init];
+    lbl1.text = @"插件作者: iosdump";
+    lbl1.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    lbl1.textColor = [UIColor secondaryLabelColor];
     
-    UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsView]];
+    UILabel *lbl2 = [[UILabel alloc] init];
+    lbl2.text = @"作者频道: https://t.me/iosdumpzzz";
+    lbl2.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    lbl2.textColor = [UIColor secondaryLabelColor];
+    
+    UILabel *lbl3 = [[UILabel alloc] init];
+    lbl3.text = @"图标设计: https://t.me/RrrankkK";
+    lbl3.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    lbl3.textColor = [UIColor secondaryLabelColor];
+    
+    UIStackView *creditsStack = [[UIStackView alloc] initWithArrangedSubviews:@[lbl1, lbl2, lbl3]];
+    creditsStack.axis = UILayoutConstraintAxisVertical;
+    creditsStack.alignment = UIStackViewAlignmentLeading;
+    creditsStack.spacing = 4;
+    
+    UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsStack]];
     mainVerticalStack.axis = UILayoutConstraintAxisVertical;
     mainVerticalStack.alignment = UIStackViewAlignmentCenter; 
-    mainVerticalStack.spacing = 10; 
+    mainVerticalStack.spacing = 12; 
     mainVerticalStack.translatesAutoresizingMaskIntoConstraints = NO;
     
     [headerView addSubview:mainVerticalStack];
@@ -294,7 +300,6 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 【核心修复】：注入原生气泡菜单 (UIMenu)
 - (void)updateRightMenu {
     if (@available(iOS 14.0, *)) {
         NSString *switchTitle = self.isVideoMode ? @"切换为交互模式" : @"切换为视频模式";
@@ -317,7 +322,6 @@ static NSString * GetPrefsPlistPath() {
         UIBarButtonItem *menuBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:menu];
         self.navigationItem.rightBarButtonItem = menuBtn;
     } else {
-        // iOS 13 备用降级方案
         UIBarButtonItem *menuBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] style:UIBarButtonItemStylePlain target:self action:@selector(showZoneMenuFallback)];
         self.navigationItem.rightBarButtonItem = menuBtn;
     }
@@ -342,7 +346,6 @@ static NSString * GetPrefsPlistPath() {
 - (void)executeSmoothModeTransition {
     self.isVideoMode = !self.isVideoMode;
     
-    // 写入配置
     NSString *plistPath = GetPrefsPlistPath();
     NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
     prefs[@"VideoModeEnabled"] = @(self.isVideoMode);
@@ -352,13 +355,10 @@ static NSString * GetPrefsPlistPath() {
     CFPreferencesSetAppValue(CFSTR("VideoModeEnabled"), (__bridge CFNumberRef)@(self.isVideoMode), CFSTR("com.iosdump.zoneprefs"));
     CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
     
-    // 通知引擎立即热拔插
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    // 刷新气泡菜单的状态文字
     [self updateRightMenu];
     
-    // 注入 CATransition 创造进入二级页面的物理错觉
     if ([self respondsToSelector:@selector(table)]) {
         UITableView *tableView = [self performSelector:@selector(table)];
         CATransition *transition = [CATransition animation];
@@ -412,13 +412,10 @@ static NSString * GetPrefsPlistPath() {
         [lockStatus setProperty:@"LockVideoPath" forKey:@"VideoKey"];
         [_specifiers addObject:lockStatus];
         
-        PSSpecifier *btnLockPhotos = [PSSpecifier preferenceSpecifierNamed:@"从相册导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-        btnLockPhotos->action = @selector(importLockVideoFromPhotos);
-        [_specifiers addObject:btnLockPhotos];
-        
-        PSSpecifier *btnLockFiles = [PSSpecifier preferenceSpecifierNamed:@"从文件导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-        btnLockFiles->action = @selector(importLockVideoFromFiles);
-        [_specifiers addObject:btnLockFiles];
+        // 【核心合并：二合一导入按钮】
+        PSSpecifier *btnLockImport = [PSSpecifier preferenceSpecifierNamed:@"导入锁屏素材" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        btnLockImport->action = @selector(importLockMaterial);
+        [_specifiers addObject:btnLockImport];
         
         // --- 桌面视频区域 ---
         PSSpecifier *gHome = [PSSpecifier preferenceSpecifierNamed:@"桌面壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
@@ -429,22 +426,54 @@ static NSString * GetPrefsPlistPath() {
         [homeStatus setProperty:@"HomeVideoPath" forKey:@"VideoKey"];
         [_specifiers addObject:homeStatus];
         
-        PSSpecifier *btnHomePhotos = [PSSpecifier preferenceSpecifierNamed:@"从相册导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-        btnHomePhotos->action = @selector(importHomeVideoFromPhotos);
-        [_specifiers addObject:btnHomePhotos];
+        // 【核心合并：二合一导入按钮】
+        PSSpecifier *btnHomeImport = [PSSpecifier preferenceSpecifierNamed:@"导入桌面素材" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        btnHomeImport->action = @selector(importHomeMaterial);
+        [_specifiers addObject:btnHomeImport];
         
-        PSSpecifier *btnHomeFiles = [PSSpecifier preferenceSpecifierNamed:@"从文件导入" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-        btnHomeFiles->action = @selector(importHomeVideoFromFiles);
-        [_specifiers addObject:btnHomeFiles];
+        // --- 独立的视频列表区域 ---
+        PSSpecifier *gList = [PSSpecifier preferenceSpecifierNamed:@"已导入的视频素材" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [gList setProperty:@"点击应用视频壁纸，向左滑动可删除或重命名。" forKey:@"footerText"];
+        [_specifiers addObject:gList];
         
-        // --- 清理区域 ---
-        PSSpecifier *gClear = [PSSpecifier preferenceSpecifierNamed:@"" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [_specifiers addObject:gClear];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *vidDir = GetVideoWallpapersDir();
+        if ([fm fileExistsAtPath:vidDir]) {
+            NSArray *contents = [fm contentsOfDirectoryAtPath:vidDir error:nil];
+            contents = [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+            
+            NSString *plistPath = GetPrefsPlistPath();
+            NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+            NSString *currentLock = prefs[@"LockVideoPath"];
+            NSString *currentHome = prefs[@"HomeVideoPath"];
+            
+            for (NSString *name in contents) {
+                if ([name hasPrefix:@"."]) continue;
+                NSString *fullPath = [vidDir stringByAppendingPathComponent:name];
+                
+                NSString *displayName = name;
+                BOOL isLock = [currentLock isEqualToString:fullPath];
+                BOOL isHome = [currentHome isEqualToString:fullPath];
+                
+                if (isLock && isHome) displayName = [NSString stringWithFormat:@"%@  ✓(全设)", name];
+                else if (isLock) displayName = [NSString stringWithFormat:@"%@  ✓(锁屏)", name];
+                else if (isHome) displayName = [NSString stringWithFormat:@"%@  ✓(桌面)", name];
+                
+                PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
+                spec->action = @selector(selectVideoWallpaper:);
+                [spec setProperty:name forKey:@"VideoName"];
+                [spec setProperty:@YES forKey:@"IsVideoCell"]; 
+                [_specifiers addObject:spec];
+            }
+        }
         
-        PSSpecifier *btnClear = [PSSpecifier preferenceSpecifierNamed:@"清除所有视频" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-        [btnClear setProperty:[UIColor systemRedColor] forKey:@"titleColor"]; 
-        btnClear->action = @selector(clearAllVideos);
-        [_specifiers addObject:btnClear];
+        // --- 清理/Filza区域 ---
+        PSSpecifier *gFilza = [PSSpecifier preferenceSpecifierNamed:@"" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [_specifiers addObject:gFilza];
+        
+        PSSpecifier *btnFilza = [PSSpecifier preferenceSpecifierNamed:@"跳转 Filza 查看" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        btnFilza->action = @selector(openFilzaPath:);
+        [_specifiers addObject:btnFilza];
         
     } else {
         // ==========================================
@@ -516,34 +545,43 @@ static NSString * GetPrefsPlistPath() {
     return @"未设置";
 }
 
-- (void)clearAllVideos {
-    NSString *plistPath = GetPrefsPlistPath();
-    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-    [prefs removeObjectForKey:@"LockVideoPath"];
-    [prefs removeObjectForKey:@"HomeVideoPath"];
-    [prefs writeToFile:plistPath atomically:YES];
-    
-    CFPreferencesSetAppValue(CFSTR("LockVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-    CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-    
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    [self reloadSpecifiers];
+// 【二合一导入菜单】
+- (void)importLockMaterial {
+    self.currentVideoTarget = 1;
+    [self showVideoImportMenu];
 }
 
-- (void)importLockVideoFromPhotos { self.currentVideoTarget = 1; [self presentVideoPickerFromSource:UIImagePickerControllerSourceTypePhotoLibrary]; }
-- (void)importHomeVideoFromPhotos { self.currentVideoTarget = 2; [self presentVideoPickerFromSource:UIImagePickerControllerSourceTypePhotoLibrary]; }
+- (void)importHomeMaterial {
+    self.currentVideoTarget = 2;
+    [self showVideoImportMenu];
+}
 
-- (void)importLockVideoFromFiles { self.currentVideoTarget = 1; [self presentDocumentPickerForVideo]; }
-- (void)importHomeVideoFromFiles { self.currentVideoTarget = 2; [self presentDocumentPickerForVideo]; }
+- (void)showVideoImportMenu {
+    UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"导入素材" message:@"请选择素材来源" preferredStyle:UIAlertControllerStyleActionSheet];
+    [menu addAction:[UIAlertAction actionWithTitle:@"从相册导入" style:UIAlertActionStyleDefault handler:^(id action) {
+        [self presentVideoPickerFromSource:UIImagePickerControllerSourceTypePhotoLibrary];
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"从文件导入" style:UIAlertActionStyleDefault handler:^(id action) {
+        [self presentDocumentPickerForVideo];
+    }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    
+    UIViewController *topVC = self.view.window.rootViewController ?: self;
+    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+    
+    if (menu.popoverPresentationController) {
+        menu.popoverPresentationController.sourceView = topVC.view;
+        menu.popoverPresentationController.sourceRect = CGRectMake(topVC.view.bounds.size.width/2, topVC.view.bounds.size.height, 0, 0);
+    }
+    [topVC presentViewController:menu animated:YES completion:nil];
+}
 
-// 相册导入核心 (兼容底层权限调用)
+// 相册导入核心
 - (void)presentVideoPickerFromSource:(UIImagePickerControllerSourceType)source {
     if (![UIImagePickerController isSourceTypeAvailable:source]) return;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.delegate = self;
     picker.sourceType = source;
-    // 核心修复：直接使用底层 UTI 字符串绕过框架未包含的错误
     picker.mediaTypes = @[@"public.movie", @"public.video", @"public.avi", @"public.mpeg-4"];
     picker.videoQuality = UIImagePickerControllerQualityTypeHigh; 
     
@@ -552,7 +590,7 @@ static NSString * GetPrefsPlistPath() {
     [topVC presentViewController:picker animated:YES completion:nil];
 }
 
-// 文件导入核心 (视频模式专属)
+// 文件导入核心 
 - (void)presentDocumentPickerForVideo {
     if (@available(iOS 14.0, *)) {
         UTType *movieType = [UTType typeWithIdentifier:@"public.movie"];
@@ -578,9 +616,9 @@ static NSString * GetPrefsPlistPath() {
     [picker dismissViewControllerAnimated:YES completion:nil];
 }
 
-// 将挑选好的视频无损搬运到插件绝对路径下
+// 将挑选好的视频无损搬运到插件绝对路径下（真实文件名保护）
 - (void)processVideoURL:(NSURL *)url {
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在搬运视频..." message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在搬运素材..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.center = CGPointMake(215.0, 31.0);
     [spinner startAnimating];
@@ -599,8 +637,16 @@ static NSString * GetPrefsPlistPath() {
                 [fm createDirectoryAtPath:videoDir withIntermediateDirectories:YES attributes:nil error:nil];
             }
             
-            NSString *ext = [url pathExtension] ?: @"mp4";
-            NSString *fileName = [NSString stringWithFormat:@"ZoneVid_%@.%@", [[NSUUID UUID] UUIDString], ext];
+            // 智能防覆盖命名逻辑：保留原名，遇重名加 _1 _2...
+            NSString *originalName = [url lastPathComponent];
+            NSString *baseName = [originalName stringByDeletingPathExtension];
+            NSString *ext = [originalName pathExtension];
+            NSString *fileName = originalName;
+            int counter = 1;
+            while ([fm fileExistsAtPath:[videoDir stringByAppendingPathComponent:fileName]]) {
+                fileName = [NSString stringWithFormat:@"%@_%d.%@", baseName, counter++, ext];
+            }
+            
             NSString *destPath = [videoDir stringByAppendingPathComponent:fileName];
             
             NSError *err = nil;
@@ -612,20 +658,7 @@ static NSString * GetPrefsPlistPath() {
                 [loadingAlert dismissViewControllerAnimated:YES completion:^{
                     if (!err) {
                         [self forceOwnershipToMobile:videoDir];
-                        
-                        NSString *prefKey = (self.currentVideoTarget == 1) ? @"LockVideoPath" : @"HomeVideoPath";
-                        
-                        NSString *plistPath = GetPrefsPlistPath();
-                        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-                        prefs[prefKey] = destPath;
-                        [prefs writeToFile:plistPath atomically:YES];
-                        
-                        CFPreferencesSetAppValue((__bridge CFStringRef)prefKey, (__bridge CFStringRef)destPath, CFSTR("com.iosdump.zoneprefs"));
-                        CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-                        
-                        // 核爆刷新
-                        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-                        [self reloadSpecifiers];
+                        [self applyVideoPath:destPath toTarget:self.currentVideoTarget];
                     } else {
                         UIAlertController *failAlert = [UIAlertController alertControllerWithTitle:@"导入失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
                         [failAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
@@ -637,11 +670,59 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
+// 视频列表点击事件 (弹窗设置)
+- (void)selectVideoWallpaper:(PSSpecifier *)spec {
+    NSString *name = [spec propertyForKey:@"VideoName"];
+    if (!name) return;
+    NSString *fullPath = [GetVideoWallpapersDir() stringByAppendingPathComponent:name];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"设置壁纸" message:@"请选择要应用到的位置" preferredStyle:UIAlertControllerStyleActionSheet];
+    [alert addAction:[UIAlertAction actionWithTitle:@"设为锁屏" style:UIAlertActionStyleDefault handler:^(id action) {
+        [self applyVideoPath:fullPath toTarget:1];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"设为桌面" style:UIAlertActionStyleDefault handler:^(id action) {
+        [self applyVideoPath:fullPath toTarget:2];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"同时设定" style:UIAlertActionStyleDefault handler:^(id action) {
+        [self applyVideoPath:fullPath toTarget:3];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    
+    UIViewController *topVC = self.view.window.rootViewController ?: self;
+    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+    if (alert.popoverPresentationController) {
+        alert.popoverPresentationController.sourceView = topVC.view;
+        alert.popoverPresentationController.sourceRect = CGRectMake(topVC.view.bounds.size.width/2, topVC.view.bounds.size.height, 0, 0);
+    }
+    [topVC presentViewController:alert animated:YES completion:nil];
+}
+
+// 全局底层应用视频核心
+- (void)applyVideoPath:(NSString *)path toTarget:(NSInteger)target {
+    NSString *plistPath = GetPrefsPlistPath();
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+    
+    if (target == 1 || target == 3) {
+        prefs[@"LockVideoPath"] = path;
+        CFPreferencesSetAppValue(CFSTR("LockVideoPath"), (__bridge CFStringRef)path, CFSTR("com.iosdump.zoneprefs"));
+    }
+    if (target == 2 || target == 3) {
+        prefs[@"HomeVideoPath"] = path;
+        CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), (__bridge CFStringRef)path, CFSTR("com.iosdump.zoneprefs"));
+    }
+    
+    [prefs writeToFile:plistPath atomically:YES];
+    [self forceOwnershipToMobile:plistPath];
+    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    [self reloadSpecifiers];
+}
+
+
 // =======================================================
 // =============== 原版交互壁纸辅助保留逻辑 ===============
 // =======================================================
 
-// 提示框相关...
 - (void)showEnhancedEngineInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启增强复杂交互壁纸识别以及适配壁纸暗黑模式适配等。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
@@ -699,8 +780,7 @@ static NSString * GetPrefsPlistPath() {
     PSSpecifier *spec = [(id)cell specifier];
     NSString *specKey = [spec propertyForKey:@"key"];
     
-    // 如果处于视频模式，直接返回普通cell，不注入问号
-    if (self.isVideoMode) return cell;
+    if (self.isVideoMode) return cell; // 视频模式绝对屏障保护
     
     if ([specKey isEqualToString:@"EnhancedEngine"]) {
         UIButton *existingBtn = [cell.contentView viewWithTag:881];
@@ -967,23 +1047,26 @@ static NSString * GetPrefsPlistPath() {
     [self reloadSpecifiers]; 
 }
 
-// 侧滑逻辑 (交互壁纸专用)
+// 【终极合并：侧滑删除/重命名同时接管交互与视频双模式】
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (self.isVideoMode) return nil;
-    
     if (@available(iOS 11.0, *)) {
         PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
-        if (![[spec propertyForKey:@"IsWallpaperCell"] boolValue]) return nil;
+        BOOL isInteractive = [[spec propertyForKey:@"IsWallpaperCell"] boolValue];
+        BOOL isVideo = [[spec propertyForKey:@"IsVideoCell"] boolValue];
+        
+        if (!isInteractive && !isVideo) return nil;
 
-        NSString *name = [spec propertyForKey:@"WallpaperName"];
+        NSString *name = isVideo ? [spec propertyForKey:@"VideoName"] : [spec propertyForKey:@"WallpaperName"];
 
         UIContextualAction *deleteAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:@"删除" handler:^(UIContextualAction * _Nonnull action, __kindof UIView * _Nonnull sourceView, void (^ _Nonnull completionHandler)(BOOL)) {
-            [self deleteWallpaperWithSpecifier:spec];
+            if (isVideo) [self deleteVideoWithSpecifier:spec];
+            else [self deleteWallpaperWithSpecifier:spec];
             completionHandler(YES);
         }];
 
         UIContextualAction *renameAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal title:@"重命名" handler:^(UIContextualAction * _Nonnull action, __kindof UIView * _Nonnull sourceView, void (^ _Nonnull completionHandler)(BOOL)) {
-            [self renameWallpaper:name specifier:spec];
+            if (isVideo) [self renameVideo:name specifier:spec];
+            else [self renameWallpaper:name specifier:spec];
             completionHandler(YES);
         }];
         renameAction.backgroundColor = [UIColor systemOrangeColor];
@@ -1014,6 +1097,38 @@ static NSString * GetPrefsPlistPath() {
         
         NSString *resKey = [NSString stringWithFormat:@"ResFactor_%@", name];
         CFPreferencesSetAppValue((__bridge CFStringRef)resKey, NULL, CFSTR("com.iosdump.zoneprefs"));
+        
+        [self removeSpecifier:spec animated:YES];
+    }
+}
+
+// 视频专属侧滑删除保护
+- (void)deleteVideoWithSpecifier:(PSSpecifier *)spec {
+    NSString *name = [spec propertyForKey:@"VideoName"];
+    if (name) {
+        NSString *path = [GetVideoWallpapersDir() stringByAppendingPathComponent:name];
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        
+        NSString *plistPath = GetPrefsPlistPath();
+        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+        BOOL changed = NO;
+        
+        if ([prefs[@"LockVideoPath"] isEqualToString:path]) {
+            [prefs removeObjectForKey:@"LockVideoPath"];
+            CFPreferencesSetAppValue(CFSTR("LockVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+            changed = YES;
+        }
+        if ([prefs[@"HomeVideoPath"] isEqualToString:path]) {
+            [prefs removeObjectForKey:@"HomeVideoPath"];
+            CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+            changed = YES;
+        }
+        
+        if (changed) {
+            [prefs writeToFile:plistPath atomically:YES];
+            CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+        }
         
         [self removeSpecifier:spec animated:YES];
     }
@@ -1052,6 +1167,51 @@ static NSString * GetPrefsPlistPath() {
                         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
                     }
                     CFRelease(pathRef);
+                }
+                [self reloadSpecifiers];
+            }
+        }
+    }]];
+    UIViewController *topVC = self.view.window.rootViewController ?: self;
+    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+    [topVC presentViewController:alert animated:YES completion:nil];
+}
+
+// 视频专属安全重命名
+- (void)renameVideo:(NSString *)oldName specifier:(PSSpecifier *)spec {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名" message:@"请输入新的视频名称" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
+        textField.text = oldName;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        NSString *newName = alert.textFields.firstObject.text;
+        if (newName.length > 0 && ![newName isEqualToString:oldName]) {
+            NSString *oldPath = [GetVideoWallpapersDir() stringByAppendingPathComponent:oldName];
+            NSString *newPath = [GetVideoWallpapersDir() stringByAppendingPathComponent:newName];
+            
+            NSError *err = nil;
+            [[NSFileManager defaultManager] moveItemAtPath:oldPath toPath:newPath error:&err];
+            if (!err) {
+                NSString *plistPath = GetPrefsPlistPath();
+                NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+                BOOL changed = NO;
+                
+                if ([prefs[@"LockVideoPath"] isEqualToString:oldPath]) {
+                    prefs[@"LockVideoPath"] = newPath;
+                    CFPreferencesSetAppValue(CFSTR("LockVideoPath"), (__bridge CFStringRef)newPath, CFSTR("com.iosdump.zoneprefs"));
+                    changed = YES;
+                }
+                if ([prefs[@"HomeVideoPath"] isEqualToString:oldPath]) {
+                    prefs[@"HomeVideoPath"] = newPath;
+                    CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), (__bridge CFStringRef)newPath, CFSTR("com.iosdump.zoneprefs"));
+                    changed = YES;
+                }
+                
+                if (changed) {
+                    [prefs writeToFile:plistPath atomically:YES];
+                    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
                 }
                 [self reloadSpecifiers];
             }
