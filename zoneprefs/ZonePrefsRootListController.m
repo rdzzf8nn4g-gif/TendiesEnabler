@@ -295,20 +295,33 @@ static NSString * GetPrefsPlistPath() {
     [coloredTitle addAttribute:NSForegroundColorAttributeName value:[UIColor colorWithRed:1.00 green:0.60 blue:0.80 alpha:1.0] range:NSMakeRange(3, 1)];
     titleLabel.attributedText = coloredTitle;
     
-    UIStackView *topHorizontalStack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel]];
+   UIStackView *topHorizontalStack = [[UIStackView alloc] initWithArrangedSubviews:@[iconView, titleLabel]];
     topHorizontalStack.axis = UILayoutConstraintAxisHorizontal;
     topHorizontalStack.alignment = UIStackViewAlignmentCenter;
     topHorizontalStack.spacing = 15; 
     
     UITextView *creditsView = [[UITextView alloc] init];
-    creditsView.text = @"插件作者: iosdump\n作者频道: https://t.me/iosdumpzzz\n图标设计: https://t.me/RrrankkK\n越狱源地址：https://iosdumpzzz.github.io/iosdump.repo/";
-    creditsView.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    creditsView.textColor = [UIColor secondaryLabelColor];
-    creditsView.textAlignment = NSTextAlignmentLeft; 
     creditsView.editable = NO;
     creditsView.scrollEnabled = NO;
     creditsView.backgroundColor = [UIColor clearColor];
-    creditsView.dataDetectorTypes = UIDataDetectorTypeLink; 
+    creditsView.textAlignment = NSTextAlignmentCenter; 
+    
+    creditsView.linkTextAttributes = @{
+        NSForegroundColorAttributeName: [UIColor systemBlueColor]
+    };
+
+    NSString *baseText = @"插件作者: iosdump\n作者频道: @iosdumpzzz\n图标设计: @RrrankkK\n越狱源地址: iosdumpzzz.github.io";
+    NSMutableAttributedString *attrStr = [[NSMutableAttributedString alloc] initWithString:baseText];
+    
+    NSRange fullRange = NSMakeRange(0, baseText.length);
+    [attrStr addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:13 weight:UIFontWeightMedium] range:fullRange];
+    [attrStr addAttribute:NSForegroundColorAttributeName value:[UIColor secondaryLabelColor] range:fullRange];
+    
+    [attrStr addAttribute:NSLinkAttributeName value:@"https://t.me/iosdumpzzz" range:[baseText rangeOfString:@"@iosdumpzzz"]];
+    [attrStr addAttribute:NSLinkAttributeName value:@"https://t.me/RrrankkK" range:[baseText rangeOfString:@"@RrrankkK"]];
+    [attrStr addAttribute:NSLinkAttributeName value:@"https://iosdumpzzz.github.io/iosdump.repo/" range:[baseText rangeOfString:@"iosdumpzzz.github.io"]];
+    
+    creditsView.attributedText = attrStr;
     
     UIStackView *mainVerticalStack = [[UIStackView alloc] initWithArrangedSubviews:@[topHorizontalStack, creditsView]];
     mainVerticalStack.axis = UILayoutConstraintAxisVertical;
