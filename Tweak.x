@@ -128,20 +128,10 @@ typedef struct {
             if (_package) {
                 CALayer *root = [_package valueForKey:@"rootLayer"];
                 if (root) {
-                    // ===============================================================
-                    // 【iOS 14-15 史诗级修复 1】：剥夺原生 geometryFlipped，彻底根治坐标系倒置！
-                    // 因为外部引擎 (ZoneRenderEngineEnhanced) 也会对其进行翻转，
-                    // 如果这里不置为 NO，就会形成致命的双重翻转，导致底部元素直接飞到天花板。
-                    // ===============================================================
                     root.geometryFlipped = NO;
-                    
                     [self.layer addSublayer:root];
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
-                        // ===============================================================
-                        // 【iOS 14-15 史诗级修复 2】：状态控制器必须精确挂载到 root 层！
-                        // 之前挂在 self.layer 上导致根本读不到 CAML 里的 <LKState> 动画节点。
-                        // ===============================================================
                         _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:root]; 
                     }
                 }
@@ -156,11 +146,6 @@ typedef struct {
     if (_uiPackageView) {
         _uiPackageView.frame = self.bounds;
     }
-    // ===============================================================
-    // 【iOS 14-15 史诗级修复 3】：绝对禁止写 root.frame = self.bounds！
-    // 像 BlackHole 这种巨型画布（3176x3176），强行修改 bounds 会让其内部的所有坐标瞬间爆炸错位。
-    // 保留原画布大小，交由外部 ZoneRenderEngineEnhanced 去进行优雅的自适应缩放居中。
-    // ===============================================================
 }
 
 - (BOOL)setState:(NSString *)state {
@@ -237,6 +222,10 @@ static BOOL g_enhanced_engine = NO;
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
+
+// 【核心修复：全局缓存熔断器】
+// 专门用来打破“息屏点亮时画面卡死不刷新”的伪静止状态
+static double g_lastTickProgress = -1; 
 
 static __weak _UIPortalView *g_portalView = nil;
 
@@ -376,7 +365,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.floatingView) self.floatingView.frame = bounds;
     if (self.fgView) self.fgView.frame = bounds;
 
-    // 【iOS 14-15 专属救济】：如果使用的是旧引擎，也执行物理大小缩放计算
     if (@available(iOS 16.0, *)) {
         // iOS 16 无需处理
     } else {
@@ -386,7 +374,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (!v) continue;
             CALayer *rootLayer = [v.layer.sublayers firstObject];
             if (rootLayer) {
-                // Legacy 通路坐标系修正
                 BOOL camlFlipped = rootLayer.geometryFlipped; 
                 v.layer.geometryFlipped = !camlFlipped;
                 
@@ -767,12 +754,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 
-// 【一字未改】完全保留你 iOS16-17 的原生布局代码
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.bounds;
     
-    // 【拦截防暴走】：限定 iOS 14-15 的父层容器最大为屏幕大小
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     if (bounds.size.width > screenSize.width + 5) {
         bounds.size = screenSize;
@@ -797,9 +782,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
             if (@available(iOS 16.0, *)) {
-                // =========================================================
-                // 【iOS 16-17 原生通路】：代码绝对一字不改！
-                // =========================================================
                 CGSize targetSize = self.logicalScreenSize;
                 if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
                 CGFloat scaleX = bounds.size.width / targetSize.width;
@@ -810,15 +792,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
                 rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
             } else {
-                // =========================================================
-                // 【iOS 14-15 救世主通路】：坐标系反转对冲 + 物理尺寸雷达扫描
-                // =========================================================
-                // 1. 坐标系对冲修复：Mac(CoreAnimation) 默认 Bottom-Left，iOS 默认 Top-Left
-                // 解析 CAML 的真实翻转意图。如果 CAML 是 0，宿主必须给 YES 才能实现底部对齐
                 BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
                 v.layer.geometryFlipped = !camlFlipped;
                 
-                // 2. 无视 plist 的尺寸，读取物理图层大小
                 CGSize realSize = rootLayer.bounds.size;
                 if (realSize.width > 0 && realSize.height > 0) {
                     CGFloat realScaleX = bounds.size.width / realSize.width;
@@ -866,7 +842,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
-// 【修复核心 CPU 消耗】
 - (void)applyProgress:(double)progress parser:(ZoneCAMLParserEnhanced *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     
@@ -889,7 +864,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             if (lockVal && unlockVal) {
                 [layer removeAnimationForKey:keyPath];
-                // 替换 @try-catch 为安全判断，大幅减轻 iOS14-15 中的发热与卡顿现象
                 if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
                     double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
                     [layer setValue:@(currentVal) forKeyPath:keyPath];
@@ -1393,10 +1367,9 @@ static void EnsureEngineViewIsMounted() {
     double engineProgress = -yOffset / screenHeight;
     engineProgress = MAX(0.0, MIN(1.0, engineProgress));
     
-    static double lastProgress = -1;
-    // 极小精度的变动检测 (0.0001)，完美把系统的阻尼弹跳势能，一丝不苟地传导给壁纸
-    if (ABS(engineProgress - lastProgress) > 0.0001) {
-        lastProgress = engineProgress;
+    // 【修复】：使用全局变量 g_lastTickProgress 代替静态变量，彻底防止息屏缓存锁死
+    if (ABS(engineProgress - g_lastTickProgress) > 0.0001) {
+        g_lastTickProgress = engineProgress;
         
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
         
@@ -1502,6 +1475,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled) {
         g_isUnlocked = NO;
+        g_lastTickProgress = -1; // 强制熔断缓存
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
@@ -1513,6 +1487,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled) {
         g_isUnlocked = YES;
+        g_lastTickProgress = -1; // 强制熔断缓存
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
@@ -1525,6 +1500,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)lockUIFromSource:(int)source withOptions:(id)options {
     %orig;
     g_isUnlocked = NO;
+    g_lastTickProgress = -1; // 强制熔断缓存
     if (g_enabled && g_isScreenOn) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
@@ -1535,6 +1511,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)unlockUIFromSource:(int)source withOptions:(id)options {
     %orig;
     g_isUnlocked = YES;
+    g_lastTickProgress = -1; // 强制熔断缓存
     if (g_enabled && g_isScreenOn) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
@@ -1681,6 +1658,7 @@ static void EnsureEngineViewIsMounted() {
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
+            g_lastTickProgress = -1; // 强制熔断缓存（点亮/息屏瞬间）
             if (g_isScreenOn) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
@@ -1699,6 +1677,7 @@ static void EnsureEngineViewIsMounted() {
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
+            g_lastTickProgress = -1; // 强制熔断缓存（点亮/息屏瞬间）
             if (g_isScreenOn) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
