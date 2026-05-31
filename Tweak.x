@@ -728,7 +728,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 
-// [还原保留] 完全沿用原汁原味的 iOS 16 布局代码，不破坏其尺寸比例计算
+// 【完全保留】iOS16-17 的原生布局代码，一个字不动，保证原汁原味计算
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.bounds;
@@ -794,7 +794,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self ensureLayerMap:self.fgLayerMap parser:self.fgParser packageView:self.fgView];
 }
 
-// [性能核心优化] 修复了异常抛出导致发热卡顿的问题，极大提升高频渲染性能
+// 【完全保留】原生引擎的计算方式
 - (void)applyProgress:(double)progress parser:(ZoneCAMLParserEnhanced *)parser layerMap:(NSDictionary *)layerMap {
     if (layerMap.count == 0 || !parser) return;
     
@@ -1061,12 +1061,17 @@ static void EnsureEngineViewIsMounted() {
         [targetContainer addSubview:existingEngine];
     }
     
-    // 【核心修复：治愈 iOS14/15 桌面变大错乱问题】
-    // iOS16 容器是严格匹配屏幕的，但 iOS14 的容器带了巨大的防视差黑边（Padding）
-    // 为了不破坏内部的 Layout，直接锁定引擎底座为物理屏幕尺寸，并且将它强制在容器里居中！
-    CGSize screenSize = [UIScreen mainScreen].bounds.size;
-    existingEngine.bounds = CGRectMake(0, 0, screenSize.width, screenSize.height);
-    existingEngine.center = CGPointMake(targetContainer.bounds.size.width / 2.0, targetContainer.bounds.size.height / 2.0);
+    // 【最强补丁】仅拦截 iOS 14/15 的容器放大黑边（Padding）
+    // 强制剥离 Padding，让 iOS 14 的 engine 跟 iOS 16 物理尺寸完全对齐！彻底解决变大错乱问题。
+    BOOL isIOS14_15 = (NSClassFromString(@"PBUIWallpaperViewController") == Nil);
+    if (isIOS14_15) {
+        existingEngine.autoresizingMask = UIViewAutoresizingNone; 
+        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        existingEngine.bounds = CGRectMake(0, 0, screenSize.width, screenSize.height);
+        existingEngine.center = CGPointMake(targetContainer.bounds.size.width / 2.0, targetContainer.bounds.size.height / 2.0);
+    } else {
+        existingEngine.frame = targetContainer.bounds;
+    }
     
     [targetContainer bringSubviewToFront:existingEngine];
 }
@@ -1288,9 +1293,65 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+// 提前声明自定义方法
+@interface CSCoverSheetViewController (Zone)
+- (void)zone_tickProgress;
+@end
+
 %hook CSCoverSheetViewController
 
-// [复盘修复]：完全规避直接通过手势强刷引起发烫，而是只在系统需要重绘时才垫入 Portal
+// 挂载高频实时侦测器（完美解决释放后的弹簧动画消失问题）
+- (void)viewDidLoad {
+    %orig;
+    if (g_enabled) {
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zone_tickProgress)];
+        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        objc_setAssociatedObject(self, "ZoneTicker", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+// 独家 CADisplayLink：实时追踪锁屏界面的真实物理“弹性偏移层”！
+%new
+- (void)zone_tickProgress {
+    if (!g_enabled) return;
+    
+    // 直接读 CoreAnimation 动画在屏幕上当前渲染的真实位置（包含系统弹性回弹的每一步）
+    CALayer *presLayer = self.view.layer.presentationLayer;
+    if (!presLayer) presLayer = self.view.layer;
+    
+    double yOffset = presLayer.frame.origin.y;
+    double screenHeight = [UIScreen mainScreen].bounds.size.height;
+    
+    // 计算物理位移比例
+    double engineProgress = ABS(yOffset) / screenHeight;
+    engineProgress = MAX(0.0, MIN(1.0, engineProgress));
+    
+    // 高精度过滤重复发信，防卡防烫，0.0001保证了顺滑的阻尼弹簧效果能完整传输给引擎
+    static double lastProgress = -1;
+    if (ABS(engineProgress - lastProgress) > 0.0001) {
+        lastProgress = engineProgress;
+        
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
+        
+        if (g_portalView) {
+            double alpha = 0.0;
+            if (engineProgress > 0.7) {
+                alpha = (1.0 - engineProgress) * (0.05 / 0.3);
+            } else if (engineProgress > 0.6) {
+                alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
+            } else {
+                alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
+            }
+            alpha = MAX(0.0, MIN(1.0, alpha));
+            
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            g_portalView.alpha = alpha;
+            [CATransaction commit];
+        }
+    }
+}
+
 - (void)viewWillLayoutSubviews {
     %orig;
     EnsureEngineViewIsMounted(); 
@@ -1318,9 +1379,16 @@ static void EnsureEngineViewIsMounted() {
                 portalView.sourceView = engineView; 
             }
 
+            // 防止死循环的插入逻辑
             if (portalView.superview != self.view) {
                 [self.view insertSubview:portalView atIndex:0];
+            } else {
+                NSInteger index = [self.view.subviews indexOfObject:portalView];
+                if (index != 0) {
+                    [self.view sendSubviewToBack:portalView];
+                }
             }
+            
             portalView.frame = self.view.bounds;
             
             UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
@@ -1338,37 +1406,9 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// 【核心修复：满血恢复跟随滑动交互，严密监控物理下拉通知栏进度】
-// 之前的卡死是因为在这里面写了频繁刷新图层的函数，现在只发送原汁原味的 iOS16 同款渐变算式过去
+// 不再使用僵硬的系统代理计算进度，全部交给完美的 zone_tickProgress CADisplayLink 处理！
 - (void)overlayController:(id)controller didChangePresentationProgress:(double)oldProgress newPresentationProgress:(double)newProgress fromLeading:(BOOL)leading {
-    %orig;
-    if (g_enabled) {
-        // iOS 14 中，下拉出锁屏界面 newProgress 从 0.0 渐变到 1.0
-        // 对齐 iOS 16 的 engineProgress 算法（1.0代表完全处于桌面桌面，0.0代表在锁屏）
-        double engineProgress = 1.0 - newProgress;
-        engineProgress = MAX(0.0, MIN(1.0, engineProgress));
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
-            
-            if (g_portalView) {
-                double alpha = 0.0;
-                if (engineProgress > 0.7) {
-                    alpha = (1.0 - engineProgress) * (0.05 / 0.3);
-                } else if (engineProgress > 0.6) {
-                    alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
-                }
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
-        });
-    }
+    %orig; 
 }
 
 // 进出桌面的生命周期强制锁死状态，保证绝不脱节
