@@ -303,8 +303,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             EnsureEngineViewIsMounted();
         }
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineInternalReload" object:nil];
-        
-        // 【核心机制：强制全局瞬间重绘，修复开关瞬间黑屏Bug】
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
     });
 }
@@ -327,7 +325,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @implementation ZoneVideoPlayerView
 - (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path {
     if (self = [super initWithFrame:frame]) {
-        // 【核心机制防黑屏】：必须使用 ClearColor 确保空白区域完美穿透显示系统自带壁纸！
         self.backgroundColor = [UIColor clearColor];
         self.userInteractionEnabled = NO;
         self.clipsToBounds = YES;
@@ -408,7 +405,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        // 【核心机制防黑屏】：总引擎容器必须透明
         self.backgroundColor = [UIColor clearColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.userInteractionEnabled = NO; 
@@ -438,13 +434,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.isSingleVideoMode) {
         [self.lockVideoView playVideo];
     } else {
-        if (g_isUnlocked && self.homeVideoView) {
-            [self.homeVideoView playVideo];
-            [self.lockVideoView pauseVideo];
-        } else if (!g_isUnlocked && self.lockVideoView) {
-            [self.lockVideoView playVideo];
-            [self.homeVideoView pauseVideo];
-        }
+        if (self.homeVideoView) [self.homeVideoView playVideo];
+        if (self.lockVideoView) [self.lockVideoView playVideo];
     }
 }
 
@@ -455,25 +446,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onProgress:(NSNotification *)note {
+    // 【终极隔离】：在视频模式下，绝对不执行任何交叉透明度计算！
+    // 物理层面上，Lock就是Lock，Home就是Home。滑动交由系统处理。
     if (!g_enabled || !g_isVideoMode) return;
-    double progress = [note.userInfo[@"progress"] doubleValue];
-    
-    if (self.isSingleVideoMode) return; 
-    
-    // 【物理切割】：精确的透明度淡入淡出，结合底层 Portal 修复，无论怎么滑都不会干扰彼此！
-    if (self.lockVideoView) self.lockVideoView.alpha = 1.0 - progress;
-    if (self.homeVideoView) self.homeVideoView.alpha = progress;
-
-    if (progress >= 1.0) {
-        [self.lockVideoView pauseVideo];
-        [self.homeVideoView playVideo];
-    } else if (progress <= 0.0) {
-        [self.homeVideoView pauseVideo];
-        [self.lockVideoView playVideo];
-    } else {
-        [self.lockVideoView playVideo];
-        [self.homeVideoView playVideo];
-    }
 }
 
 - (void)clearCurrentViewsSafely {
@@ -507,22 +482,33 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.isSingleVideoMode = (hasLock && hasHome && [g_lockVideoPath isEqualToString:g_homeVideoPath]);
         
         if (self.isSingleVideoMode) {
+            // 同一个视频：直接让它显示在底层（充当桌面），传送门镜像它（充当锁屏）
             self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
-            if (self.lockVideoView) [self addSubview:self.lockVideoView];
+            if (self.lockVideoView) {
+                self.lockVideoView.alpha = 1.0;
+                [self addSubview:self.lockVideoView];
+            }
             if (g_isScreenOn) [self.lockVideoView playVideo];
         } else {
+            // 【核心修复防鬼影】：锁屏和桌面分开。
             if (hasLock) {
                 self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
-                if (self.lockVideoView) [self addSubview:self.lockVideoView];
+                if (self.lockVideoView) {
+                    // 锁屏视频在底层引擎（桌面环境）中设为 0.0 隐身，但它会在传送门中现身！
+                    self.lockVideoView.alpha = 0.0;
+                    [self addSubview:self.lockVideoView];
+                }
             }
             if (hasHome) {
                 self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
-                if (self.homeVideoView) [self addSubview:self.homeVideoView]; // Home 在顶层，遮盖 Lock 的渲染层级
+                if (self.homeVideoView) {
+                    self.homeVideoView.alpha = 1.0;
+                    [self addSubview:self.homeVideoView];
+                }
             }
-            
             if (g_isScreenOn) {
-                [self.lockVideoView playVideo];
-                [self.homeVideoView playVideo];
+                if (self.lockVideoView) [self.lockVideoView playVideo];
+                if (self.homeVideoView) [self.homeVideoView playVideo];
             }
         }
     });
@@ -533,7 +519,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // =========================================================================
 // ==================== 【引擎 1】: 传统稳定引擎 (旧逻辑) ====================
 // =========================================================================
-// (此处旧逻辑完全没动，受字数限制不再赘述，保持你原来的 ZoneCAMLParserLegacy 和 ZoneRenderEngineLegacy 原封不动)
 @interface ZoneCAMLParserLegacy : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
@@ -871,7 +856,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // =========================================================================
 // ==================== 【引擎 2】: 增强渲染引擎 (新逻辑) ====================
 // =========================================================================
-// (此处旧逻辑完全没动)
 @interface ZoneCAMLParserEnhanced : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
@@ -1389,7 +1373,7 @@ static void EnsureEngineViewIsMounted() {
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
 
-    // 【核心机制防黑屏】：关闭开关时直接核爆摧毁引擎，让底层完全通透！
+    // 【极速释放】：关闭开关直接摧毁，毫无残留
     if (!g_enabled) {
         if (existingEngine) {
             if ([existingEngine respondsToSelector:@selector(clearCurrentViewsSafely)]) {
@@ -1448,7 +1432,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 // =========================================================================
-// ==================== 【iOS 16+ 专属 Hook 区域 (严禁修改)】==================
+// ==================== 【iOS 16+ 专属 Hook 区域】===========================
 // =========================================================================
 %group iOS16Plus
 
@@ -1464,7 +1448,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    // 【完美恢复机制】：如果不启用，必须恢复原生壁纸容器的透明度！
+    
     if (!g_enabled) {
         if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
             UIView *homeView = [self homescreenWallpaperView];
@@ -1477,7 +1461,7 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
-    // 【物理隔离屏蔽机制】：视频模式下，只有相应视频存在时，才把那一侧的原生壁纸遮挡！
+    // 【完美隔离：视频模式按需屏蔽原生，不设就露出系统自带！】
     BOOL hideHome = !g_isVideoMode || (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
     BOOL hideLock = !g_isVideoMode || (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
 
@@ -1515,7 +1499,6 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
     
-    // 【完美恢复机制】：禁用时，隐藏传送门，恢复系统所有原生元素！
     if (!g_enabled) {
         if (portalView) portalView.hidden = YES;
         UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
@@ -1540,13 +1523,12 @@ static void EnsureEngineViewIsMounted() {
     UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
     
     if (engineView) {
-        // 【核心切割隔离】：在视频模式下，传送门只吸取锁屏引擎，如果不设锁屏引擎则没有传送门，完美露出原生！
         UIView *sourceForPortal = engineView;
         if (g_isVideoMode) {
             if ([engineView respondsToSelector:@selector(lockVideoView)]) {
                 UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
                 if (lockView) sourceForPortal = lockView;
-                else sourceForPortal = nil; 
+                else sourceForPortal = nil; // 没设锁屏？直接不搞传送门！
             }
         }
         
@@ -1555,7 +1537,7 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            // 【修好了锁屏不跟随的问题】：视频模式下切断坐标锁死
+            // 【滑动跟手的终极奥义】
             portalView.matchesPosition = g_isVideoMode ? NO : YES;
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
@@ -1692,11 +1674,14 @@ static void EnsureEngineViewIsMounted() {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
         
         if (g_portalView) {
+            // 【物理斩断】：视频模式完全不吃透明度，恒为 1.0，完全依靠原生拖拽动画遮盖！
             if (g_isVideoMode) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = 1.0;
-                [CATransaction commit];
+                if (g_portalView.alpha != 1.0) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    g_portalView.alpha = 1.0;
+                    [CATransaction commit];
+                }
             } else {
                 double alpha = 0.0;
                 if (progress > 0.7) {
@@ -1812,10 +1797,12 @@ static void EnsureEngineViewIsMounted() {
         
         if (g_portalView) {
             if (g_isVideoMode) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = 1.0;
-                [CATransaction commit];
+                if (g_portalView.alpha != 1.0) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    g_portalView.alpha = 1.0;
+                    [CATransaction commit];
+                }
             } else {
                 double alpha = 0.0;
                 if (engineProgress > 0.7) {
