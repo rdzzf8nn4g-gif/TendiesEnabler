@@ -128,9 +128,20 @@ typedef struct {
             if (_package) {
                 CALayer *root = [_package valueForKey:@"rootLayer"];
                 if (root) {
+                    // ===============================================================
+                    // 【iOS 14-15 史诗级修复 1】：剥夺原生 geometryFlipped，彻底根治坐标系倒置！
+                    // 因为外部引擎 (ZoneRenderEngineEnhanced) 也会对其进行翻转，
+                    // 如果这里不置为 NO，就会形成致命的双重翻转，导致底部元素直接飞到天花板。
+                    // ===============================================================
+                    root.geometryFlipped = NO;
+                    
                     [self.layer addSublayer:root];
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
+                        // ===============================================================
+                        // 【iOS 14-15 史诗级修复 2】：状态控制器必须精确挂载到 root 层！
+                        // 之前挂在 self.layer 上导致根本读不到 CAML 里的 <LKState> 动画节点。
+                        // ===============================================================
                         _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:root]; 
                     }
                 }
@@ -145,6 +156,11 @@ typedef struct {
     if (_uiPackageView) {
         _uiPackageView.frame = self.bounds;
     }
+    // ===============================================================
+    // 【iOS 14-15 史诗级修复 3】：绝对禁止写 root.frame = self.bounds！
+    // 像 BlackHole 这种巨型画布（3176x3176），强行修改 bounds 会让其内部的所有坐标瞬间爆炸错位。
+    // 保留原画布大小，交由外部 ZoneRenderEngineEnhanced 去进行优雅的自适应缩放居中。
+    // ===============================================================
 }
 
 - (BOOL)setState:(NSString *)state {
@@ -360,6 +376,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.floatingView) self.floatingView.frame = bounds;
     if (self.fgView) self.fgView.frame = bounds;
 
+    // 【iOS 14-15 专属救济】：如果使用的是旧引擎，也执行物理大小缩放计算
     if (@available(iOS 16.0, *)) {
         // iOS 16 无需处理
     } else {
@@ -1408,6 +1425,16 @@ static void EnsureEngineViewIsMounted() {
     EnsureEngineViewIsMounted(); 
     
     if (g_enabled) {
+        // =========================================================================
+        // 【iOS 14-15 究极修复】：完美移植 iOS 16 的 _backgroundContentViewController 容器挂载
+        // 彻底解决下拉通知中心时传送门“溢出、跑出去”的问题，将其严格锁定在锁屏背景层内。
+        // =========================================================================
+        UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
+        if (bgVC && bgVC.view) {
+            bgVC.view.alpha = 1.0;
+            bgVC.view.hidden = NO;
+        }
+
         id wallpaperController = [%c(SBWallpaperController) sharedInstance];
         UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
         
@@ -1430,16 +1457,31 @@ static void EnsureEngineViewIsMounted() {
                 portalView.sourceView = engineView; 
             }
 
-            if (portalView.superview != self.view) {
-                [self.view insertSubview:portalView atIndex:0];
-            } else {
-                NSInteger index = [self.view.subviews indexOfObject:portalView];
-                if (index != 0) {
-                    [self.view sendSubviewToBack:portalView];
+            // 【挂载逻辑同步 iOS 16】：直接塞进 bgVC.view 容器并做裁切隐藏，禁止放在 self.view 顶层
+            if (bgVC && bgVC.view) {
+                if (portalView.superview != bgVC.view) {
+                    [portalView removeFromSuperview];
+                    [bgVC.view addSubview:portalView];
                 }
+                portalView.frame = bgVC.view.bounds;
+                
+                for (UIView *sub in bgVC.view.subviews) {
+                    if (sub != portalView) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    }
+                }
+            } else {
+                if (portalView.superview != self.view) {
+                    [self.view insertSubview:portalView atIndex:0];
+                } else {
+                    NSInteger index = [self.view.subviews indexOfObject:portalView];
+                    if (index != 0) {
+                        [self.view sendSubviewToBack:portalView];
+                    }
+                }
+                portalView.frame = self.view.bounds;
             }
-            
-            portalView.frame = self.view.bounds;
             
             UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
             if (dimmingView) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
