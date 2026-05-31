@@ -1342,7 +1342,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // ==================== 智能防漏动态热切换调度核心 =========================
 // =========================================================================
 
-// 【修复核心点2】：彻底将视频模式与交互模式统一在同一个最底层的 _wallpaperWindow 中，由该引擎接管，根除后台桌面卡片透出视频Bug！
 static void EnsureEngineViewIsMounted() {
     if (!g_enabled) return;
     
@@ -1364,11 +1363,18 @@ static void EnsureEngineViewIsMounted() {
     
     BOOL needsRebuild = NO;
     if (g_wallpaperMode == 1) {
+        // 如果是视频模式，但当前引擎不是视频引擎，需要重建
         if (!isVideoClass) needsRebuild = YES;
     } else {
-        if (g_enhanced_engine && !isEnhancedClass) needsRebuild = YES;
-        else if (!g_enhanced_engine && isEnhancedClass) needsRebuild = YES;
-        else if (isVideoClass) needsRebuild = YES;
+        // 如果是交互模式
+        if (g_enhanced_engine) {
+            // 如果开启了增强引擎，但当前不是增强引擎，需要重建
+            if (!isEnhancedClass) needsRebuild = YES;
+        } else {
+            // 完美利用 isLegacyClass，解决编译报错且逻辑更严谨：
+            // 如果使用传统引擎，但当前不是传统引擎，需要重建
+            if (!isLegacyClass) needsRebuild = YES;
+        }
     }
     
     if (existingEngine && needsRebuild) {
