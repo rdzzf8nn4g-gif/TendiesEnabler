@@ -203,18 +203,19 @@ static NSString * GetPrefsPlistPath() {
 // 自定义UI注入区域
 // =======================================
 
+// 点击增强引擎旁的问号按钮后弹出的提示
 - (void)showEnhancedEngineInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后增强复杂交互壁纸识别\n(同时支持自动切换日间/暗黑动画)" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 获取壁纸的实时大小并返回右侧文本 (保留以便未加载出自定义view时做回退)
+// 占位返回方法，真实体积数字在自定义的 accessoryView 里
 - (id)getWallpaperSize:(PSSpecifier *)spec {
     return @"";
 }
 
-// 分辨率调节点击动作
+// 动态降采样比例控制无限循环 (原画 -> 70% -> 50% -> 25%)
 - (void)cycleResolution:(UIButton *)sender {
     NSString *name = sender.accessibilityIdentifier;
     if (!name) return;
@@ -242,6 +243,7 @@ static NSString * GetPrefsPlistPath() {
     [prefs writeToFile:plistPath atomically:YES];
     [self forceOwnershipToMobile:plistPath];
     
+    // 广播重绘当前壁纸
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
     if (nextFactor >= 0.99) {
@@ -282,6 +284,7 @@ static NSString * GetPrefsPlistPath() {
         UIButton *resBtn = nil;
         UILabel *sizeLabel = nil;
         
+        // 动态注入百分比和大小，无痕嵌入
         if (!accView || accView.frame.size.width != 115) {
             accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 115, 30)];
             
@@ -325,6 +328,7 @@ static NSString * GetPrefsPlistPath() {
         if (factor >= 0.99) [resBtn setTitle:@"原画" forState:UIControlStateNormal];
         else [resBtn setTitle:[NSString stringWithFormat:@"%.0f%%", factor * 100] forState:UIControlStateNormal];
         
+        // 隐藏系统本身的数字占位符
         cell.detailTextLabel.hidden = YES;
         cell.detailTextLabel.text = @"";
     }
@@ -413,6 +417,8 @@ static NSString * GetPrefsPlistPath() {
         NSString *wpDir = GetWallpapersDir();
         if ([fm fileExistsAtPath:wpDir]) {
             NSArray *contents = [fm contentsOfDirectoryAtPath:wpDir error:nil];
+            // 【核心注入：自动按首字母A-Z全系排列】
+            contents = [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
             
             NSString *currentPath = nil;
             CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
@@ -433,6 +439,7 @@ static NSString * GetPrefsPlistPath() {
                         displayName = [NSString stringWithFormat:@"%@  ✓", name];
                     }
                     
+                    // 改用 PSTitleValueCell 实现右侧文字靠右的效果
                     PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getWallpaperSize:) detail:nil cell:PSTitleValueCell edit:nil];
                     spec->action = @selector(selectWallpaper:);
                     [spec setProperty:name forKey:@"WallpaperName"];
@@ -617,36 +624,106 @@ static NSString * GetPrefsPlistPath() {
     
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    [self reloadSpecifiers]; // 刷新列表时会重新调用 getter，确保容量大小的数字也被实时重新测算
+    [self reloadSpecifiers]; 
 }
 
-- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
-    if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) return YES;
-    return NO;
-}
-
-- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (editingStyle == UITableViewCellEditingStyleDelete) {
+// 【左滑定制重命名核爆炸入口】
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (@available(iOS 11.0, *)) {
         PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
+        if (![[spec propertyForKey:@"IsWallpaperCell"] boolValue]) return nil;
+
         NSString *name = [spec propertyForKey:@"WallpaperName"];
-        if (name) {
-            NSString *path = [GetWallpapersDir() stringByAppendingPathComponent:name];
-            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-            
-            CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
-            if (pathRef) {
-                NSString *currentPath = (__bridge NSString *)pathRef;
-                if ([currentPath isEqualToString:path]) {
-                    CFPreferencesSetAppValue(CFSTR("ZonePath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-                    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-                }
-                CFRelease(pathRef);
-            }
-            [self removeSpecifier:spec animated:YES];
-        }
+
+        UIContextualAction *deleteAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:@"删除" handler:^(UIContextualAction * _Nonnull action, __kindof UIView * _Nonnull sourceView, void (^ _Nonnull completionHandler)(BOOL)) {
+            [self deleteWallpaperWithSpecifier:spec];
+            completionHandler(YES);
+        }];
+
+        UIContextualAction *renameAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal title:@"重命名" handler:^(UIContextualAction * _Nonnull action, __kindof UIView * _Nonnull sourceView, void (^ _Nonnull completionHandler)(BOOL)) {
+            [self renameWallpaper:name specifier:spec];
+            completionHandler(YES);
+        }];
+        renameAction.backgroundColor = [UIColor systemOrangeColor];
+
+        UISwipeActionsConfiguration *config = [UISwipeActionsConfiguration configurationWithActions:@[deleteAction, renameAction]];
+        config.performsFirstActionWithFullSwipe = NO; 
+        return config;
     }
+    return nil;
+}
+
+// 分离后的防遗漏删除函数
+- (void)deleteWallpaperWithSpecifier:(PSSpecifier *)spec {
+    NSString *name = [spec propertyForKey:@"WallpaperName"];
+    if (name) {
+        NSString *path = [GetWallpapersDir() stringByAppendingPathComponent:name];
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        
+        CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
+        if (pathRef) {
+            NSString *currentPath = (__bridge NSString *)pathRef;
+            if ([currentPath isEqualToString:path]) {
+                CFPreferencesSetAppValue(CFSTR("ZonePath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+                CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+            }
+            CFRelease(pathRef);
+        }
+        
+        // 删除残留的降采样配置文件
+        NSString *resKey = [NSString stringWithFormat:@"ResFactor_%@", name];
+        CFPreferencesSetAppValue((__bridge CFStringRef)resKey, NULL, CFSTR("com.iosdump.zoneprefs"));
+        
+        [self removeSpecifier:spec animated:YES];
+    }
+}
+
+// 独立无感重命名系统，安全转移降采样偏好并自动接管
+- (void)renameWallpaper:(NSString *)oldName specifier:(PSSpecifier *)spec {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名" message:@"请输入新的壁纸名称" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
+        textField.text = oldName;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        NSString *newName = alert.textFields.firstObject.text;
+        if (newName.length > 0 && ![newName isEqualToString:oldName]) {
+            NSString *oldPath = [GetWallpapersDir() stringByAppendingPathComponent:oldName];
+            NSString *newPath = [GetWallpapersDir() stringByAppendingPathComponent:newName];
+            
+            NSError *err = nil;
+            [[NSFileManager defaultManager] moveItemAtPath:oldPath toPath:newPath error:&err];
+            if (!err) {
+                // 安全交接原壁纸画质保留的设置
+                NSString *oldResKey = [NSString stringWithFormat:@"ResFactor_%@", oldName];
+                NSString *newResKey = [NSString stringWithFormat:@"ResFactor_%@", newName];
+                CFPropertyListRef resRef = CFPreferencesCopyAppValue((__bridge CFStringRef)oldResKey, CFSTR("com.iosdump.zoneprefs"));
+                if (resRef) {
+                    CFPreferencesSetAppValue((__bridge CFStringRef)newResKey, resRef, CFSTR("com.iosdump.zoneprefs"));
+                    CFPreferencesSetAppValue((__bridge CFStringRef)oldResKey, NULL, CFSTR("com.iosdump.zoneprefs"));
+                    CFRelease(resRef);
+                }
+                
+                // 更正正在使用的壁纸缓存位置
+                CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
+                if (pathRef) {
+                    NSString *currentPath = (__bridge NSString *)pathRef;
+                    if ([currentPath isEqualToString:oldPath]) {
+                        CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)newPath, CFSTR("com.iosdump.zoneprefs"));
+                        CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+                        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+                    }
+                    CFRelease(pathRef);
+                }
+                [self reloadSpecifiers];
+            }
+        }
+    }]];
+    UIViewController *topVC = self.view.window.rootViewController;
+    if (!topVC) topVC = self;
+    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+    [topVC presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)openFilzaPath:(PSSpecifier *)spec {
