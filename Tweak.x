@@ -128,21 +128,10 @@ typedef struct {
             if (_package) {
                 CALayer *root = [_package valueForKey:@"rootLayer"];
                 if (root) {
-                    // ===============================================================
-                    // 【iOS 14-15 史诗级修复 1】：剥夺原生 geometryFlipped，彻底根治坐标系倒置！
-                    // 因为外部引擎 (ZoneRenderEngineEnhanced) 也会对其进行翻转，
-                    // 如果这里不置为 NO，就会形成致命的双重翻转，导致底部元素直接飞到天花板。
-                    // ===============================================================
-                    root.geometryFlipped = NO;
-                    
                     [self.layer addSublayer:root];
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
-                        // ===============================================================
-                        // 【iOS 14-15 史诗级修复 2】：状态控制器必须精确挂载到 root 层！
-                        // 之前挂在 self.layer 上导致根本读不到 CAML 里的 <LKState> 动画节点。
-                        // ===============================================================
-                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:root];
+                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:root]; 
                     }
                 }
             }
@@ -156,11 +145,6 @@ typedef struct {
     if (_uiPackageView) {
         _uiPackageView.frame = self.bounds;
     }
-    // ===============================================================
-    // 【iOS 14-15 史诗级修复 3】：绝对禁止写 root.frame = self.bounds！
-    // 像 BlackHole 这种巨型画布（3176x3176），强行修改 bounds 会让其内部的所有坐标瞬间爆炸错位。
-    // 保留原画布大小，交由外部 ZoneRenderEngineEnhanced 去进行优雅的自适应缩放居中。
-    // ===============================================================
 }
 
 - (BOOL)setState:(NSString *)state {
@@ -370,9 +354,36 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (self.bgView) self.bgView.frame = self.bounds;
-    if (self.floatingView) self.floatingView.frame = self.bounds;
-    if (self.fgView) self.fgView.frame = self.bounds;
+    CGRect bounds = self.bounds;
+    
+    if (self.bgView) self.bgView.frame = bounds;
+    if (self.floatingView) self.floatingView.frame = bounds;
+    if (self.fgView) self.fgView.frame = bounds;
+
+    if (@available(iOS 16.0, *)) {
+        // iOS 16 无需处理
+    } else {
+        BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
+        for (int i = 0; i < 3; i++) {
+            BSUICAPackageView *v = views[i];
+            if (!v) continue;
+            CALayer *rootLayer = [v.layer.sublayers firstObject];
+            if (rootLayer) {
+                // Legacy 通路坐标系修正
+                BOOL camlFlipped = rootLayer.geometryFlipped; 
+                v.layer.geometryFlipped = !camlFlipped;
+                
+                CGSize realSize = rootLayer.bounds.size;
+                if (realSize.width > 0 && realSize.height > 0) {
+                    CGFloat scaleX = bounds.size.width / realSize.width;
+                    CGFloat scaleY = bounds.size.height / realSize.height;
+                    CGFloat scale = MAX(scaleX, scaleY);
+                    rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+                    rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+                }
+            }
+        }
+    }
 }
 
 - (void)onWakeUp {
@@ -744,19 +755,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [super layoutSubviews];
     CGRect bounds = self.bounds;
     
-    // 【强制拦截系统干扰】若 iOS14-15 的父层容器比屏幕大（塞入了 Padding），主动切除多余部分以防止画面异常变大
+    // 【拦截防暴走】：限定 iOS 14-15 的父层容器最大为屏幕大小
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     if (bounds.size.width > screenSize.width + 5) {
         bounds.size = screenSize;
         bounds.origin = CGPointZero;
     }
-    
-    CGSize targetSize = self.logicalScreenSize;
-    if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
-    
-    CGFloat scaleX = bounds.size.width / targetSize.width;
-    CGFloat scaleY = bounds.size.height / targetSize.height;
-    CGFloat scale = MAX(scaleX, scaleY);
     
     BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
     ZoneCAMLParserEnhanced *parsers[] = {self.bgParser, self.floatParser, self.fgParser};
@@ -775,9 +779,41 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
-            v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
-            rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
-            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+            if (@available(iOS 16.0, *)) {
+                // =========================================================
+                // 【iOS 16-17 原生通路】：代码绝对一字不改！
+                // =========================================================
+                CGSize targetSize = self.logicalScreenSize;
+                if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
+                CGFloat scaleX = bounds.size.width / targetSize.width;
+                CGFloat scaleY = bounds.size.height / targetSize.height;
+                CGFloat scale = MAX(scaleX, scaleY);
+                
+                v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
+                rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+                rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+            } else {
+                // =========================================================
+                // 【iOS 14-15 救世主通路】：坐标系反转对冲 + 物理尺寸雷达扫描
+                // =========================================================
+                // 1. 坐标系对冲修复：Mac(CoreAnimation) 默认 Bottom-Left，iOS 默认 Top-Left
+                // 解析 CAML 的真实翻转意图。如果 CAML 是 0，宿主必须给 YES 才能实现底部对齐
+                BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
+                v.layer.geometryFlipped = !camlFlipped;
+                
+                // 2. 无视 plist 的尺寸，读取物理图层大小
+                CGSize realSize = rootLayer.bounds.size;
+                if (realSize.width > 0 && realSize.height > 0) {
+                    CGFloat realScaleX = bounds.size.width / realSize.width;
+                    CGFloat realScaleY = bounds.size.height / realSize.height;
+                    CGFloat realScale = MAX(realScaleX, realScaleY); 
+                    
+                    rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+                    rootLayer.transform = CATransform3DMakeScale(realScale, realScale, 1.0);
+                } else {
+                    rootLayer.frame = bounds;
+                }
+            }
         }
     }
 }
@@ -927,7 +963,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         __block NSString *foundBg = nil; __block NSString *foundFloat = nil; __block NSString *foundFg = nil;
         __block NSString *foundPlist = nil;
         
-        // 【核心漏洞修复】：全局深度搜索 Wallpaper.plist，解决“部分大，部分小”的解析失败问题！
         NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
         NSString *subPath;
         while ((subPath = [dirEnum nextObject])) {
