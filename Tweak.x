@@ -128,10 +128,21 @@ typedef struct {
             if (_package) {
                 CALayer *root = [_package valueForKey:@"rootLayer"];
                 if (root) {
+                    // ===============================================================
+                    // 【iOS 14-15 史诗级修复 1】：剥夺原生 geometryFlipped，彻底根治坐标系倒置！
+                    // 因为外部引擎 (ZoneRenderEngineEnhanced) 也会对其进行翻转，
+                    // 如果这里不置为 NO，就会形成致命的双重翻转，导致底部元素直接飞到天花板。
+                    // ===============================================================
+                    root.geometryFlipped = NO;
+                    
                     [self.layer addSublayer:root];
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
-                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:self.layer];
+                        // ===============================================================
+                        // 【iOS 14-15 史诗级修复 2】：状态控制器必须精确挂载到 root 层！
+                        // 之前挂在 self.layer 上导致根本读不到 CAML 里的 <LKState> 动画节点。
+                        // ===============================================================
+                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:root];
                     }
                 }
             }
@@ -140,43 +151,16 @@ typedef struct {
     return self;
 }
 
-// 【终极排版拦截器】：无论走哪个底层类，强制进行坐标系翻转与居中缩放铺满
 - (void)layoutSubviews {
     [super layoutSubviews];
-    
     if (_uiPackageView) {
         _uiPackageView.frame = self.bounds;
     }
-    
-    CALayer *targetRoot = nil;
-    CALayer *hostLayer = nil;
-    
-    // 取出真正渲染内容的包裹层与宿主层
-    if (_uiPackageView) {
-        targetRoot = [_uiPackageView.layer.sublayers firstObject];
-        hostLayer = _uiPackageView.layer;
-    } else if (_package) {
-        targetRoot = [_package valueForKey:@"rootLayer"];
-        hostLayer = self.layer;
-    }
-    
-    if (targetRoot && hostLayer) {
-        // 1. 同步坐标系：完美解决“底部元素跑天上”与“动画倒转视觉错觉”
-        hostLayer.geometryFlipped = targetRoot.geometryFlipped;
-        
-        // 2. 居中与缩放：为 iOS 14-15 提供类似 iOS 16 BSUICAPackageView 的自适应全屏能力
-        CGSize originalSize = targetRoot.bounds.size;
-        if (originalSize.width > 0 && originalSize.height > 0) {
-            CGFloat scaleX = self.bounds.size.width / originalSize.width;
-            CGFloat scaleY = self.bounds.size.height / originalSize.height;
-            CGFloat scale = MAX(scaleX, scaleY); // 等比缩放，铺满屏幕
-            
-            targetRoot.position = CGPointMake(self.bounds.size.width / 2.0, self.bounds.size.height / 2.0);
-            targetRoot.transform = CATransform3DMakeScale(scale, scale, 1.0);
-        } else {
-            targetRoot.frame = self.bounds;
-        }
-    }
+    // ===============================================================
+    // 【iOS 14-15 史诗级修复 3】：绝对禁止写 root.frame = self.bounds！
+    // 像 BlackHole 这种巨型画布（3176x3176），强行修改 bounds 会让其内部的所有坐标瞬间爆炸错位。
+    // 保留原画布大小，交由外部 ZoneRenderEngineEnhanced 去进行优雅的自适应缩放居中。
+    // ===============================================================
 }
 
 - (BOOL)setState:(NSString *)state {
@@ -1353,10 +1337,7 @@ static void EnsureEngineViewIsMounted() {
     double yOffset = absoluteRect.origin.y;
     double screenHeight = [UIScreen mainScreen].bounds.size.height;
     
-    // ==========================================
-    // 【iOS 14-15 严谨版】：负号锁定真正的解锁进程
-    // 下滑 (扯皮筋) 产生正向位移，用负号拦截使其变为 0，防止假解锁
-    // ==========================================
+    // 负号锁定真正的解锁进程：下拉 (扯皮筋) 产生正向位移，用负号拦截使其变为 0，防止假解锁
     double engineProgress = -yOffset / screenHeight;
     engineProgress = MAX(0.0, MIN(1.0, engineProgress));
     
