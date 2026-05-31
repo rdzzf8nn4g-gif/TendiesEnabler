@@ -392,16 +392,33 @@ static NSString * GetPrefsPlistPath() {
     [self reloadSpecifiers];
 }
 
-// 【修复需求5】：最强全系统兼容原生级注销 (Rootless/Roothide/Rootful)
+// 【修复需求5】：最强全系统兼容原生级注销 (双重保险机制)
 - (void)respringDevice {
     pid_t pid;
-    const char *args[] = {"killall", "-9", "backboardd", NULL};
     
-    // 优先尝试无根越狱环境路径
-    int status = posix_spawn(&pid, "/var/jb/usr/bin/killall", NULL, NULL, (char *const *)args, environ);
-    if (status != 0) {
-        // 如果无根环境执行失败，再尝试有根环境绝对路径
-        posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, environ);
+    NSString *killallPath = @"/usr/bin/killall";
+#if __has_include(<roothide.h>)
+    killallPath = jbroot(killallPath);
+#else
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
+        killallPath = @"/var/jb/usr/bin/killall";
+    }
+#endif
+
+    const char *args[] = {"killall", "-9", "backboardd", NULL};
+    if (posix_spawn(&pid, [killallPath UTF8String], NULL, NULL, (char *const *)args, environ) != 0) {
+        
+        // 如果 killall 执行失败，兜底调用 sbreload 软注销
+        NSString *sbreloadPath = @"/usr/bin/sbreload";
+#if __has_include(<roothide.h>)
+        sbreloadPath = jbroot(sbreloadPath);
+#else
+        if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/sbreload"]) {
+            sbreloadPath = @"/var/jb/usr/bin/sbreload";
+        }
+#endif
+        const char *args2[] = {"sbreload", NULL};
+        posix_spawn(&pid, [sbreloadPath UTF8String], NULL, NULL, (char *const *)args2, environ);
     }
 }
 
@@ -437,10 +454,10 @@ static NSString * GetPrefsPlistPath() {
         lowPowerSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:lowPowerSpec];
         
-        PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面使用同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [sameMatSpec setProperty:@"SameVideoMaterial" forKey:@"key"];
         [sameMatSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-        sameMatSpec->action = @selector(setSameMaterialValue:specifier:); // 劫持 Setter，方便点击立刻刷新UI
+        sameMatSpec->action = @selector(setSameMaterialValue:specifier:); // 劫持 Setter，方便点击立刻清空打勾并刷新UI
         [_specifiers addObject:sameMatSpec];
         
         
@@ -542,9 +559,29 @@ static NSString * GetPrefsPlistPath() {
 // ==================== 视频壁纸专属逻辑 ====================
 // =======================================================
 
-// 自定义 Setter：改变“同素材”开关时强制刷新打勾状态
+// 【修复需求】自定义 Setter：开启同素材时，清空之前所有的打勾标记并刷新UI
 - (void)setSameMaterialValue:(id)value specifier:(PSSpecifier *)specifier {
     [self setPreferenceValue:value specifier:specifier];
+    
+    BOOL isOn = [value boolValue];
+    if (isOn) {
+        NSString *plistPath = GetPrefsPlistPath();
+        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+        
+        // 瞬间清空已选视频
+        [prefs removeObjectForKey:@"LockVideoPath"];
+        [prefs removeObjectForKey:@"HomeVideoPath"];
+        
+        CFPreferencesSetAppValue(CFSTR("LockVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+        CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+        
+        [prefs writeToFile:plistPath atomically:YES];
+        [self forceOwnershipToMobile:plistPath];
+        
+        CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    }
+    
     [self reloadSpecifiers]; // 刷新UI重算打勾逻辑
 }
 
@@ -770,7 +807,7 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 【修复需求2】：拦截 Cell 的渲染过程，使用系统原生的蓝色选中打勾视觉
+// 拦截 Cell 的渲染过程，使用系统原生的蓝色选中打勾视觉
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
     PSSpecifier *spec = [(id)cell specifier];
@@ -879,8 +916,6 @@ static NSString * GetPrefsPlistPath() {
             resBtn.tag = 777;
             [accView addSubview:resBtn];
             
-            // 如果选中了，需要把打勾图标和这个自定义视图融合（原生做不到，我们这里使用保留按钮覆盖策略）
-            // 简单处理：放弃右侧打勾，因为自定义 accessoryView 会覆盖它。我们在名字上做颜色区分。
             cell.accessoryView = accView;
         } else {
             sizeLabel = [accView viewWithTag:888];
