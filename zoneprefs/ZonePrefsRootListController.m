@@ -584,7 +584,7 @@ static NSString * GetPrefsPlistPath() {
     
     if (self.isVideoMode) {
         PSSpecifier *g1 = [PSSpecifier emptyGroupSpecifier];
-        [g1 setProperty:@"开启启用插件开关应用全局，视频模式下交互壁纸将自动休眠并彻底释放内存。\n开启锁屏桌面使用同素材时需在锁屏/壁纸素材内选择一个。" forKey:@"footerText"];
+        [g1 setProperty:@"开启启用插件开关应用全局，视频模式下交互壁纸将自动休眠并彻底释放内存。\n开启锁屏桌面使用同素材时需在锁屏/壁纸素材内重新选择一个。" forKey:@"footerText"];
         [_specifiers addObject:g1];
         
         PSSpecifier *enableSpec = [PSSpecifier preferenceSpecifierNamed:@"启用插件" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
@@ -666,7 +666,7 @@ static NSString * GetPrefsPlistPath() {
         NSArray *rootSpecs = [self loadSpecifiersFromPlistName:@"Root" target:self];
         [_specifiers addObjectsFromArray:rootSpecs];
         
-        PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸(如果遇到设置壁纸不正常右上角注销尝试)" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
         [group setProperty:@"点击切换壁纸，向左滑动可删除不需要的壁纸以及重命名。\n点击对应壁纸旁边的按钮可设置每帧重绘降采样的程度(原画/70%/50%/25%)，以节约电量以及降低占用。" forKey:@"footerText"];
         [_specifiers addObject:group];
         
@@ -807,7 +807,7 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (void)processVideoURL:(NSURL *)url target:(NSInteger)target {
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在搬运素材..." message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.center = CGPointMake(215.0, 31.0);
     [spinner startAnimating];
@@ -1290,13 +1290,13 @@ static NSString * GetPrefsPlistPath() {
             double finalMB = [firstOversized[@"size"] doubleValue];
             NSString *wpName = [path lastPathComponent];
             
-            NSString *msg = [NSString stringWithFormat:@"壁纸「%@」解压/优化后仍大于40MB (约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或内存激增卡死设备。\n是否删除该危险壁纸？", wpName, finalMB];
+            NSString *msg = [NSString stringWithFormat:@"壁纸「%@」大于40MB (约 %.1f MB)。\n导入后使用可能导致滑动卡顿或内存爆增卡死设备。\n删除该壁纸？", wpName, finalMB];
             
             if (oversizedPaths.count > 1) {
                 msg = [NSString stringWithFormat:@"检测到 %lu 个壁纸解压后大于40MB (例如「%@」约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或卡死。\n是否删除这些危险壁纸？", (unsigned long)oversizedPaths.count, wpName, finalMB];
             }
             
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"大文件警报"
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件"
                                                                            message:msg
                                                                     preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"不删除" style:UIAlertActionStyleCancel handler:nil]];
@@ -1386,7 +1386,7 @@ static NSString * GetPrefsPlistPath() {
 
 // 包含了深层防御以及批处理递归拆解的终极导入总入口
 - (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls skipPostCheck:(BOOL)skipPostCheck {
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入与解压..." message:nil preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.center = CGPointMake(205.0, 31.0);
     [spinner startAnimating];
