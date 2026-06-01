@@ -338,6 +338,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.clipsToBounds = YES;
         self.currentPath = path;
 
+        @try {
+            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
+                                             withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                                   error:nil];
+            [[AVAudioSession sharedInstance] setActive:YES error:nil];
+        } @catch (NSException *e) {}
+
         if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
             NSURL *url = [NSURL fileURLWithPath:path];
             // 关闭精准时序，全面拥抱硬件解码提速
