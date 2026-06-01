@@ -868,9 +868,9 @@ static NSString * GetPrefsPlistPath() {
     [self reloadSpecifiers];
 }
 
-// =======================================================
+// =======================================
 // =============== 原版交互壁纸辅助保留逻辑 ===============
-// =======================================================
+// =======================================
 - (void)showEnhancedEngineInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启增强引擎将提升识别复杂交互壁纸能力以及适配壁纸暗黑模式适配等。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
@@ -1095,7 +1095,7 @@ static NSString * GetPrefsPlistPath() {
                 clearBtn.translatesAutoresizingMaskIntoConstraints = NO;
                 [NSLayoutConstraint activateConstraints:@[
                     [clearBtn.trailingAnchor constraintEqualToAnchor:header.contentView.trailingAnchor constant:-16],
-                    [clearBtn.centerYAnchor constraintEqualToAnchor:header.textLabel.centerYAnchor]
+                    [clearBtn.centerYAnchor constraintEqualToAnchor:header.contentView.centerYAnchor]
                 ]];
             }
         }
