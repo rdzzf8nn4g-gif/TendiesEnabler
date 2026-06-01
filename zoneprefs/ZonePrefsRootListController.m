@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <zlib.h> 
 
 extern char **environ;
 
@@ -17,9 +18,122 @@ extern char **environ;
 #define jbroot(path) path
 #endif
 
-// --------------------------------------------------------
-// 工业级解压引擎：直接调用底层 posix_spawn，防卡顿防泄漏
-// --------------------------------------------------------
+// ========================================================
+// 引擎 1：微型工业级原生解压引擎 (纯手写、防泄漏、零内存激增)
+// ========================================================
+static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
+    FILE *fp = fopen([source UTF8String], "rb");
+    if (!fp) return NO;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:nil error:nil];
+
+    unsigned char sig[4];
+    while (fread(sig, 1, 4, fp) == 4) {
+        if (sig[0] != 0x50 || sig[1] != 0x4B || sig[2] != 0x03 || sig[3] != 0x04) break; 
+
+        unsigned char header[26];
+        if (fread(header, 1, 26, fp) != 26) { fclose(fp); return NO; }
+
+        uint16_t flags = header[2] | (header[3] << 8);
+        uint16_t method = header[4] | (header[5] << 8);
+        uint32_t compSize = header[14] | (header[15] << 8) | (header[16] << 16) | (header[17] << 24);
+        uint16_t nameLen = header[22] | (header[23] << 8);
+        uint16_t extraLen = header[24] | (header[25] << 8);
+
+        if ((flags & 0x01) || (flags & 0x08) || compSize == 0xFFFFFFFF) {
+            fclose(fp); return NO; 
+        }
+
+        char name[nameLen + 1];
+        if (fread(name, 1, nameLen, fp) != nameLen) { fclose(fp); return NO; }
+        name[nameLen] = '\0';
+
+        if (extraLen > 0) fseek(fp, extraLen, SEEK_CUR);
+
+        NSString *fileName = [NSString stringWithUTF8String:name];
+        if (!fileName) { fclose(fp); return NO; }
+        
+        if ([fileName containsString:@"../"]) {
+            fseek(fp, compSize, SEEK_CUR);
+            continue;
+        }
+
+        NSString *outPath = [destination stringByAppendingPathComponent:fileName];
+
+        if ([fileName hasSuffix:@"/"]) {
+            [fm createDirectoryAtPath:outPath withIntermediateDirectories:YES attributes:nil error:nil];
+        } else {
+            [fm createDirectoryAtPath:[outPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+
+            if (method == 0) {
+                FILE *outFp = fopen([outPath UTF8String], "wb");
+                if (!outFp) { fclose(fp); return NO; }
+                char buf[32768];
+                uint32_t left = compSize;
+                while (left > 0) {
+                    size_t toRead = left < sizeof(buf) ? left : sizeof(buf);
+                    size_t r = fread(buf, 1, toRead, fp);
+                    if (r == 0) break;
+                    fwrite(buf, 1, r, outFp);
+                    left -= r;
+                }
+                fclose(outFp);
+            } else if (method == 8) {
+                FILE *outFp = fopen([outPath UTF8String], "wb");
+                if (!outFp) { fclose(fp); return NO; }
+
+                z_stream strm;
+                strm.zalloc = Z_NULL;
+                strm.zfree = Z_NULL;
+                strm.opaque = Z_NULL;
+                strm.avail_in = 0;
+                strm.next_in = Z_NULL;
+
+                if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) {
+                    fclose(outFp); fclose(fp); return NO;
+                }
+
+                unsigned char inBuf[32768];
+                unsigned char outBuf[32768];
+                uint32_t left = compSize;
+                int ret = Z_OK;
+
+                do {
+                    size_t toRead = left < sizeof(inBuf) ? left : sizeof(inBuf);
+                    if (toRead == 0) break;
+                    size_t r = fread(inBuf, 1, toRead, fp);
+                    if (r == 0) break;
+                    strm.avail_in = (uInt)r;
+                    strm.next_in = inBuf;
+                    left -= r;
+
+                    do {
+                        strm.avail_out = sizeof(outBuf);
+                        strm.next_out = outBuf;
+                        ret = inflate(&strm, Z_NO_FLUSH);
+                        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+                            inflateEnd(&strm); fclose(outFp); fclose(fp); return NO;
+                        }
+                        unsigned have = sizeof(outBuf) - strm.avail_out;
+                        if (have > 0) fwrite(outBuf, 1, have, outFp);
+                    } while (strm.avail_out == 0);
+                } while (ret != Z_STREAM_END && left > 0);
+
+                inflateEnd(&strm);
+                fclose(outFp);
+            } else {
+                fclose(fp); return NO;
+            }
+        }
+    }
+    fclose(fp);
+    return YES;
+}
+
+// ========================================================
+// 引擎 2：原有兜底解压引擎 (posix_spawn 调用系统解压)
+// ========================================================
 static BOOL industrialUnzip(NSString *source, NSString *destination) {
     pid_t pid;
     int status;
@@ -43,9 +157,8 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
 }
 
 // ========================================================
-// 内存守护系统：目录测算与底层 ImageIO 智能图像降维 (防漏/防热)
+// 内存守护系统：目录测算与底层 ImageIO 智能图像降维 
 // ========================================================
-
 static unsigned long long getDirectorySize(NSString *folderPath) {
     unsigned long long fileSize = 0;
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -167,7 +280,7 @@ static void optimizeZoneFolderIfNecessary(NSString *unzipDir) {
 }
 
 // --------------------------------------------------------
-// 路径管理与权限守护 (增加隔离与智能迁移逻辑)
+// 路径管理与权限守护
 // --------------------------------------------------------
 static NSString * GetZoneStorageDir() {
     NSString *base = @"/var/mobile/Library/Preferences/com.iosdump.zone.media";
@@ -193,7 +306,6 @@ static NSString * GetVideoWallpapersHomeDir() {
     return [GetZoneStorageDir() stringByAppendingPathComponent:@"VideoWallpapers/Home"];
 }
 
-// 智能迁移与创建独立文件夹
 static void EnsureVideoDirectoriesExist() {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *baseVideoDir = [GetZoneStorageDir() stringByAppendingPathComponent:@"VideoWallpapers"];
@@ -202,7 +314,6 @@ static void EnsureVideoDirectoriesExist() {
     
     if (![fm fileExistsAtPath:lockDir]) {
         [fm createDirectoryAtPath:lockDir withIntermediateDirectories:YES attributes:nil error:nil];
-        // 兼容老版本的数据迁移
         NSArray *contents = [fm contentsOfDirectoryAtPath:baseVideoDir error:nil];
         for (NSString *item in contents) {
             if ([item isEqualToString:@"Lock"] || [item isEqualToString:@"Home"]) continue;
@@ -230,11 +341,9 @@ static NSString * GetPrefsPlistPath() {
 #endif
 }
 
-
-// 为视频模式和转场创建 Class Extension
-@interface ZonePrefsRootListController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@interface ZonePrefsRootListController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, assign) BOOL isVideoMode;
-@property (nonatomic, assign) NSInteger currentVideoTarget; // 1: 锁屏, 2: 桌面
+@property (nonatomic, assign) NSInteger currentVideoTarget;
 @end
 
 @implementation ZonePrefsRootListController
@@ -248,7 +357,6 @@ static NSString * GetPrefsPlistPath() {
         NSString *plistPath = GetPrefsPlistPath();
         NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
         _isVideoMode = [prefs[@"VideoModeEnabled"] boolValue];
-        // 保证隔离目录正常生成并防御老数据丢失
         EnsureVideoDirectoriesExist();
     }
     return self;
@@ -256,12 +364,10 @@ static NSString * GetPrefsPlistPath() {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    
     [self updateRightMenu];
     [self setupHeaderView];
 }
 
-// 【修改点 1】：动态化头部图标加载逻辑，完美适配多路径越狱下的 icon1 图标切换
 - (void)setupHeaderView {
     UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -269,10 +375,8 @@ static NSString * GetPrefsPlistPath() {
     UIImageView *iconView = [[UIImageView alloc] init];
     NSBundle *bundle = [NSBundle bundleForClass:[self class]];
     
-    // 根据当前是否为视频模式，动态流控选择对应的图标基础名称
     NSString *targetIconName = self.isVideoMode ? @"icon1" : @"icon";
     
-    // 使用 NSBundle 原生 API 动态加载，系统会自动在 Bundle 根目录下适配 @2x / @3x
     UIImage *icon = [UIImage imageNamed:targetIconName inBundle:bundle compatibleWithTraitCollection:nil];
     if (!icon) {
         icon = [UIImage imageNamed:[NSString stringWithFormat:@"%@@3x", targetIconName] inBundle:bundle compatibleWithTraitCollection:nil];
@@ -385,7 +489,6 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:menu animated:YES completion:nil];
 }
 
-// 【修改点 2】：在执行平滑模式转换时，同步触发刷新 Header 视图，使图标跟随机件转场动画一起更新
 - (void)executeSmoothModeTransition {
     self.isVideoMode = !self.isVideoMode;
     
@@ -401,7 +504,7 @@ static NSString * GetPrefsPlistPath() {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
     [self updateRightMenu];
-    [self setupHeaderView]; // 重建并重载带有新 icon1 图标的头部视图
+    [self setupHeaderView]; 
     
     if ([self respondsToSelector:@selector(table)]) {
         UITableView *tableView = [self performSelector:@selector(table)];
@@ -416,7 +519,6 @@ static NSString * GetPrefsPlistPath() {
     [self reloadSpecifiers];
 }
 
-// 最强全系统兼容原生级注销 (双重保险机制)
 - (void)respringDevice {
     pid_t pid;
     
@@ -432,7 +534,6 @@ static NSString * GetPrefsPlistPath() {
     const char *args[] = {"killall", "-9", "backboardd", NULL};
     if (posix_spawn(&pid, [killallPath UTF8String], NULL, NULL, (char *const *)args, environ) != 0) {
         
-        // 如果 killall 执行失败，兜底调用 sbreload 软注销
         NSString *sbreloadPath = @"/usr/bin/sbreload";
 #if __has_include(<roothide.h>)
         sbreloadPath = jbroot(sbreloadPath);
@@ -446,9 +547,8 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-
 // =======================================
-// 动态双重 Specifiers 渲染核心 (完全解耦)
+// 动态双重 Specifiers 渲染核心 
 // =======================================
 - (NSMutableArray *)specifiers {
     if (!_specifiers) {
@@ -458,20 +558,16 @@ static NSString * GetPrefsPlistPath() {
     }
     
     if (self.isVideoMode) {
-        // ==========================================
-        // 🎬 视频壁纸模式纯代码 UI 构建 (完全独立)
-        // ==========================================
-        
         PSSpecifier *g1 = [PSSpecifier emptyGroupSpecifier];
         [g1 setProperty:@"开启启用插件开关应用全局，视频模式下交互壁纸将自动休眠并彻底释放内存。\n开启锁屏桌面使用同素材时需在锁屏/壁纸素材内选择一个。" forKey:@"footerText"];
         [_specifiers addObject:g1];
         
         PSSpecifier *enableSpec = [PSSpecifier preferenceSpecifierNamed:@"启用插件" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
-[enableSpec setProperty:@"Enabled" forKey:@"key"];
-[enableSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-[enableSpec setProperty:@NO forKey:@"default"]; // 新增这一行，强制默认状态为关闭
-enableSpec->action = @selector(setPreferenceValue:specifier:);
-[_specifiers addObject:enableSpec];
+        [enableSpec setProperty:@"Enabled" forKey:@"key"];
+        [enableSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+        [enableSpec setProperty:@NO forKey:@"default"];
+        enableSpec->action = @selector(setPreferenceValue:specifier:);
+        [_specifiers addObject:enableSpec];
         
         PSSpecifier *lowPowerSpec = [PSSpecifier preferenceSpecifierNamed:@"低电模式暂停" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [lowPowerSpec setProperty:@"LowPowerPause" forKey:@"key"];
@@ -482,9 +578,8 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
         PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面使用同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [sameMatSpec setProperty:@"SameVideoMaterial" forKey:@"key"];
         [sameMatSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-        sameMatSpec->action = @selector(setSameMaterialValue:specifier:); // 劫持 Setter，方便点击立刻清空打勾并刷新UI
+        sameMatSpec->action = @selector(setSameMaterialValue:specifier:); 
         [_specifiers addObject:sameMatSpec];
-        
         
         NSFileManager *fm = [NSFileManager defaultManager];
         
@@ -506,7 +601,7 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
             PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
             spec->action = @selector(selectVideoWallpaper:);
             [spec setProperty:name forKey:@"VideoName"];
-            [spec setProperty:@1 forKey:@"VideoTarget"]; // 标记目标是锁屏
+            [spec setProperty:@1 forKey:@"VideoTarget"]; 
             [spec setProperty:@YES forKey:@"IsVideoCell"]; 
             [_specifiers addObject:spec];
         }
@@ -529,7 +624,7 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
             PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
             spec->action = @selector(selectVideoWallpaper:);
             [spec setProperty:name forKey:@"VideoName"];
-            [spec setProperty:@2 forKey:@"VideoTarget"]; // 标记目标是桌面
+            [spec setProperty:@2 forKey:@"VideoTarget"]; 
             [spec setProperty:@YES forKey:@"IsVideoCell"]; 
             [_specifiers addObject:spec];
         }
@@ -543,10 +638,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:btnFilza];
         
     } else {
-        // ==========================================
-        // 🕹️ 原版交互壁纸模式 (读取 Root.plist)
-        // ==========================================
-        
         NSArray *rootSpecs = [self loadSpecifiersFromPlistName:@"Root" target:self];
         [_specifiers addObjectsFromArray:rootSpecs];
         
@@ -579,12 +670,9 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     return _specifiers;
 }
 
-
 // =======================================================
 // ==================== 视频壁纸专属逻辑 ====================
 // =======================================================
-
-// 自定义 Setter：开启同素材时，清空之前所有的打勾标记并刷新UI
 - (void)setSameMaterialValue:(id)value specifier:(PSSpecifier *)specifier {
     [self setPreferenceValue:value specifier:specifier];
     
@@ -593,7 +681,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
         NSString *plistPath = GetPrefsPlistPath();
         NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
         
-        // 瞬间清空已选视频
         [prefs removeObjectForKey:@"LockVideoPath"];
         [prefs removeObjectForKey:@"HomeVideoPath"];
         
@@ -606,11 +693,9 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
         CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     }
-    
-    [self reloadSpecifiers]; // 刷新UI重算打勾逻辑
+    [self reloadSpecifiers];
 }
 
-// 【二合一导入菜单】
 - (void)importLockMaterial {
     self.currentVideoTarget = 1;
     [self showVideoImportMenu];
@@ -641,7 +726,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     [topVC presentViewController:menu animated:YES completion:nil];
 }
 
-// 相册导入核心
 - (void)presentVideoPickerFromSource:(UIImagePickerControllerSourceType)source {
     if (![UIImagePickerController isSourceTypeAvailable:source]) return;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
@@ -655,7 +739,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     [topVC presentViewController:picker animated:YES completion:nil];
 }
 
-// 文件导入核心 
 - (void)presentDocumentPickerForVideo {
     if (@available(iOS 14.0, *)) {
         UTType *movieType = [UTType typeWithIdentifier:@"public.movie"];
@@ -670,7 +753,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     }
 }
 
-// 相册回调
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info {
     NSURL *videoURL = info[UIImagePickerControllerMediaURL];
     [picker dismissViewControllerAnimated:YES completion:^{
@@ -681,7 +763,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     [picker dismissViewControllerAnimated:YES completion:nil];
 }
 
-// 将挑选好的视频无损搬运到对应路径下 (绝对零压缩)
 - (void)processVideoURL:(NSURL *)url target:(NSInteger)target {
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在搬运素材..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
@@ -697,10 +778,8 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
             BOOL isAccessing = [url startAccessingSecurityScopedResource];
             NSFileManager *fm = [NSFileManager defaultManager];
             
-            // 【精确分流】获取对应存储目录
             NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
             
-            // 智能防覆盖命名 logic
             NSString *originalName = [url lastPathComponent];
             NSString *baseName = [originalName stringByDeletingPathExtension];
             NSString *ext = [originalName pathExtension];
@@ -713,7 +792,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
             NSString *destPath = [videoDir stringByAppendingPathComponent:fileName];
             
             NSError *err = nil;
-            // 完全零损耗的底层文件 Copy，保障 4K 画质绝不被压缩
             [fm copyItemAtPath:url.path toPath:destPath error:&err];
             
             if (isAccessing) [url stopAccessingSecurityScopedResource];
@@ -734,10 +812,9 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     }];
 }
 
-// 视频列表点击事件 (精准命中目标区域与处理同素材同步逻辑)
 - (void)selectVideoWallpaper:(PSSpecifier *)spec {
     NSString *name = [spec propertyForKey:@"VideoName"];
-    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; // 1=锁屏, 2=桌面
+    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; 
     if (!name) return;
     
     NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
@@ -745,7 +822,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     [self applyVideoPath:fullPath toTarget:target];
 }
 
-// 全局底层应用视频核心
 - (void)applyVideoPath:(NSString *)path toTarget:(NSInteger)target {
     NSString *plistPath = GetPrefsPlistPath();
     NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
@@ -753,13 +829,11 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     BOOL isSameMaterialOn = [prefs[@"SameVideoMaterial"] boolValue];
     
     if (isSameMaterialOn) {
-        // 同素材模式下，点击任何一个，统统强制写死到双通道
         prefs[@"LockVideoPath"] = path;
         prefs[@"HomeVideoPath"] = path;
         CFPreferencesSetAppValue(CFSTR("LockVideoPath"), (__bridge CFStringRef)path, CFSTR("com.iosdump.zoneprefs"));
         CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), (__bridge CFStringRef)path, CFSTR("com.iosdump.zoneprefs"));
     } else {
-        // 独立模式，老老实实写自己
         if (target == 1) {
             prefs[@"LockVideoPath"] = path;
             CFPreferencesSetAppValue(CFSTR("LockVideoPath"), (__bridge CFStringRef)path, CFSTR("com.iosdump.zoneprefs"));
@@ -776,11 +850,9 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     [self reloadSpecifiers];
 }
 
-
 // =======================================================
 // =============== 原版交互壁纸辅助保留逻辑 ===============
 // =======================================================
-
 - (void)showEnhancedEngineInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启增强引擎将提升识别复杂交互壁纸能力以及适配壁纸暗黑模式适配等。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
@@ -832,13 +904,12 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     }
 }
 
-// 拦截 Cell 的渲染过程，使用系统原生的蓝色选中打勾视觉
+// 【修改点3】完全重构原生打勾为蓝色实心圆圈打勾视觉
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
     PSSpecifier *spec = [(id)cell specifier];
     NSString *specKey = [spec propertyForKey:@"key"];
     
-    // ======== 视频壁纸专门的打勾渲染机制 ========
     if ([[spec propertyForKey:@"IsVideoCell"] boolValue]) {
         NSString *name = [spec propertyForKey:@"VideoName"];
         NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue];
@@ -859,20 +930,22 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
         }
 
         if (isChecked) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+            UIImageView *cm = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
+            cm.tintColor = [UIColor systemBlueColor];
+            [cm sizeToFit];
+            cell.accessoryView = cm;
             cell.textLabel.textColor = [UIColor systemBlueColor];
         } else {
-            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = nil;
             cell.textLabel.textColor = [UIColor labelColor];
         }
         
-        // 隐藏不需要的 detail 文字区域
         cell.detailTextLabel.hidden = YES;
         cell.detailTextLabel.text = @"";
         return cell;
     }
     
-    if (self.isVideoMode) return cell; // 屏蔽后续交互模式UI注入
+    if (self.isVideoMode) return cell; 
     
     if ([specKey isEqualToString:@"EnhancedEngine"]) {
         UIButton *existingBtn = [cell.contentView viewWithTag:881];
@@ -898,7 +971,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
         }
     }
     
-    // 交互模式打勾
     if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         NSString *name = [spec propertyForKey:@"WallpaperName"];
@@ -908,20 +980,23 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
         NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
         NSString *currentPath = prefs[@"ZonePath"];
         
-        if ([currentPath isEqualToString:fullWpPath]) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+        BOOL isSelected = [currentPath isEqualToString:fullWpPath];
+        
+        if (isSelected) {
             cell.textLabel.textColor = [UIColor systemBlueColor];
         } else {
-            cell.accessoryType = UITableViewCellAccessoryNone;
             cell.textLabel.textColor = [UIColor labelColor];
         }
         
         UIView *accView = cell.accessoryView;
         UIButton *resBtn = nil;
         UILabel *sizeLabel = nil;
+        UIImageView *checkMark = nil;
         
-        if (![accView isKindOfClass:[UIView class]] || accView.frame.size.width != 115) {
-            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 115, 30)];
+        // 【修改点3】完美注入蓝色实心打勾圆圈视觉
+        if (![accView isKindOfClass:[UIView class]] || accView.tag != 999) {
+            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 140, 30)];
+            accView.tag = 999;
             
             sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 65, 30)];
             sizeLabel.font = [UIFont systemFontOfSize:14];
@@ -931,7 +1006,7 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
             [accView addSubview:sizeLabel];
             
             resBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-            resBtn.frame = CGRectMake(72, 1, 40, 28);
+            resBtn.frame = CGRectMake(70, 1, 40, 28);
             resBtn.layer.cornerRadius = 14;
             resBtn.layer.borderWidth = 1;
             resBtn.layer.borderColor = [UIColor systemBlueColor].CGColor;
@@ -941,11 +1016,20 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
             resBtn.tag = 777;
             [accView addSubview:resBtn];
             
+            checkMark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
+            checkMark.frame = CGRectMake(115, 5, 20, 20);
+            checkMark.tintColor = [UIColor systemBlueColor];
+            checkMark.tag = 666;
+            [accView addSubview:checkMark];
+            
             cell.accessoryView = accView;
         } else {
             sizeLabel = [accView viewWithTag:888];
             resBtn = [accView viewWithTag:777];
+            checkMark = [accView viewWithTag:666];
         }
+        
+        checkMark.hidden = !isSelected;
         
         double sizeMB = getDirectorySize(fullWpPath) / (1024.0 * 1024.0);
         sizeLabel.text = [NSString stringWithFormat:@"%.1f MB", sizeMB];
@@ -976,9 +1060,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     return UITableViewStyleGrouped;
 }
 
-// ----------------------------------------------------
-// 交互壁纸专属 Document 导入代理拦截
-// ----------------------------------------------------
 - (void)importZone:(PSSpecifier *)spec {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (@available(iOS 14.0, *)) {
@@ -997,50 +1078,59 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     });
 }
 
-// 统一的 UIDocumentPickerDelegate 回调 (根据模式自动分流)
+// ==========================================================
+// 全新文档导入回调：包含 ZIP 绕过预检、批处理解压拆分、40MB延迟查杀
+// ==========================================================
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
 
     if (self.isVideoMode) {
-        // 分流：视频处理
         [self processVideoURL:urls.firstObject target:self.currentVideoTarget];
         return;
     }
     
-    // 分流：交互壁纸压缩包处理
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         unsigned long long totalSizeBytes = 0;
         NSFileManager *fm = [NSFileManager defaultManager];
+        BOOL containsZip = NO;
+        
         for (NSURL *url in urls) {
-            BOOL isAccessing = [url startAccessingSecurityScopedResource];
-            BOOL isDir = NO;
-            if ([fm fileExistsAtPath:url.path isDirectory:&isDir]) {
-                if (isDir) {
-                    totalSizeBytes += getDirectorySize(url.path);
-                } else {
-                    totalSizeBytes += [[fm attributesOfItemAtPath:url.path error:nil] fileSize];
+            NSString *ext = [[url pathExtension] lowercaseString];
+            // 【修改点1】将 tendies 同样视作压缩包跳过预检大小
+            if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
+                containsZip = YES;
+            } else {
+                BOOL isAccessing = [url startAccessingSecurityScopedResource];
+                BOOL isDir = NO;
+                if ([fm fileExistsAtPath:url.path isDirectory:&isDir]) {
+                    if (isDir) {
+                        totalSizeBytes += getDirectorySize(url.path);
+                    } else {
+                        totalSizeBytes += [[fm attributesOfItemAtPath:url.path error:nil] fileSize];
+                    }
                 }
+                if (isAccessing) [url stopAccessingSecurityScopedResource];
             }
-            if (isAccessing) [url stopAccessingSecurityScopedResource];
         }
 
         double totalMB = totalSizeBytes / (1024.0 * 1024.0);
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (totalMB > 40.0) {
+            // 【修改点2】只要不是ZIP或Tendies，如果预检 > 40M 弹出了窗，向下传递 skipPostCheck 信号
+            if (!containsZip && totalMB > 40.0) {
                 UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
                                                                                message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时、卡顿甚至卡死。\n是否继续导入？", totalMB] 
                                                                         preferredStyle:UIAlertControllerStyleAlert];
                 [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
                 [alert addAction:[UIAlertAction actionWithTitle:@"继续导入" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-                    [self proceedWithImportingURLs:urls];
+                    [self proceedWithImportingURLs:urls skipPostCheck:YES];
                 }]];
                 
                 UIViewController *topVC = self.view.window.rootViewController ?: self;
                 while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
                 [topVC presentViewController:alert animated:YES completion:nil];
             } else {
-                [self proceedWithImportingURLs:urls];
+                [self proceedWithImportingURLs:urls skipPostCheck:NO];
             }
         });
     });
@@ -1059,8 +1149,156 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     }
 }
 
-- (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls {
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
+// ==========================================================
+// 二级危险文件延迟检测模块：根据传回信号进行静默或彻底查杀
+// ==========================================================
+- (void)checkPostImportSizeForPaths:(NSArray *)importedPaths {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        NSMutableArray *oversizedPaths = [NSMutableArray array];
+        for (NSString *path in importedPaths) {
+            double finalMB = getDirectorySize(path) / (1024.0 * 1024.0);
+            if (finalMB > 40.0) {
+                [oversizedPaths addObject:@{@"path": path, @"size": @(finalMB)}];
+            }
+        }
+        
+        if (oversizedPaths.count > 0) {
+            NSDictionary *firstOversized = oversizedPaths.firstObject;
+            NSString *path = firstOversized[@"path"];
+            double finalMB = [firstOversized[@"size"] doubleValue];
+            NSString *wpName = [path lastPathComponent];
+            
+            NSString *msg = [NSString stringWithFormat:@"壁纸「%@」解压/优化后仍大于40MB (约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或内存激增卡死设备。\n是否删除该危险壁纸？", wpName, finalMB];
+            
+            if (oversizedPaths.count > 1) {
+                msg = [NSString stringWithFormat:@"检测到 %lu 个壁纸解压后大于40MB (例如「%@」约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或卡死。\n是否删除这些危险壁纸？", (unsigned long)oversizedPaths.count, wpName, finalMB];
+            }
+            
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"大文件警报"
+                                                                           message:msg
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"不删除" style:UIAlertActionStyleCancel handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+                for (NSDictionary *info in oversizedPaths) {
+                    [[NSFileManager defaultManager] removeItemAtPath:info[@"path"] error:nil];
+                }
+                [self reloadSpecifiers];
+            }]];
+            
+            UIViewController *topVC = self.view.window.rootViewController ?: self;
+            while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+            [topVC presentViewController:alert animated:YES completion:nil];
+        }
+    });
+}
+
+// 【修改点1】核心递归解析系统：防嵌套、防同名、自动剔除外壳及 readme 等垃圾文件
+- (void)processImportedItemAtPath:(NSString *)path targetDir:(NSString *)wpDir newImportedPaths:(NSMutableArray *)newImportedPaths {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir]) return;
+
+    if (!isDir) {
+        NSString *ext = [[path pathExtension] lowercaseString];
+        // 如果遇到是 zip 或 tendies，果断视为压缩包拆解
+        if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
+            NSString *name = [[path lastPathComponent] stringByDeletingPathExtension];
+            NSString *tempExtractPath = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_ext", name]];
+            
+            [fm createDirectoryAtPath:tempExtractPath withIntermediateDirectories:YES attributes:nil error:nil];
+            
+            BOOL success = microIndustrialUnzip(path, tempExtractPath);
+            if (!success) success = industrialUnzip(path, tempExtractPath);
+            
+            if (success) {
+                [fm removeItemAtPath:path error:nil];
+                // 拆开后，递归调用自己，把里面的东西扒出来
+                [self processImportedItemAtPath:tempExtractPath targetDir:wpDir newImportedPaths:newImportedPaths];
+            } else {
+                [fm removeItemAtPath:tempExtractPath error:nil];
+            }
+        }
+        return;
+    }
+
+    NSArray *contents = [fm contentsOfDirectoryAtPath:path error:nil];
+    NSMutableArray *validItems = [NSMutableArray array];
+    for (NSString *item in contents) {
+        if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
+        [validItems addObject:item];
+    }
+
+    if (validItems.count == 0) {
+        [fm removeItemAtPath:path error:nil];
+        return;
+    }
+    
+    BOOL hasCA = NO;
+    BOOL hasArchive = NO;
+    BOOL hasNormalFile = NO;
+    
+    for (NSString *item in validItems) {
+        NSString *subPath = [path stringByAppendingPathComponent:item];
+        BOOL subIsDir = NO;
+        [fm fileExistsAtPath:subPath isDirectory:&subIsDir];
+        
+        NSString *ext = [[item pathExtension] lowercaseString];
+        
+        if (subIsDir) {
+            if ([ext isEqualToString:@"ca"]) hasCA = YES;
+        } else {
+            if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
+                hasArchive = YES;
+            } else {
+                hasNormalFile = YES;
+            }
+        }
+    }
+
+    // 智能分析这个文件夹究竟是一个“独立壁纸”还是一个包含多个对象的“包裹盒子”
+    BOOL isWallpaper = NO;
+    if (hasCA) {
+        isWallpaper = YES; 
+    } else if (hasArchive) {
+        isWallpaper = NO;  
+    } else if (hasNormalFile) {
+        isWallpaper = YES; 
+    } else {
+        isWallpaper = NO;  
+    }
+
+    if (isWallpaper) {
+        NSString *name = [path lastPathComponent];
+        // 去除上面我们临时赋予的 _ext 尾巴，恢复出完美、原生、无扩展名的壁纸名称
+        if ([name hasSuffix:@"_ext"]) {
+            name = [name substringToIndex:name.length - 4];
+        }
+        
+        NSString *finalDest = [wpDir stringByAppendingPathComponent:name];
+        
+        int counter = 1;
+        NSString *baseDest = finalDest;
+        while ([fm fileExistsAtPath:finalDest]) {
+            finalDest = [NSString stringWithFormat:@"%@_%d", baseDest, counter++];
+        }
+        
+        [fm moveItemAtPath:path toPath:finalDest error:nil];
+        optimizeZoneFolderIfNecessary(finalDest);
+        [newImportedPaths addObject:finalDest];
+    } else {
+        // 如果是包裹盒子，遍历扒开它里面的所有东西
+        for (NSString *item in validItems) {
+            NSString *subPath = [path stringByAppendingPathComponent:item];
+            [self processImportedItemAtPath:subPath targetDir:wpDir newImportedPaths:newImportedPaths];
+        }
+        // 被扒干净的包裹外壳自动抛弃
+        [fm removeItemAtPath:path error:nil];
+    }
+}
+
+// 包含了深层防御以及批处理递归拆解的终极导入总入口
+- (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls skipPostCheck:(BOOL)skipPostCheck {
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入与解压..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.center = CGPointMake(205.0, 31.0);
     [spinner startAnimating];
@@ -1078,44 +1316,39 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
                 [fm createDirectoryAtPath:wpDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
             }
             
-            BOOL anySuccess = NO;
+            NSString *tempWorkspace = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+            [fm createDirectoryAtPath:tempWorkspace withIntermediateDirectories:YES attributes:nil error:nil];
+            
+            NSMutableArray *newImportedPaths = [NSMutableArray array];
+            
             for (NSURL *sourceURL in urls) {
                 BOOL isAccessing = [sourceURL startAccessingSecurityScopedResource];
-                NSString *fileName = [[sourceURL lastPathComponent] stringByDeletingPathExtension];
-                NSString *unzipDir = [wpDir stringByAppendingPathComponent:fileName];
                 
-                [fm removeItemAtPath:unzipDir error:nil];
-                [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
+                NSString *fileName = [sourceURL lastPathComponent];
+                NSString *tempDest = [tempWorkspace stringByAppendingPathComponent:fileName];
                 
-                BOOL processSuccess = NO;
-                BOOL isDirectory = NO;
-                [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
-                
-                if (isDirectory) {
-                    NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
-                    processSuccess = YES;
-                    for (NSString *item in contents) {
-                        NSString *srcPath = [sourceURL.path stringByAppendingPathComponent:item];
-                        NSString *destPath = [unzipDir stringByAppendingPathComponent:item];
-                        if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
-                    }
-                } else {
-                    processSuccess = industrialUnzip(sourceURL.path, unzipDir);
-                }
-                
-                if (processSuccess) {
-                    optimizeZoneFolderIfNecessary(unzipDir);
-                    anySuccess = YES;
+                if ([fm copyItemAtPath:sourceURL.path toPath:tempDest error:nil]) {
+                    // 进入究极形态的递归拆分与解压分流模块
+                    [self processImportedItemAtPath:tempDest targetDir:wpDir newImportedPaths:newImportedPaths];
                 }
                 
                 if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             }
+            
+            // 清空打扫临时加工间
+            [fm removeItemAtPath:tempWorkspace error:nil];
+            
+            BOOL anySuccess = (newImportedPaths.count > 0);
             
             if (anySuccess) {
                 [self forceOwnershipToMobile:wpDir];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
                         [self reloadSpecifiers]; 
+                        // 根据预检结果拦截决定是否执行延迟查杀
+                        if (!skipPostCheck) {
+                            [self checkPostImportSizeForPaths:newImportedPaths];
+                        }
                     }];
                 });
             } else {
@@ -1152,7 +1385,6 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     [self reloadSpecifiers]; 
 }
 
-// 【终极合并：侧滑删除/重命名同时接管交互与视频双模式】
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (@available(iOS 11.0, *)) {
         PSSpecifier *spec = [self specifierAtIndexPath:indexPath];
@@ -1207,10 +1439,9 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     }
 }
 
-// 视频专属侧滑删除双路清理保护
 - (void)deleteVideoWithSpecifier:(PSSpecifier *)spec {
     NSString *name = [spec propertyForKey:@"VideoName"];
-    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; // 1=锁屏, 2=桌面
+    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; 
     if (name) {
         NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
         NSString *path = [videoDir stringByAppendingPathComponent:name];
@@ -1237,7 +1468,7 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
         }
         
-        [self reloadSpecifiers]; // 直接重载整个UI，因为同一个视频可能出现在锁屏和桌面两个分组里
+        [self reloadSpecifiers]; 
     }
 }
 
@@ -1284,9 +1515,8 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
     [topVC presentViewController:alert animated:YES completion:nil];
 }
 
-// 视频专属安全重命名 (自动接管两端数据)
 - (void)renameVideo:(NSString *)oldName specifier:(PSSpecifier *)spec {
-    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; // 1=锁屏, 2=桌面
+    NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue]; 
     
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名" message:@"请输入新的视频名称" preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -1333,7 +1563,7 @@ enableSpec->action = @selector(setPreferenceValue:specifier:);
 }
 
 - (void)openFilzaPath:(PSSpecifier *)spec {
-    NSString *targetDir = GetZoneStorageDir(); // 直接打开上一级，既能看到交互也能看到视频素材库
+    NSString *targetDir = GetZoneStorageDir(); 
     NSString *filzaURLString = [NSString stringWithFormat:@"filza://%@", targetDir];
     NSURL *filzaURL = [NSURL URLWithString:[filzaURLString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
     if ([[UIApplication sharedApplication] canOpenURL:filzaURL]) {
