@@ -446,6 +446,7 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
+// 【修改点：将清空壁纸功能移入右上角菜单】
 - (void)updateRightMenu {
     if (@available(iOS 14.0, *)) {
         NSString *switchTitle = self.isVideoMode ? @"切换为交互模式" : @"切换为视频模式";
@@ -464,7 +465,23 @@ static NSString * GetPrefsPlistPath() {
         }];
         respringAction.attributes = UIMenuElementAttributesDestructive;
         
-        UIMenu *menu = [UIMenu menuWithTitle:@"" children:@[switchAction, respringAction]];
+        NSMutableArray *menuItems = [NSMutableArray arrayWithObject:switchAction];
+        
+        // 如果处于交互模式，则在注销按钮上方加入清空壁纸选项
+        if (!self.isVideoMode) {
+            UIAction *clearAction = [UIAction actionWithTitle:@"清空壁纸" 
+                                                        image:[UIImage systemImageNamed:@"trash"] 
+                                                   identifier:nil 
+                                                      handler:^(__kindof UIAction * _Nonnull action) {
+                [self promptClearWallpapers];
+            }];
+            clearAction.attributes = UIMenuElementAttributesDestructive;
+            [menuItems addObject:clearAction];
+        }
+        
+        [menuItems addObject:respringAction];
+        
+        UIMenu *menu = [UIMenu menuWithTitle:@"" children:menuItems];
         UIBarButtonItem *menuBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:menu];
         self.navigationItem.rightBarButtonItem = menuBtn;
     } else {
@@ -473,12 +490,20 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
+// 【修改点：同步支持 iOS 14 以下的清空壁纸弹窗菜单】
 - (void)showZoneMenuFallback {
     UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"Zone 引擎控制台" message:@"选择你需要操作的模式与功能" preferredStyle:UIAlertControllerStyleActionSheet];
     NSString *switchTitle = self.isVideoMode ? @"切换为交互模式" : @"切换为视频模式";
     [menu addAction:[UIAlertAction actionWithTitle:switchTitle style:UIAlertActionStyleDefault handler:^(id action) {
         [self executeSmoothModeTransition];
     }]];
+    
+    if (!self.isVideoMode) {
+        [menu addAction:[UIAlertAction actionWithTitle:@"清空壁纸" style:UIAlertActionStyleDestructive handler:^(id action) {
+            [self promptClearWallpapers];
+        }]];
+    }
+    
     [menu addAction:[UIAlertAction actionWithTitle:@"注销 (Respring)" style:UIAlertActionStyleDestructive handler:^(id action) {
         [self respringDevice];
     }]];
@@ -1121,33 +1146,6 @@ static NSString * GetPrefsPlistPath() {
         return UITableViewStyleInsetGrouped;
     }
     return UITableViewStyleGrouped;
-}
-
-// 【彻底解决安全崩溃：锚定至 contentView 底部完美平齐文本】
-- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
-    if ([view isKindOfClass:[UITableViewHeaderFooterView class]]) {
-        UITableViewHeaderFooterView *header = (UITableViewHeaderFooterView *)view;
-        if ([header.textLabel.text isEqualToString:@"已导入的壁纸"]) {
-            UIButton *clearBtn = [header.contentView viewWithTag:9999];
-            if (!clearBtn) {
-                clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                clearBtn.tag = 9999;
-                [clearBtn setTitle:@"清空壁纸" forState:UIControlStateNormal];
-                // 字体大小视觉化继承原生分组标题
-                clearBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-                [clearBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-                [clearBtn addTarget:self action:@selector(promptClearWallpapers) forControlEvents:UIControlEventTouchUpInside];
-                [header.contentView addSubview:clearBtn];
-                
-                clearBtn.translatesAutoresizingMaskIntoConstraints = NO;
-                [NSLayoutConstraint activateConstraints:@[
-                    [clearBtn.trailingAnchor constraintEqualToAnchor:header.contentView.trailingAnchor constant:-16],
-                    // 使用底边距安全平齐，彻底避开私有文字组件，不再有 No Common Ancestor 崩溃
-                    [clearBtn.bottomAnchor constraintEqualToAnchor:header.contentView.bottomAnchor constant:-6]
-                ]];
-            }
-        }
-    }
 }
 
 - (void)promptClearWallpapers {
