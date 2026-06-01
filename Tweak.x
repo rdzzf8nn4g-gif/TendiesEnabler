@@ -970,11 +970,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         CGFloat b = [comps[2] doubleValue];
         CGFloat a = opacityStr ? [opacityStr doubleValue] : (comps.count >= 4 ? [comps[3] doubleValue] : 1.0);
         return [UIColor colorWithRed:r green:g blue:b alpha:a];
-    } else if (comps.count == 1 || comps.count == 2) {
-        // 核心修复：适配单灰度通道的色值定义，例如 <value type="CGColor" value="0"/>
-        CGFloat w = [comps[0] doubleValue];
-        CGFloat a = opacityStr ? [opacityStr doubleValue] : (comps.count >= 2 ? [comps[1] doubleValue] : 1.0);
-        return [UIColor colorWithWhite:w alpha:a];
     }
     return nil;
 }
@@ -999,12 +994,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (self.currentParsingState) [self.availableStates addObject:self.currentParsingState];
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
         self.currentParsingTargetId = attributeDict[@"targetId"];
-        NSString *kp = attributeDict[@"keyPath"];
-        // 核心升级：静默转换系统不支持的非标准 KVC 映射，如 transform.scale.xy
-        if ([kp isEqualToString:@"transform.scale.xy"]) {
-            kp = @"transform.scale";
-        }
-        self.currentParsingKeyPath = kp;
+        self.currentParsingKeyPath = attributeDict[@"keyPath"];
     } else if ([elementName isEqualToString:@"value"]) {
         if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
             NSString *valStr = attributeDict[@"value"];
@@ -1016,10 +1006,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     if (comps.count == 2) {
                         finalValue = [NSValue valueWithCGPoint:CGPointMake([comps[0] doubleValue], [comps[1] doubleValue])];
                     }
-                } else if ([typeStr isEqualToString:@"CGColor"]) {
-                    // 核心升级：深入支持 CGColor 解析，为后续色彩过渡平滑插值做准备
-                    UIColor *color = [self parseColorString:valStr opacity:nil];
-                    if (color) finalValue = color;
                 } else {
                     finalValue = @([valStr doubleValue]);
                 }
@@ -1235,35 +1221,16 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             if (lockVal && unlockVal) {
                 [layer removeAnimationForKey:keyPath];
-                @try {
-                    if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
-                        double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
-                        [layer setValue:@(currentVal) forKeyPath:keyPath];
-                    } 
-                    else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
-                        CGPoint lockPt = [lockVal CGPointValue];
-                        CGPoint unlockPt = [unlockVal CGPointValue];
-                        CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
-                                                        lockPt.y + (unlockPt.y - lockPt.y) * progress);
-                        [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
-                    }
-                    else if ([lockVal isKindOfClass:[UIColor class]] && [unlockVal isKindOfClass:[UIColor class]]) {
-                        // 核心升级：精确支持动态色彩插值（支持透明度变换）
-                        UIColor *lockColor = (UIColor *)lockVal;
-                        UIColor *unlockColor = (UIColor *)unlockVal;
-                        CGFloat lr=0, lg=0, lb=0, la=0, ur=0, ug=0, ub=0, ua=0;
-                        [lockColor getRed:&lr green:&lg blue:&lb alpha:&la];
-                        [unlockColor getRed:&ur green:&ug blue:&ub alpha:&ua];
-                        CGFloat r = lr + (ur - lr) * progress;
-                        CGFloat g = lg + (ug - lg) * progress;
-                        CGFloat b = lb + (ub - lb) * progress;
-                        CGFloat a = la + (ua - la) * progress;
-                        UIColor *currentCGColor = [UIColor colorWithRed:r green:g blue:b alpha:a];
-                        [layer setValue:(id)currentCGColor.CGColor forKeyPath:keyPath];
-                    }
-                } @catch (NSException *e) {
-                    // 核心防御：静默拦截 KVC 赋值失败
-                    // 当遇到未初始化的滤镜或者被动态移出的图层时，防止异常抛出中断整个状态树的渲染逻辑
+                if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
+                    double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
+                    [layer setValue:@(currentVal) forKeyPath:keyPath];
+                } 
+                else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
+                    CGPoint lockPt = [lockVal CGPointValue];
+                    CGPoint unlockPt = [unlockVal CGPointValue];
+                    CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
+                                                    lockPt.y + (unlockPt.y - lockPt.y) * progress);
+                    [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
                 }
             }
         }
