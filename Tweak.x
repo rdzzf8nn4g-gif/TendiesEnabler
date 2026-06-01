@@ -725,13 +725,29 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+    
+    // 使用系统的 CoreAnimation 事务来保证动画顺滑拉起
+    [CATransaction begin]; 
+    [CATransaction setAnimationDuration:0.6]; // 可以微调亮屏动画的时长
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    
+    [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES]; 
+    
+    [CATransaction commit]; 
 }
 
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:NO];
+    
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.5]; // 熄屏动画通常稍微快一点
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn]];
+    
+    // 改为 YES，触发 CAStateController 的内部补间动画
+    [self transitionToState:@"Sleep" animated:YES];
+    
+    [CATransaction commit];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -1170,13 +1186,29 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
+    
+    // 使用系统的 CoreAnimation 事务来保证动画顺滑拉起
+    [CATransaction begin]; 
+    [CATransaction setAnimationDuration:0.6]; // 可以微调亮屏动画的时长
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    
+    [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES]; 
+    
+    [CATransaction commit]; 
 }
 
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:NO];
+    
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.5]; // 熄屏动画通常稍微快一点
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn]];
+    
+    // 改为 YES，触发 CAStateController 的内部补间动画
+    [self transitionToState:@"Sleep" animated:YES];
+    
+    [CATransaction commit];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserEnhanced *)parser packageView:(BSUICAPackageView *)pkgView {
