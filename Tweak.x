@@ -684,6 +684,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil]; // 新增：状态变更监听
     }
     return self;
 }
@@ -750,6 +751,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction commit];
 }
 
+// 【新增方法】：接管提前到来的状态变化
+- (void)onStateChange:(NSNotification *)note {
+    if (!g_enabled || !self.bgView) return;
+    NSString *state = note.userInfo[@"state"];
+    if (state) {
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.5];
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+        [self transitionToState:state animated:YES];
+        [CATransaction commit];
+    }
+}
+
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
     if (!pkgView || !pkgView.layer || !parser) return;
     if (layerMap.count == 0 && parser.statesData.count > 0) {
@@ -794,6 +808,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
+    // 【核心修复】：静止或过渡状态保护伞！防止进度条误杀 CA 动画
+    if ([self.currentState isEqualToString:@"Sleep"]) return;
+    if (progress <= 0.001 && [self.currentState isEqualToString:@"Locked"]) return;
+    if (progress >= 0.999 && [self.currentState isEqualToString:@"Unlock"]) return;
+    
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
     [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
@@ -809,10 +828,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
-    if ([stateName isEqualToString:@"Unlock"]) {
-        [self ensureAllLayerMaps]; [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Locked"]) {
-        [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    // 【核心修复】：如果是带有动画的系统过渡，绝不执行 applyProgress 强杀动画
+    if (!animated) {
+        if ([stateName isEqualToString:@"Unlock"]) {
+            [self ensureAllLayerMaps]; [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        } else if ([stateName isEqualToString:@"Locked"]) {
+            [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        }
     }
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
@@ -1109,6 +1131,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil]; // 新增：状态变更监听
     }
     return self;
 }
@@ -1211,6 +1234,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction commit];
 }
 
+// 【新增方法】：接管提前到来的状态变化
+- (void)onStateChange:(NSNotification *)note {
+    if (!g_enabled || !self.bgView) return;
+    NSString *state = note.userInfo[@"state"];
+    if (state) {
+        [CATransaction begin];
+        [CATransaction setAnimationDuration:0.5];
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+        [self transitionToState:state animated:YES];
+        [CATransaction commit];
+    }
+}
+
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserEnhanced *)parser packageView:(BSUICAPackageView *)pkgView {
     if (!pkgView || !pkgView.layer || !parser) return;
     if (layerMap.count == 0 && parser.statesData.count > 0) {
@@ -1275,6 +1311,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
+    // 【核心修复】：静止或过渡状态保护伞！防止进度条误杀 CA 动画
+    if ([self.currentState isEqualToString:@"Sleep"]) return;
+    if (progress <= 0.001 && [self.currentState isEqualToString:@"Locked"]) return;
+    if (progress >= 0.999 && [self.currentState isEqualToString:@"Unlock"]) return;
+    
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
     [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
@@ -1290,16 +1331,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
-    if ([stateName isEqualToString:@"Unlock"]) {
-        [self ensureAllLayerMaps]; 
-        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Locked"]) {
-        [self ensureAllLayerMaps]; 
-        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    // 【核心修复】：如果是带有动画的系统过渡，绝不执行 applyProgress 强杀动画
+    if (!animated) {
+        if ([stateName isEqualToString:@"Unlock"]) {
+            [self ensureAllLayerMaps]; 
+            [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        } else if ([stateName isEqualToString:@"Locked"]) {
+            [self ensureAllLayerMaps]; 
+            [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        }
     }
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
