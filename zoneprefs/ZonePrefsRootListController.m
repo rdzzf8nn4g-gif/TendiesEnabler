@@ -8,7 +8,7 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
-#import <zlib.h> // 引入系统原生自带的 zlib 用于微型工业级解压
+#import <zlib.h>
 #import <stdio.h>
 #import <string.h>
 
@@ -20,10 +20,9 @@ extern char **environ;
 #define jbroot(path) path
 #endif
 
-
 // --------------------------------------------------------
 // 【全新第一逻辑】微型稳定的工业级解压引擎 (零第三方、纯原生、防OOM)
-// 采用 Central Directory 高速解析与 Chunked 分块流式解压，10GB文件也仅占 64KB 内存
+// 采用 Central Directory 高速解析与 Chunked 分块流式解压，10GB文件也仅占极低内存
 // --------------------------------------------------------
 static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
     FILE *fp = fopen([zipPath UTF8String], "rb");
@@ -55,7 +54,7 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
     unsigned int cdOffset = buf[eocdOffset - (fileSize - searchSize) + 16] | (buf[eocdOffset - (fileSize - searchSize) + 17] << 8) | (buf[eocdOffset - (fileSize - searchSize) + 18] << 16) | (buf[eocdOffset - (fileSize - searchSize) + 19] << 24);
     free(buf);
 
-    // 遇到 ZIP64 或异常头文件，立刻中断返回 NO，移交第二逻辑处理
+    // 遇到 ZIP64 或异常头文件，立刻中断返回 NO，无缝移交第二逻辑处理
     if (cdOffset >= fileSize || cdOffset == 0xFFFFFFFF || cdRecords == 0xFFFF) {
         fclose(fp);
         return NO;
@@ -67,9 +66,9 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
 
     for (int i = 0; i < cdRecords; i++) {
         unsigned char cdh[46];
-        if (fread(cdh, 1, 46, fp) != 46) { fclose(fp); return NO; }
+        if (fread(cdh, 1, 46, fp) != 46) { break; } // 读取不到头则直接结束，保留已解压文件
         // 校验 Header Signature
-        if (cdh[0] != 0x50 || cdh[1] != 0x4b || cdh[2] != 0x01 || cdh[3] != 0x02) { fclose(fp); return NO; }
+        if (cdh[0] != 0x50 || cdh[1] != 0x4b || cdh[2] != 0x01 || cdh[3] != 0x02) { break; }
 
         unsigned short method = cdh[10] | (cdh[11] << 8);
         unsigned int compSize = cdh[20] | (cdh[21] << 8) | (cdh[22] << 16) | (cdh[23] << 24);
@@ -83,7 +82,7 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
         }
 
         char *nameBuf = malloc(nameLen + 1);
-        if (fread(nameBuf, 1, nameLen, fp) != nameLen) { free(nameBuf); fclose(fp); return NO; }
+        if (fread(nameBuf, 1, nameLen, fp) != nameLen) { free(nameBuf); break; }
         nameBuf[nameLen] = '\0';
         NSString *fileName = [NSString stringWithUTF8String:nameBuf];
         if (!fileName) fileName = [[NSString alloc] initWithBytes:nameBuf length:nameLen encoding:NSISOLatin1StringEncoding];
@@ -91,15 +90,15 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
 
         long nextCdOffset = ftell(fp) + extraLen + commentLen;
 
-        // 安全沙盒：过滤目录穿越攻击与 Mac 系统缓存残留
-        if ([fileName containsString:@".."] || [fileName containsString:@"__MACOSX"]) {
+        // 安全沙盒：过滤目录穿越攻击与 Mac 系统垃圾残留
+        if (!fileName || [fileName containsString:@".."] || [fileName containsString:@"__MACOSX"]) {
             fseek(fp, nextCdOffset, SEEK_SET);
             continue;
         }
 
         NSString *outPath = [destPath stringByAppendingPathComponent:fileName];
 
-        // 处理目录
+        // 处理目录结构
         if ([fileName hasSuffix:@"/"]) {
             [fm createDirectoryAtPath:outPath withIntermediateDirectories:YES attributes:nil error:nil];
             fseek(fp, nextCdOffset, SEEK_SET);
@@ -108,18 +107,22 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
             [fm createDirectoryAtPath:[outPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
         }
 
-        // 3. 定位 Local File Header 并开始解压写入
+        // 3. 定位 Local File Header 并开始容错解压写入
         fseek(fp, localHeaderOffset, SEEK_SET);
         unsigned char lfh[30];
-        if (fread(lfh, 1, 30, fp) != 30) { fclose(fp); return NO; }
-        if (lfh[0] != 0x50 || lfh[1] != 0x4b || lfh[2] != 0x03 || lfh[3] != 0x04) { fclose(fp); return NO; }
+        if (fread(lfh, 1, 30, fp) != 30) { fseek(fp, nextCdOffset, SEEK_SET); continue; }
+        if (lfh[0] != 0x50 || lfh[1] != 0x4b || lfh[2] != 0x03 || lfh[3] != 0x04) { fseek(fp, nextCdOffset, SEEK_SET); continue; }
 
         unsigned short lNameLen = lfh[26] | (lfh[27] << 8);
         unsigned short lExtraLen = lfh[28] | (lfh[29] << 8);
         fseek(fp, lNameLen + lExtraLen, SEEK_CUR);
 
         FILE *outFp = fopen([outPath UTF8String], "wb");
-        if (!outFp) { fclose(fp); return NO; }
+        if (!outFp) { 
+            // 若遇奇葩字符无法创建文件，静默跳过，绝不中止整体解压
+            fseek(fp, nextCdOffset, SEEK_SET); 
+            continue; 
+        }
 
         if (method == 0) {
             // Store 模式 (不压缩，直接分块拷贝)
@@ -133,10 +136,12 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
                 remaining -= r;
             }
         } else if (method == 8) {
-            // Deflate 模式 (zlib 流式解压)
+            // Deflate 模式 (zlib 流式极限压缩)
             z_stream strm;
             memset(&strm, 0, sizeof(strm));
-            if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) { fclose(outFp); fclose(fp); return NO; }
+            if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) { 
+                fclose(outFp); fseek(fp, nextCdOffset, SEEK_SET); continue; 
+            }
 
             unsigned char inBuf[32768];
             unsigned char outBuf[32768];
@@ -156,20 +161,19 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
                     strm.next_out = outBuf;
                     ret = inflate(&strm, Z_NO_FLUSH);
                     if (ret == Z_NEED_DICT || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
-                        inflateEnd(&strm); fclose(outFp); fclose(fp); return NO;
+                        break; // 跳出写入循环，抛弃坏帧继续处理下个文件
                     }
                     unsigned int have = (unsigned int)sizeof(outBuf) - strm.avail_out;
-                    if (fwrite(outBuf, 1, have, outFp) != have || ferror(outFp)) {
-                        inflateEnd(&strm); fclose(outFp); fclose(fp); return NO;
+                    if (have > 0) {
+                        if (fwrite(outBuf, 1, have, outFp) != have || ferror(outFp)) {
+                            ret = Z_ERRNO; break;
+                        }
                     }
                 } while (strm.avail_out == 0);
+                
+                if (ret == Z_NEED_DICT || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR || ret == Z_ERRNO) break;
             }
             inflateEnd(&strm);
-        } else {
-            // 遇到 BZIP2/LZMA 等不常见压缩方法，立刻熔断移交第二逻辑
-            fclose(outFp);
-            fclose(fp);
-            return NO; 
         }
 
         fclose(outFp);
@@ -181,7 +185,7 @@ static BOOL microIndustrialUnzip(NSString *zipPath, NSString *destPath) {
 }
 
 // --------------------------------------------------------
-// 【第二逻辑】原生系统底层 posix_spawn 进程隔离解压
+// 【第二逻辑】原生系统底层 posix_spawn 进程隔离解压 (兜底防线)
 // --------------------------------------------------------
 static BOOL industrialUnzip(NSString *source, NSString *destination) {
     pid_t pid;
@@ -205,12 +209,11 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
     return NO;
 }
 
-// 【终极解压调度中心】: 一线微型自建引擎为主，二线系统底层为兜底防线
+// 【终极调度中心】一线主导，二线替补
 static BOOL ultimateUnzip(NSString *source, NSString *destination) {
     if (microIndustrialUnzip(source, destination)) {
         return YES;
     }
-    // 当遇到加密、超10G的 ZIP64 或极端特殊格式，微型引擎会安全放行，瞬间移交底层二进制解压
     return industrialUnzip(source, destination);
 }
 
@@ -433,7 +436,7 @@ static NSString * GetPrefsPlistPath() {
     [self setupHeaderView];
 }
 
-// 【修改点 1】：动态化头部图标加载逻辑，完美适配多路径越狱下的 icon1 图标切换
+// 动态化头部图标加载逻辑，完美适配多路径越狱下的 icon1 图标切换
 - (void)setupHeaderView {
     UIView *headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.frame.size.width, 160)];
     headerView.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -557,7 +560,7 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:menu animated:YES completion:nil];
 }
 
-// 【修改点 2】：在执行平滑模式转换时，同步触发刷新 Header 视图，使图标跟随机件转场动画一起更新
+// 在执行平滑模式转换时，同步触发刷新 Header 视图，使图标跟随机件转场动画一起更新
 - (void)executeSmoothModeTransition {
     self.isVideoMode = !self.isVideoMode;
     
@@ -641,7 +644,7 @@ static NSString * GetPrefsPlistPath() {
         PSSpecifier *enableSpec = [PSSpecifier preferenceSpecifierNamed:@"启用插件" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [enableSpec setProperty:@"Enabled" forKey:@"key"];
         [enableSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-        [enableSpec setProperty:@NO forKey:@"default"]; // 新增这一行，强制默认状态为关闭
+        [enableSpec setProperty:@NO forKey:@"default"]; // 强制默认状态为关闭
         enableSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:enableSpec];
         
@@ -654,9 +657,8 @@ static NSString * GetPrefsPlistPath() {
         PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面使用同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [sameMatSpec setProperty:@"SameVideoMaterial" forKey:@"key"];
         [sameMatSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-        sameMatSpec->action = @selector(setSameMaterialValue:specifier:); // 劫持 Setter，方便点击立刻清空打勾并刷新UI
+        sameMatSpec->action = @selector(setSameMaterialValue:specifier:); 
         [_specifiers addObject:sameMatSpec];
-        
         
         NSFileManager *fm = [NSFileManager defaultManager];
         
@@ -1169,7 +1171,7 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 统一的 UIDocumentPickerDelegate 回调 (根据模式自动分流)
+// 统一的 UIDocumentPickerDelegate 回调 (支持智能前置大文件预警)
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
 
@@ -1178,17 +1180,22 @@ static NSString * GetPrefsPlistPath() {
         return;
     }
     
-    // 分流：交互壁纸压缩包处理 (预先检查容量警报)
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         unsigned long long totalSizeBytes = 0;
         NSFileManager *fm = [NSFileManager defaultManager];
+        BOOL hasNonZip = NO; // 精准判断：如果是 zip 就不提前拦截
+        
         for (NSURL *url in urls) {
             BOOL isAccessing = [url startAccessingSecurityScopedResource];
             BOOL isDir = NO;
             if ([fm fileExistsAtPath:url.path isDirectory:&isDir]) {
                 if (isDir) {
+                    hasNonZip = YES;
                     totalSizeBytes += getDirectorySize(url.path);
                 } else {
+                    if (![[[url pathExtension] lowercaseString] isEqualToString:@"zip"]) {
+                        hasNonZip = YES;
+                    }
                     totalSizeBytes += [[fm attributesOfItemAtPath:url.path error:nil] fileSize];
                 }
             }
@@ -1198,7 +1205,8 @@ static NSString * GetPrefsPlistPath() {
         double totalMB = totalSizeBytes / (1024.0 * 1024.0);
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (totalMB > 40.0) {
+            // 只有非 Zip 且 >40M 才弹前置窗口，Zip 的留到后置精准扫描
+            if (hasNonZip && totalMB > 40.0) {
                 UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
                                                                                message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时卡顿甚至卡死。\n是否继续导入？", totalMB] 
                                                                         preferredStyle:UIAlertControllerStyleAlert];
@@ -1267,16 +1275,18 @@ static NSString * GetPrefsPlistPath() {
                 [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
                 
                 if (isDirectory) {
-                    NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
-                    processSuccess = YES;
-                    for (NSString *item in contents) {
-                        NSString *srcPath = [sourceURL.path stringByAppendingPathComponent:item];
-                        NSString *destPath = [unzipTempDir stringByAppendingPathComponent:item];
-                        if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
+                    // 精准保留命名：连带文件夹本体一起拷贝，而不是只拷贝其内容
+                    NSString *destPath = [unzipTempDir stringByAppendingPathComponent:[sourceURL lastPathComponent]];
+                    if ([fm copyItemAtPath:sourceURL.path toPath:destPath error:nil]) {
+                        processSuccess = YES;
                     }
                 } else {
-                    // 全新双重降级保险解压机制
-                    processSuccess = ultimateUnzip(sourceURL.path, unzipTempDir);
+                    // 沙盒提权保护：先将 ZIP 拷贝到自家的临时目录再解压，彻底摆脱 iCloud 等权限受阻的死局
+                    NSString *localZipPath = [tempBase stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+                    if ([fm copyItemAtPath:sourceURL.path toPath:localZipPath error:nil]) {
+                        processSuccess = ultimateUnzip(localZipPath, unzipTempDir);
+                        [fm removeItemAtPath:localZipPath error:nil]; // 释放空间
+                    }
                 }
                 
                 if (processSuccess) {
@@ -1309,7 +1319,7 @@ static NSString * GetPrefsPlistPath() {
                         }
                     }
                     
-                    // 将深埋的所有壁纸统一提升到最外层
+                    // 将深埋的所有壁纸统一提升到真正的设置外层
                     for (NSString *wpRoot in foundWallpapers) {
                         NSString *wpName = [wpRoot lastPathComponent];
                         // 如果刚好打包的是散件在最外层，就用压缩包的名字作为壁纸名字
@@ -1343,7 +1353,7 @@ static NSString * GetPrefsPlistPath() {
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
                         [self reloadSpecifiers]; 
                         
-                        // 【新逻辑】解压完成 2 秒后，深度检阅本次导入的体积，超过 40MB 的弹窗提醒清除
+                        // 【后置精确警告新逻辑】解压完成 2 秒后，深度检阅本次导入的体积
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                             NSMutableArray *oversizedWallpapers = [NSMutableArray array];
                             double totalOversizedMB = 0;
@@ -1357,16 +1367,16 @@ static NSString * GetPrefsPlistPath() {
                             }
                             
                             if (oversizedWallpapers.count > 0) {
-                                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到巨大壁纸文件" 
-                                                                                               message:[NSString stringWithFormat:@"检测到本次导入并解压后的壁纸文件依然大于40MB (共计约 %.1f MB)。\n\n这极大概率会导致设备在下滑锁屏时卡顿甚至卡死。\n是否立即删除该文件？", totalOversizedMB] 
+                                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
+                                                                                               message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续保留可能会导致设备在下滑锁屏时卡顿甚至卡死。\n是否删除该文件？", totalOversizedMB] 
                                                                                         preferredStyle:UIAlertControllerStyleAlert];
-                                [alert addAction:[UIAlertAction actionWithTitle:@"保留" style:UIAlertActionStyleCancel handler:nil]];
+                                [alert addAction:[UIAlertAction actionWithTitle:@"不删除" style:UIAlertActionStyleCancel handler:nil]];
                                 [alert addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
                                     
                                     for (NSString *wpPath in oversizedWallpapers) {
                                         [[NSFileManager defaultManager] removeItemAtPath:wpPath error:nil];
                                         
-                                        // 同步清理可能已被选中的配置文件数据
+                                        // 智能清理如果刚被选中的配置文件记录
                                         CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
                                         if (pathRef) {
                                             NSString *currentPath = (__bridge NSString *)pathRef;
