@@ -9,7 +9,7 @@
         </dict>
         <dict>
             <key>cell</key> <string>PSSwitchCell</string>
-            <key>default</key> <true/>
+            <key>default</key> <false/>
             <key>defaults</key> <string>com.iosdump.zoneprefs</string>
             <key>key</key> <string>Enabled</string>
             <key>label</key> <string>启用插件</string>
