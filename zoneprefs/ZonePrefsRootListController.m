@@ -922,11 +922,57 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 【修改点3】完全重构原生打勾为蓝色实心圆圈打勾视觉
+// 【修改点3】完全重构原生打勾为蓝色实心圆圈打勾视觉，并注入数量标识圈
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
     PSSpecifier *spec = [(id)cell specifier];
     NSString *specKey = [spec propertyForKey:@"key"];
+    NSString *labelString = [spec propertyForKey:@"label"];
+    
+    // 【全新功能】：导入壁纸右侧添加“已导入 x 张”徽章圈
+    if ([labelString isEqualToString:@"导入壁纸"]) {
+        cell.textLabel.textAlignment = NSTextAlignmentLeft; 
+        
+        UIView *accView = cell.accessoryView;
+        UILabel *countLabel = nil;
+        if (![accView isKindOfClass:[UIView class]] || accView.tag != 444) {
+            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 75, 28)];
+            accView.tag = 444;
+            
+            countLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 75, 28)];
+            countLabel.tag = 555;
+            countLabel.layer.cornerRadius = 14;
+            countLabel.layer.borderWidth = 1;
+            countLabel.layer.borderColor = [UIColor systemBlueColor].CGColor;
+            countLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+            countLabel.textColor = [UIColor systemBlueColor];
+            countLabel.textAlignment = NSTextAlignmentCenter;
+            
+            [accView addSubview:countLabel];
+            cell.accessoryView = accView;
+        } else {
+            countLabel = [accView viewWithTag:555];
+        }
+        
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray *contents = [fm contentsOfDirectoryAtPath:GetWallpapersDir() error:nil];
+        NSInteger count = 0;
+        if (contents) {
+            for (NSString *name in contents) {
+                if (![name hasPrefix:@"."]) {
+                    BOOL isDir;
+                    if ([fm fileExistsAtPath:[GetWallpapersDir() stringByAppendingPathComponent:name] isDirectory:&isDir] && isDir) {
+                        count++;
+                    }
+                }
+            }
+        }
+        countLabel.text = [NSString stringWithFormat:@"已导入%ld张", (long)count];
+        cell.detailTextLabel.hidden = YES;
+        cell.detailTextLabel.text = @"";
+        
+        return cell;
+    }
     
     if ([[spec propertyForKey:@"IsVideoCell"] boolValue]) {
         NSString *name = [spec propertyForKey:@"VideoName"];
@@ -1011,7 +1057,6 @@ static NSString * GetPrefsPlistPath() {
         UILabel *sizeLabel = nil;
         UIImageView *checkMark = nil;
         
-        // 【修改点3】完美注入蓝色实心打勾圆圈视觉
         if (![accView isKindOfClass:[UIView class]] || accView.tag != 999) {
             accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 140, 30)];
             accView.tag = 999;
@@ -1078,6 +1123,7 @@ static NSString * GetPrefsPlistPath() {
     return UITableViewStyleGrouped;
 }
 
+// 【彻底解决安全崩溃：锚定至 contentView 底部完美平齐文本】
 - (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
     if ([view isKindOfClass:[UITableViewHeaderFooterView class]]) {
         UITableViewHeaderFooterView *header = (UITableViewHeaderFooterView *)view;
@@ -1087,7 +1133,8 @@ static NSString * GetPrefsPlistPath() {
                 clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
                 clearBtn.tag = 9999;
                 [clearBtn setTitle:@"清空壁纸" forState:UIControlStateNormal];
-                clearBtn.titleLabel.font = header.textLabel.font ?: [UIFont systemFontOfSize:13];
+                // 字体大小视觉化继承原生分组标题
+                clearBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
                 [clearBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
                 [clearBtn addTarget:self action:@selector(promptClearWallpapers) forControlEvents:UIControlEventTouchUpInside];
                 [header.contentView addSubview:clearBtn];
@@ -1095,7 +1142,8 @@ static NSString * GetPrefsPlistPath() {
                 clearBtn.translatesAutoresizingMaskIntoConstraints = NO;
                 [NSLayoutConstraint activateConstraints:@[
                     [clearBtn.trailingAnchor constraintEqualToAnchor:header.contentView.trailingAnchor constant:-16],
-                    [clearBtn.centerYAnchor constraintEqualToAnchor:header.contentView.centerYAnchor]
+                    // 使用底边距安全平齐，彻底避开私有文字组件，不再有 No Common Ancestor 崩溃
+                    [clearBtn.bottomAnchor constraintEqualToAnchor:header.contentView.bottomAnchor constant:-6]
                 ]];
             }
         }
@@ -1174,7 +1222,6 @@ static NSString * GetPrefsPlistPath() {
         
         for (NSURL *url in urls) {
             NSString *ext = [[url pathExtension] lowercaseString];
-            // 【修改点1】将 tendies 同样视作压缩包跳过预检大小
             if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
                 containsZip = YES;
             } else {
@@ -1194,7 +1241,6 @@ static NSString * GetPrefsPlistPath() {
         double totalMB = totalSizeBytes / (1024.0 * 1024.0);
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // 【修改点2】只要不是ZIP或Tendies，如果预检 > 40M 弹出了窗，向下传递 skipPostCheck 信号
             if (!containsZip && totalMB > 40.0) {
                 UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
                                                                                message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时、卡顿甚至卡死。\n是否继续导入？", totalMB] 
