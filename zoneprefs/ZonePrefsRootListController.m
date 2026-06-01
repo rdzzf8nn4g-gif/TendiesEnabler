@@ -1192,7 +1192,7 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 【修改点1】核心递归解析系统：防嵌套、防同名、自动剔除外壳及 readme 等垃圾文件
+// 核心解压直接注入系统：不检测结构，绝对服从原始命名
 - (void)processImportedItemAtPath:(NSString *)path targetDir:(NSString *)wpDir newImportedPaths:(NSMutableArray *)newImportedPaths {
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL isDir = NO;
@@ -1200,98 +1200,62 @@ static NSString * GetPrefsPlistPath() {
 
     if (!isDir) {
         NSString *ext = [[path pathExtension] lowercaseString];
-        // 如果遇到是 zip 或 tendies，果断视为压缩包拆解
         if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
             NSString *name = [[path lastPathComponent] stringByDeletingPathExtension];
-            NSString *tempExtractPath = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_ext", name]];
             
-            [fm createDirectoryAtPath:tempExtractPath withIntermediateDirectories:YES attributes:nil error:nil];
+            // 直接以压缩包/tendies的名字命名作为目标文件夹
+            NSString *finalDest = [wpDir stringByAppendingPathComponent:name];
             
-            BOOL success = microIndustrialUnzip(path, tempExtractPath);
-            if (!success) success = industrialUnzip(path, tempExtractPath);
+            int counter = 1;
+            NSString *baseDest = finalDest;
+            while ([fm fileExistsAtPath:finalDest]) {
+                finalDest = [NSString stringWithFormat:@"%@_%d", baseDest, counter++];
+            }
+            
+            [fm createDirectoryAtPath:finalDest withIntermediateDirectories:YES attributes:nil error:nil];
+            
+            // 直接解压，不做任何内部结构检测
+            BOOL success = microIndustrialUnzip(path, finalDest);
+            if (!success) success = industrialUnzip(path, finalDest);
             
             if (success) {
                 [fm removeItemAtPath:path error:nil];
-                // 拆开后，递归调用自己，把里面的东西扒出来
-                [self processImportedItemAtPath:tempExtractPath targetDir:wpDir newImportedPaths:newImportedPaths];
+                
+                // 处理“压缩包里包含多个 .tendies”的情况
+                NSArray *contents = [fm contentsOfDirectoryAtPath:finalDest error:nil];
+                BOOL extractedNestedArchive = NO;
+                
+                for (NSString *item in contents) {
+                    if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
+                    NSString *subExt = [[item pathExtension] lowercaseString];
+                    if ([subExt isEqualToString:@"zip"] || [subExt isEqualToString:@"tendies"]) {
+                        extractedNestedArchive = YES;
+                        NSString *subPath = [finalDest stringByAppendingPathComponent:item];
+                        // 递归解压里面的 .tendies
+                        [self processImportedItemAtPath:subPath targetDir:wpDir newImportedPaths:newImportedPaths];
+                    }
+                }
+                
+                // 如果它是个包含多个tendies的纯外壳，抽走并解压后，删掉空壳
+                if (extractedNestedArchive) {
+                    [fm removeItemAtPath:finalDest error:nil];
+                } else {
+                    // 就是壁纸本体，正常优化并加入列表
+                    optimizeZoneFolderIfNecessary(finalDest);
+                    [newImportedPaths addObject:finalDest];
+                }
             } else {
-                [fm removeItemAtPath:tempExtractPath error:nil];
+                [fm removeItemAtPath:finalDest error:nil];
             }
         }
-        return;
-    }
-
-    NSArray *contents = [fm contentsOfDirectoryAtPath:path error:nil];
-    NSMutableArray *validItems = [NSMutableArray array];
-    for (NSString *item in contents) {
-        if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
-        [validItems addObject:item];
-    }
-
-    if (validItems.count == 0) {
-        [fm removeItemAtPath:path error:nil];
-        return;
-    }
-    
-    BOOL hasCA = NO;
-    BOOL hasArchive = NO;
-    BOOL hasNormalFile = NO;
-    
-    for (NSString *item in validItems) {
-        NSString *subPath = [path stringByAppendingPathComponent:item];
-        BOOL subIsDir = NO;
-        [fm fileExistsAtPath:subPath isDirectory:&subIsDir];
-        
-        NSString *ext = [[item pathExtension] lowercaseString];
-        
-        if (subIsDir) {
-            if ([ext isEqualToString:@"ca"]) hasCA = YES;
-        } else {
-            if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
-                hasArchive = YES;
-            } else {
-                hasNormalFile = YES;
-            }
-        }
-    }
-
-    // 智能分析这个文件夹究竟是一个“独立壁纸”还是一个包含多个对象的“包裹盒子”
-    BOOL isWallpaper = NO;
-    if (hasCA) {
-        isWallpaper = YES; 
-    } else if (hasArchive) {
-        isWallpaper = NO;  
-    } else if (hasNormalFile) {
-        isWallpaper = YES; 
     } else {
-        isWallpaper = NO;  
-    }
-
-    if (isWallpaper) {
-        NSString *name = [path lastPathComponent];
-        // 去除上面我们临时赋予的 _ext 尾巴，恢复出完美、原生、无扩展名的壁纸名称
-        if ([name hasSuffix:@"_ext"]) {
-            name = [name substringToIndex:name.length - 4];
-        }
-        
-        NSString *finalDest = [wpDir stringByAppendingPathComponent:name];
-        
-        int counter = 1;
-        NSString *baseDest = finalDest;
-        while ([fm fileExistsAtPath:finalDest]) {
-            finalDest = [NSString stringWithFormat:@"%@_%d", baseDest, counter++];
-        }
-        
-        [fm moveItemAtPath:path toPath:finalDest error:nil];
-        optimizeZoneFolderIfNecessary(finalDest);
-        [newImportedPaths addObject:finalDest];
-    } else {
-        // 如果是包裹盒子，遍历扒开它里面的所有东西
-        for (NSString *item in validItems) {
+        // 如果遇到文件夹包裹，遍历进去处理里面的压缩包
+        NSArray *contents = [fm contentsOfDirectoryAtPath:path error:nil];
+        for (NSString *item in contents) {
+            if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
             NSString *subPath = [path stringByAppendingPathComponent:item];
             [self processImportedItemAtPath:subPath targetDir:wpDir newImportedPaths:newImportedPaths];
         }
-        // 被扒干净的包裹外壳自动抛弃
         [fm removeItemAtPath:path error:nil];
     }
 }
