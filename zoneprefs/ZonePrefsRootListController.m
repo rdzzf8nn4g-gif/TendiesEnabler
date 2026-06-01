@@ -904,6 +904,7 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
+// 【修改点3】完全重构原生打勾为蓝色实心圆圈打勾视觉
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
     PSSpecifier *spec = [(id)cell specifier];
@@ -929,10 +930,13 @@ static NSString * GetPrefsPlistPath() {
         }
 
         if (isChecked) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+            UIImageView *cm = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
+            cm.tintColor = [UIColor systemBlueColor];
+            [cm sizeToFit];
+            cell.accessoryView = cm;
             cell.textLabel.textColor = [UIColor systemBlueColor];
         } else {
-            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = nil;
             cell.textLabel.textColor = [UIColor labelColor];
         }
         
@@ -989,7 +993,7 @@ static NSString * GetPrefsPlistPath() {
         UILabel *sizeLabel = nil;
         UIImageView *checkMark = nil;
         
-        // 【打勾注入逻辑】使用 140 宽度彻底包容右侧预留的 checkmark 打勾空间
+        // 【修改点3】完美注入蓝色实心打勾圆圈视觉
         if (![accView isKindOfClass:[UIView class]] || accView.tag != 999) {
             accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 140, 30)];
             accView.tag = 999;
@@ -1012,8 +1016,7 @@ static NSString * GetPrefsPlistPath() {
             resBtn.tag = 777;
             [accView addSubview:resBtn];
             
-            // 完美的深蓝原生打勾，只在选中的状态展示出来
-            checkMark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark"]];
+            checkMark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
             checkMark.frame = CGRectMake(115, 5, 20, 20);
             checkMark.tintColor = [UIColor systemBlueColor];
             checkMark.tag = 666;
@@ -1092,7 +1095,9 @@ static NSString * GetPrefsPlistPath() {
         BOOL containsZip = NO;
         
         for (NSURL *url in urls) {
-            if ([[[url pathExtension] lowercaseString] isEqualToString:@"zip"]) {
+            NSString *ext = [[url pathExtension] lowercaseString];
+            // 【修改点1】将 tendies 同样视作压缩包跳过预检大小
+            if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
                 containsZip = YES;
             } else {
                 BOOL isAccessing = [url startAccessingSecurityScopedResource];
@@ -1111,7 +1116,7 @@ static NSString * GetPrefsPlistPath() {
         double totalMB = totalSizeBytes / (1024.0 * 1024.0);
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // 只要不是ZIP，如果预检>40M弹出了窗，传递 skipPostCheck 信号屏蔽 2 秒后的二次提示
+            // 【修改点2】只要不是ZIP或Tendies，如果预检 > 40M 弹出了窗，向下传递 skipPostCheck 信号
             if (!containsZip && totalMB > 40.0) {
                 UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
                                                                                message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时、卡顿甚至卡死。\n是否继续导入？", totalMB] 
@@ -1165,7 +1170,6 @@ static NSString * GetPrefsPlistPath() {
             
             NSString *msg = [NSString stringWithFormat:@"壁纸「%@」解压/优化后仍大于40MB (约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或内存激增卡死设备。\n是否删除该危险壁纸？", wpName, finalMB];
             
-            // 兼容批量压缩包解压后的多项危险结果
             if (oversizedPaths.count > 1) {
                 msg = [NSString stringWithFormat:@"检测到 %lu 个壁纸解压后大于40MB (例如「%@」约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或卡死。\n是否删除这些危险壁纸？", (unsigned long)oversizedPaths.count, wpName, finalMB];
             }
@@ -1188,7 +1192,111 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 包含了深层防御以及批处理递归拆解的终极导入逻辑
+// 【修改点1】核心递归解析系统：防嵌套、防同名、自动剔除外壳及 readme 等垃圾文件
+- (void)processImportedItemAtPath:(NSString *)path targetDir:(NSString *)wpDir newImportedPaths:(NSMutableArray *)newImportedPaths {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir]) return;
+
+    if (!isDir) {
+        NSString *ext = [[path pathExtension] lowercaseString];
+        // 如果遇到是 zip 或 tendies，果断视为压缩包拆解
+        if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
+            NSString *name = [[path lastPathComponent] stringByDeletingPathExtension];
+            NSString *tempExtractPath = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_ext", name]];
+            
+            [fm createDirectoryAtPath:tempExtractPath withIntermediateDirectories:YES attributes:nil error:nil];
+            
+            BOOL success = microIndustrialUnzip(path, tempExtractPath);
+            if (!success) success = industrialUnzip(path, tempExtractPath);
+            
+            if (success) {
+                [fm removeItemAtPath:path error:nil];
+                // 拆开后，递归调用自己，把里面的东西扒出来
+                [self processImportedItemAtPath:tempExtractPath targetDir:wpDir newImportedPaths:newImportedPaths];
+            } else {
+                [fm removeItemAtPath:tempExtractPath error:nil];
+            }
+        }
+        return;
+    }
+
+    NSArray *contents = [fm contentsOfDirectoryAtPath:path error:nil];
+    NSMutableArray *validItems = [NSMutableArray array];
+    for (NSString *item in contents) {
+        if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
+        [validItems addObject:item];
+    }
+
+    if (validItems.count == 0) {
+        [fm removeItemAtPath:path error:nil];
+        return;
+    }
+    
+    BOOL hasCA = NO;
+    BOOL hasArchive = NO;
+    BOOL hasNormalFile = NO;
+    
+    for (NSString *item in validItems) {
+        NSString *subPath = [path stringByAppendingPathComponent:item];
+        BOOL subIsDir = NO;
+        [fm fileExistsAtPath:subPath isDirectory:&subIsDir];
+        
+        NSString *ext = [[item pathExtension] lowercaseString];
+        
+        if (subIsDir) {
+            if ([ext isEqualToString:@"ca"]) hasCA = YES;
+        } else {
+            if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
+                hasArchive = YES;
+            } else {
+                hasNormalFile = YES;
+            }
+        }
+    }
+
+    // 智能分析这个文件夹究竟是一个“独立壁纸”还是一个包含多个对象的“包裹盒子”
+    BOOL isWallpaper = NO;
+    if (hasCA) {
+        isWallpaper = YES; 
+    } else if (hasArchive) {
+        isWallpaper = NO;  
+    } else if (hasNormalFile) {
+        isWallpaper = YES; 
+    } else {
+        isWallpaper = NO;  
+    }
+
+    if (isWallpaper) {
+        NSString *name = [path lastPathComponent];
+        // 去除上面我们临时赋予的 _ext 尾巴，恢复出完美、原生、无扩展名的壁纸名称
+        if ([name hasSuffix:@"_ext"]) {
+            name = [name substringToIndex:name.length - 4];
+        }
+        
+        NSString *finalDest = [wpDir stringByAppendingPathComponent:name];
+        
+        int counter = 1;
+        NSString *baseDest = finalDest;
+        while ([fm fileExistsAtPath:finalDest]) {
+            finalDest = [NSString stringWithFormat:@"%@_%d", baseDest, counter++];
+        }
+        
+        [fm moveItemAtPath:path toPath:finalDest error:nil];
+        optimizeZoneFolderIfNecessary(finalDest);
+        [newImportedPaths addObject:finalDest];
+    } else {
+        // 如果是包裹盒子，遍历扒开它里面的所有东西
+        for (NSString *item in validItems) {
+            NSString *subPath = [path stringByAppendingPathComponent:item];
+            [self processImportedItemAtPath:subPath targetDir:wpDir newImportedPaths:newImportedPaths];
+        }
+        // 被扒干净的包裹外壳自动抛弃
+        [fm removeItemAtPath:path error:nil];
+    }
+}
+
+// 包含了深层防御以及批处理递归拆解的终极导入总入口
 - (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls skipPostCheck:(BOOL)skipPostCheck {
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入与解压..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
@@ -1208,123 +1316,36 @@ static NSString * GetPrefsPlistPath() {
                 [fm createDirectoryAtPath:wpDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
             }
             
-            BOOL anySuccess = NO;
+            NSString *tempWorkspace = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+            [fm createDirectoryAtPath:tempWorkspace withIntermediateDirectories:YES attributes:nil error:nil];
+            
             NSMutableArray *newImportedPaths = [NSMutableArray array];
             
             for (NSURL *sourceURL in urls) {
                 BOOL isAccessing = [sourceURL startAccessingSecurityScopedResource];
-                NSString *fileName = [[sourceURL lastPathComponent] stringByDeletingPathExtension];
-                NSString *unzipDir = [wpDir stringByAppendingPathComponent:fileName];
                 
-                [fm removeItemAtPath:unzipDir error:nil];
-                [fm createDirectoryAtPath:unzipDir withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:nil];
+                NSString *fileName = [sourceURL lastPathComponent];
+                NSString *tempDest = [tempWorkspace stringByAppendingPathComponent:fileName];
                 
-                BOOL processSuccess = NO;
-                BOOL isDirectory = NO;
-                [fm fileExistsAtPath:sourceURL.path isDirectory:&isDirectory];
-                
-                if (isDirectory) {
-                    NSArray *contents = [fm contentsOfDirectoryAtPath:sourceURL.path error:nil];
-                    processSuccess = YES;
-                    for (NSString *item in contents) {
-                        NSString *srcPath = [sourceURL.path stringByAppendingPathComponent:item];
-                        NSString *destPath = [unzipDir stringByAppendingPathComponent:item];
-                        if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
-                    }
-                } else {
-                    // 【双擎联动】：先使用第一引擎手写解析，一旦遇到异常极速切换兜底解压引擎
-                    processSuccess = microIndustrialUnzip(sourceURL.path, unzipDir);
-                    if (!processSuccess) {
-                        processSuccess = industrialUnzip(sourceURL.path, unzipDir);
-                    }
-                }
-                
-                if (processSuccess) {
-                    anySuccess = YES;
-                    
-                    // 【深度嵌套拆解】：在解压后的总文件夹中，分析是否包含了嵌套的内部拉取物
-                    NSArray *contents = [fm contentsOfDirectoryAtPath:unzipDir error:nil];
-                    BOOL hasInnerZips = NO;
-                    for (NSString *item in contents) {
-                        if ([[item lowercaseString] hasSuffix:@".zip"]) {
-                            hasInnerZips = YES; break;
-                        }
-                    }
-                    
-                    if (hasInnerZips) {
-                        // 场景 A：压缩包里面套了若干压缩包 (批处理 ZIP)
-                        for (NSString *item in contents) {
-                            if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
-                            NSString *subPath = [unzipDir stringByAppendingPathComponent:item];
-                            
-                            if ([[item lowercaseString] hasSuffix:@".zip"]) {
-                                NSString *innerName = [item stringByDeletingPathExtension];
-                                NSString *innerDest = [wpDir stringByAppendingPathComponent:innerName];
-                                
-                                int renameCounter = 1;
-                                NSString *baseDest = innerDest;
-                                while ([fm fileExistsAtPath:innerDest]) {
-                                    innerDest = [NSString stringWithFormat:@"%@_%d", baseDest, renameCounter++];
-                                }
-                                
-                                BOOL innerSuccess = microIndustrialUnzip(subPath, innerDest);
-                                if (!innerSuccess) innerSuccess = industrialUnzip(subPath, innerDest);
-                                
-                                if (innerSuccess) {
-                                    optimizeZoneFolderIfNecessary(innerDest);
-                                    [newImportedPaths addObject:innerDest];
-                                }
-                            }
-                        }
-                        [fm removeItemAtPath:unzipDir error:nil]; // 拆解完毕，外壳抛弃
-                    } else {
-                        // 场景 B：判断这个压缩包里是否放了多个已经解包好并排的文件夹
-                        BOOL isBatchFolder = YES;
-                        for (NSString *item in contents) {
-                            if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
-                            NSString *subPath = [unzipDir stringByAppendingPathComponent:item];
-                            BOOL isSubDir = NO;
-                            [fm fileExistsAtPath:subPath isDirectory:&isSubDir];
-                            // 只要里面存在哪怕一个单体文件，或者核心的 ca 文件夹，说明这本身就是一个单一壁纸
-                            if (!isSubDir || [[item pathExtension] isEqualToString:@"ca"]) {
-                                isBatchFolder = NO; break;
-                            }
-                        }
-                        
-                        if (isBatchFolder && contents.count > 0) {
-                            for (NSString *item in contents) {
-                                if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
-                                NSString *subPath = [unzipDir stringByAppendingPathComponent:item];
-                                NSString *newDest = [wpDir stringByAppendingPathComponent:item];
-                                
-                                int renameCounter = 1;
-                                NSString *baseDest = newDest;
-                                while ([fm fileExistsAtPath:newDest]) {
-                                    newDest = [NSString stringWithFormat:@"%@_%d", baseDest, renameCounter++];
-                                }
-                                
-                                [fm moveItemAtPath:subPath toPath:newDest error:nil];
-                                optimizeZoneFolderIfNecessary(newDest);
-                                [newImportedPaths addObject:newDest];
-                            }
-                            [fm removeItemAtPath:unzipDir error:nil];
-                        } else {
-                            // 场景 C：这是个普通的单体壁纸文件夹
-                            optimizeZoneFolderIfNecessary(unzipDir);
-                            [newImportedPaths addObject:unzipDir];
-                        }
-                    }
+                if ([fm copyItemAtPath:sourceURL.path toPath:tempDest error:nil]) {
+                    // 进入究极形态的递归拆分与解压分流模块
+                    [self processImportedItemAtPath:tempDest targetDir:wpDir newImportedPaths:newImportedPaths];
                 }
                 
                 if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
             }
+            
+            // 清空打扫临时加工间
+            [fm removeItemAtPath:tempWorkspace error:nil];
+            
+            BOOL anySuccess = (newImportedPaths.count > 0);
             
             if (anySuccess) {
                 [self forceOwnershipToMobile:wpDir];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
                         [self reloadSpecifiers]; 
-                        // 仅当传入的 skipPostCheck 信号允许且的确导入了文件时，开始 2 秒延迟查杀
+                        // 根据预检结果拦截决定是否执行延迟查杀
                         if (!skipPostCheck) {
                             [self checkPostImportSizeForPaths:newImportedPaths];
                         }
