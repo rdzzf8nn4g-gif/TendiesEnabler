@@ -8,7 +8,7 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
-#include <zlib.h> // 引入系统底层自带的 zlib 用于微型引擎解压
+#include <zlib.h> 
 
 extern char **environ;
 
@@ -30,10 +30,7 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
 
     unsigned char sig[4];
     while (fread(sig, 1, 4, fp) == 4) {
-        // 校验 ZIP Local File Header 签名 (0x04034b50)
-        if (sig[0] != 0x50 || sig[1] != 0x4B || sig[2] != 0x03 || sig[3] != 0x04) {
-            break; // 可能到了 Central Directory，正常结束
-        }
+        if (sig[0] != 0x50 || sig[1] != 0x4B || sig[2] != 0x03 || sig[3] != 0x04) break; 
 
         unsigned char header[26];
         if (fread(header, 1, 26, fp) != 26) { fclose(fp); return NO; }
@@ -44,7 +41,6 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
         uint16_t nameLen = header[22] | (header[23] << 8);
         uint16_t extraLen = header[24] | (header[25] << 8);
 
-        // 防御：遇到含有数据描述符 (bit 3)、加密 (bit 0) 或 ZIP64 的极端情况，主动放弃交由原有兜底逻辑
         if ((flags & 0x01) || (flags & 0x08) || compSize == 0xFFFFFFFF) {
             fclose(fp); return NO; 
         }
@@ -58,7 +54,6 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
         NSString *fileName = [NSString stringWithUTF8String:name];
         if (!fileName) { fclose(fp); return NO; }
         
-        // 防御目录穿越漏洞 (Zip Slip)
         if ([fileName containsString:@"../"]) {
             fseek(fp, compSize, SEEK_CUR);
             continue;
@@ -72,7 +67,6 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
             [fm createDirectoryAtPath:[outPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
 
             if (method == 0) {
-                // 存储模式 (未压缩)
                 FILE *outFp = fopen([outPath UTF8String], "wb");
                 if (!outFp) { fclose(fp); return NO; }
                 char buf[32768];
@@ -86,7 +80,6 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
                 }
                 fclose(outFp);
             } else if (method == 8) {
-                // Deflate 模式 (工业级流式分块解压，内存始终在几十KB)
                 FILE *outFp = fopen([outPath UTF8String], "wb");
                 if (!outFp) { fclose(fp); return NO; }
 
@@ -130,7 +123,6 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
                 inflateEnd(&strm);
                 fclose(outFp);
             } else {
-                // 不支持的压缩算法，立刻切兜底
                 fclose(fp); return NO;
             }
         }
@@ -165,9 +157,8 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
 }
 
 // ========================================================
-// 内存守护系统：目录测算与底层 ImageIO 智能图像降维 (防漏/防热)
+// 内存守护系统：目录测算与底层 ImageIO 智能图像降维 
 // ========================================================
-
 static unsigned long long getDirectorySize(NSString *folderPath) {
     unsigned long long fileSize = 0;
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -985,20 +976,23 @@ static NSString * GetPrefsPlistPath() {
         NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
         NSString *currentPath = prefs[@"ZonePath"];
         
-        if ([currentPath isEqualToString:fullWpPath]) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+        BOOL isSelected = [currentPath isEqualToString:fullWpPath];
+        
+        if (isSelected) {
             cell.textLabel.textColor = [UIColor systemBlueColor];
         } else {
-            cell.accessoryType = UITableViewCellAccessoryNone;
             cell.textLabel.textColor = [UIColor labelColor];
         }
         
         UIView *accView = cell.accessoryView;
         UIButton *resBtn = nil;
         UILabel *sizeLabel = nil;
+        UIImageView *checkMark = nil;
         
-        if (![accView isKindOfClass:[UIView class]] || accView.frame.size.width != 115) {
-            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 115, 30)];
+        // 【打勾注入逻辑】使用 140 宽度彻底包容右侧预留的 checkmark 打勾空间
+        if (![accView isKindOfClass:[UIView class]] || accView.tag != 999) {
+            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 140, 30)];
+            accView.tag = 999;
             
             sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 65, 30)];
             sizeLabel.font = [UIFont systemFontOfSize:14];
@@ -1008,7 +1002,7 @@ static NSString * GetPrefsPlistPath() {
             [accView addSubview:sizeLabel];
             
             resBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-            resBtn.frame = CGRectMake(72, 1, 40, 28);
+            resBtn.frame = CGRectMake(70, 1, 40, 28);
             resBtn.layer.cornerRadius = 14;
             resBtn.layer.borderWidth = 1;
             resBtn.layer.borderColor = [UIColor systemBlueColor].CGColor;
@@ -1018,11 +1012,21 @@ static NSString * GetPrefsPlistPath() {
             resBtn.tag = 777;
             [accView addSubview:resBtn];
             
+            // 完美的深蓝原生打勾，只在选中的状态展示出来
+            checkMark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark"]];
+            checkMark.frame = CGRectMake(115, 5, 20, 20);
+            checkMark.tintColor = [UIColor systemBlueColor];
+            checkMark.tag = 666;
+            [accView addSubview:checkMark];
+            
             cell.accessoryView = accView;
         } else {
             sizeLabel = [accView viewWithTag:888];
             resBtn = [accView viewWithTag:777];
+            checkMark = [accView viewWithTag:666];
         }
+        
+        checkMark.hidden = !isSelected;
         
         double sizeMB = getDirectorySize(fullWpPath) / (1024.0 * 1024.0);
         sizeLabel.text = [NSString stringWithFormat:@"%.1f MB", sizeMB];
@@ -1090,7 +1094,6 @@ static NSString * GetPrefsPlistPath() {
         for (NSURL *url in urls) {
             if ([[[url pathExtension] lowercaseString] isEqualToString:@"zip"]) {
                 containsZip = YES;
-                // 对于 ZIP 文件跳过计算大小，不做预拦截
             } else {
                 BOOL isAccessing = [url startAccessingSecurityScopedResource];
                 BOOL isDir = NO;
@@ -1108,21 +1111,21 @@ static NSString * GetPrefsPlistPath() {
         double totalMB = totalSizeBytes / (1024.0 * 1024.0);
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // 如果只有 ZIP 文件，或者普通文件总大小不超过 40MB，直接跳过预警告并执行导入
+            // 只要不是ZIP，如果预检>40M弹出了窗，传递 skipPostCheck 信号屏蔽 2 秒后的二次提示
             if (!containsZip && totalMB > 40.0) {
                 UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
                                                                                message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时、卡顿甚至卡死。\n是否继续导入？", totalMB] 
                                                                         preferredStyle:UIAlertControllerStyleAlert];
                 [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
                 [alert addAction:[UIAlertAction actionWithTitle:@"继续导入" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-                    [self proceedWithImportingURLs:urls];
+                    [self proceedWithImportingURLs:urls skipPostCheck:YES];
                 }]];
                 
                 UIViewController *topVC = self.view.window.rootViewController ?: self;
                 while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
                 [topVC presentViewController:alert animated:YES completion:nil];
             } else {
-                [self proceedWithImportingURLs:urls];
+                [self proceedWithImportingURLs:urls skipPostCheck:NO];
             }
         });
     });
@@ -1141,33 +1144,52 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 执行延迟 2 秒后的大文件检测查杀，只对刚才导入的文件有效
+// ==========================================================
+// 二级危险文件延迟检测模块：根据传回信号进行静默或彻底查杀
+// ==========================================================
 - (void)checkPostImportSizeForPaths:(NSArray *)importedPaths {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        NSMutableArray *oversizedPaths = [NSMutableArray array];
         for (NSString *path in importedPaths) {
             double finalMB = getDirectorySize(path) / (1024.0 * 1024.0);
             if (finalMB > 40.0) {
-                NSString *wpName = [path lastPathComponent];
-                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"大文件警报"
-                                                                               message:[NSString stringWithFormat:@"壁纸「%@」解压/优化后仍大于40MB (约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或内存激增卡死设备。\n是否删除该危险壁纸？", wpName, finalMB]
-                                                                        preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"不删除" style:UIAlertActionStyleCancel handler:nil]];
-                [alert addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-                    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-                    [self reloadSpecifiers];
-                }]];
-                
-                UIViewController *topVC = self.view.window.rootViewController ?: self;
-                while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-                [topVC presentViewController:alert animated:YES completion:nil];
-                // 若含有多个大文件，为了不疯狂弹窗影响体验，弹一个处理完再拉取即可。这里可以加入队列或者直接 break。
-                break; 
+                [oversizedPaths addObject:@{@"path": path, @"size": @(finalMB)}];
             }
+        }
+        
+        if (oversizedPaths.count > 0) {
+            NSDictionary *firstOversized = oversizedPaths.firstObject;
+            NSString *path = firstOversized[@"path"];
+            double finalMB = [firstOversized[@"size"] doubleValue];
+            NSString *wpName = [path lastPathComponent];
+            
+            NSString *msg = [NSString stringWithFormat:@"壁纸「%@」解压/优化后仍大于40MB (约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或内存激增卡死设备。\n是否删除该危险壁纸？", wpName, finalMB];
+            
+            // 兼容批量压缩包解压后的多项危险结果
+            if (oversizedPaths.count > 1) {
+                msg = [NSString stringWithFormat:@"检测到 %lu 个壁纸解压后大于40MB (例如「%@」约 %.1f MB)。\n继续保留极大概率导致滑动卡顿或卡死。\n是否删除这些危险壁纸？", (unsigned long)oversizedPaths.count, wpName, finalMB];
+            }
+            
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"大文件警报"
+                                                                           message:msg
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"不删除" style:UIAlertActionStyleCancel handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+                for (NSDictionary *info in oversizedPaths) {
+                    [[NSFileManager defaultManager] removeItemAtPath:info[@"path"] error:nil];
+                }
+                [self reloadSpecifiers];
+            }]];
+            
+            UIViewController *topVC = self.view.window.rootViewController ?: self;
+            while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+            [topVC presentViewController:alert animated:YES completion:nil];
         }
     });
 }
 
-- (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls {
+// 包含了深层防御以及批处理递归拆解的终极导入逻辑
+- (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls skipPostCheck:(BOOL)skipPostCheck {
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入与解压..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     spinner.center = CGPointMake(205.0, 31.0);
@@ -1210,7 +1232,7 @@ static NSString * GetPrefsPlistPath() {
                         if (![fm copyItemAtPath:srcPath toPath:destPath error:nil]) processSuccess = NO;
                     }
                 } else {
-                    // 【双擎联动】：先使用第一引擎手写解析，失败则秒切第二引擎系统自带原生
+                    // 【双擎联动】：先使用第一引擎手写解析，一旦遇到异常极速切换兜底解压引擎
                     processSuccess = microIndustrialUnzip(sourceURL.path, unzipDir);
                     if (!processSuccess) {
                         processSuccess = industrialUnzip(sourceURL.path, unzipDir);
@@ -1220,40 +1242,77 @@ static NSString * GetPrefsPlistPath() {
                 if (processSuccess) {
                     anySuccess = YES;
                     
-                    // 【批量同导入逻辑】：如果在压缩包内是并排排列的多个壁纸，平铺到壁纸总目录下
+                    // 【深度嵌套拆解】：在解压后的总文件夹中，分析是否包含了嵌套的内部拉取物
                     NSArray *contents = [fm contentsOfDirectoryAtPath:unzipDir error:nil];
-                    BOOL isBatchZip = YES;
+                    BOOL hasInnerZips = NO;
                     for (NSString *item in contents) {
-                        if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
-                        NSString *subPath = [unzipDir stringByAppendingPathComponent:item];
-                        BOOL isSubDir = NO;
-                        [fm fileExistsAtPath:subPath isDirectory:&isSubDir];
-                        if (!isSubDir || [[item pathExtension] isEqualToString:@"ca"]) {
-                            isBatchZip = NO; break; // 说明这是个普通的含资源的壁纸文件夹
+                        if ([[item lowercaseString] hasSuffix:@".zip"]) {
+                            hasInnerZips = YES; break;
                         }
                     }
                     
-                    if (isBatchZip && contents.count > 0) {
+                    if (hasInnerZips) {
+                        // 场景 A：压缩包里面套了若干压缩包 (批处理 ZIP)
                         for (NSString *item in contents) {
                             if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
                             NSString *subPath = [unzipDir stringByAppendingPathComponent:item];
-                            NSString *newDest = [wpDir stringByAppendingPathComponent:item];
                             
-                            // 防止重名
-                            int renameCounter = 1;
-                            NSString *baseDest = newDest;
-                            while ([fm fileExistsAtPath:newDest]) {
-                                newDest = [NSString stringWithFormat:@"%@_%d", baseDest, renameCounter++];
+                            if ([[item lowercaseString] hasSuffix:@".zip"]) {
+                                NSString *innerName = [item stringByDeletingPathExtension];
+                                NSString *innerDest = [wpDir stringByAppendingPathComponent:innerName];
+                                
+                                int renameCounter = 1;
+                                NSString *baseDest = innerDest;
+                                while ([fm fileExistsAtPath:innerDest]) {
+                                    innerDest = [NSString stringWithFormat:@"%@_%d", baseDest, renameCounter++];
+                                }
+                                
+                                BOOL innerSuccess = microIndustrialUnzip(subPath, innerDest);
+                                if (!innerSuccess) innerSuccess = industrialUnzip(subPath, innerDest);
+                                
+                                if (innerSuccess) {
+                                    optimizeZoneFolderIfNecessary(innerDest);
+                                    [newImportedPaths addObject:innerDest];
+                                }
                             }
-                            
-                            [fm moveItemAtPath:subPath toPath:newDest error:nil];
-                            optimizeZoneFolderIfNecessary(newDest);
-                            [newImportedPaths addObject:newDest];
                         }
-                        [fm removeItemAtPath:unzipDir error:nil]; // 删掉壳
+                        [fm removeItemAtPath:unzipDir error:nil]; // 拆解完毕，外壳抛弃
                     } else {
-                        optimizeZoneFolderIfNecessary(unzipDir);
-                        [newImportedPaths addObject:unzipDir];
+                        // 场景 B：判断这个压缩包里是否放了多个已经解包好并排的文件夹
+                        BOOL isBatchFolder = YES;
+                        for (NSString *item in contents) {
+                            if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
+                            NSString *subPath = [unzipDir stringByAppendingPathComponent:item];
+                            BOOL isSubDir = NO;
+                            [fm fileExistsAtPath:subPath isDirectory:&isSubDir];
+                            // 只要里面存在哪怕一个单体文件，或者核心的 ca 文件夹，说明这本身就是一个单一壁纸
+                            if (!isSubDir || [[item pathExtension] isEqualToString:@"ca"]) {
+                                isBatchFolder = NO; break;
+                            }
+                        }
+                        
+                        if (isBatchFolder && contents.count > 0) {
+                            for (NSString *item in contents) {
+                                if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
+                                NSString *subPath = [unzipDir stringByAppendingPathComponent:item];
+                                NSString *newDest = [wpDir stringByAppendingPathComponent:item];
+                                
+                                int renameCounter = 1;
+                                NSString *baseDest = newDest;
+                                while ([fm fileExistsAtPath:newDest]) {
+                                    newDest = [NSString stringWithFormat:@"%@_%d", baseDest, renameCounter++];
+                                }
+                                
+                                [fm moveItemAtPath:subPath toPath:newDest error:nil];
+                                optimizeZoneFolderIfNecessary(newDest);
+                                [newImportedPaths addObject:newDest];
+                            }
+                            [fm removeItemAtPath:unzipDir error:nil];
+                        } else {
+                            // 场景 C：这是个普通的单体壁纸文件夹
+                            optimizeZoneFolderIfNecessary(unzipDir);
+                            [newImportedPaths addObject:unzipDir];
+                        }
                     }
                 }
                 
@@ -1265,8 +1324,10 @@ static NSString * GetPrefsPlistPath() {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
                         [self reloadSpecifiers]; 
-                        // 调用延迟两秒查杀
-                        [self checkPostImportSizeForPaths:newImportedPaths];
+                        // 仅当传入的 skipPostCheck 信号允许且的确导入了文件时，开始 2 秒延迟查杀
+                        if (!skipPostCheck) {
+                            [self checkPostImportSizeForPaths:newImportedPaths];
+                        }
                     }];
                 });
             } else {
