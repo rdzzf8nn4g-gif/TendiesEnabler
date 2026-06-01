@@ -2350,6 +2350,18 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %ctor {
+    // 【核心修复】：进程隔离保护
+    // 获取当前运行的进程名称
+    NSString *processName = [[NSProcessInfo processInfo] processName];
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+    
+    // 如果当前进程不是 SpringBoard，直接退出，不执行任何 Hook！
+    // 这样就能完美屏蔽 Safari (com.apple.mobilesafari) 和 电话 (com.apple.InCallService) 等应用
+    if (![processName isEqualToString:@"SpringBoard"] && ![bundleId isEqualToString:@"com.apple.springboard"]) {
+        return; 
+    }
+
+    // 只有在 SpringBoard 进程中才会执行以下的加载和 Hook 逻辑
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
     
