@@ -467,10 +467,11 @@ static NSString * GetPrefsPlistPath() {
         [_specifiers addObject:g1];
         
         PSSpecifier *enableSpec = [PSSpecifier preferenceSpecifierNamed:@"启用插件" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
-        [enableSpec setProperty:@"Enabled" forKey:@"key"];
-        [enableSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-        enableSpec->action = @selector(setPreferenceValue:specifier:);
-        [_specifiers addObject:enableSpec];
+[enableSpec setProperty:@"Enabled" forKey:@"key"];
+[enableSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+[enableSpec setProperty:@NO forKey:@"default"]; // 新增这一行，强制默认状态为关闭
+enableSpec->action = @selector(setPreferenceValue:specifier:);
+[_specifiers addObject:enableSpec];
         
         PSSpecifier *lowPowerSpec = [PSSpecifier preferenceSpecifierNamed:@"低电模式暂停" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [lowPowerSpec setProperty:@"LowPowerPause" forKey:@"key"];
