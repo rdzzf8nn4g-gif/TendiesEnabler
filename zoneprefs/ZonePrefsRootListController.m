@@ -1343,23 +1343,25 @@ static NSString * GetPrefsPlistPath() {
             if (success) {
                 [fm removeItemAtPath:path error:nil];
                 
-                // 处理“压缩包里包含多个 .tendies”的情况
-                NSArray *contents = [fm contentsOfDirectoryAtPath:finalDest error:nil];
-                BOOL extractedNestedArchive = NO;
+                // 【深度遍历修复】：解决压缩包内部带有文件夹包裹，导致里面的 .tendies 无法被识别解压的问题
+                NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:finalDest];
+                NSString *subpath;
+                NSMutableArray *nestedItems = [NSMutableArray array];
                 
-                for (NSString *item in contents) {
-                    if ([item hasPrefix:@"."] || [item hasPrefix:@"__MACOSX"]) continue;
-                    NSString *subExt = [[item pathExtension] lowercaseString];
+                while ((subpath = [enumerator nextObject])) {
+                    if ([subpath hasPrefix:@"__MACOSX"] || [subpath containsString:@"/.DS_Store"]) continue;
+                    
+                    NSString *subExt = [[subpath pathExtension] lowercaseString];
                     if ([subExt isEqualToString:@"zip"] || [subExt isEqualToString:@"tendies"]) {
-                        extractedNestedArchive = YES;
-                        NSString *subPath = [finalDest stringByAppendingPathComponent:item];
-                        // 递归解压里面的 .tendies
-                        [self processImportedItemAtPath:subPath targetDir:wpDir newImportedPaths:newImportedPaths];
+                        [nestedItems addObject:[finalDest stringByAppendingPathComponent:subpath]];
                     }
                 }
                 
-                // 如果它是个包含多个tendies的纯外壳，抽走并解压后，删掉空壳
-                if (extractedNestedArchive) {
+                // 如果它是个包含多个 tendies/zip 的纯外壳（哪怕放在子文件夹里），深度抽走解压，并删掉外壳
+                if (nestedItems.count > 0) {
+                    for (NSString *nestedPath in nestedItems) {
+                        [self processImportedItemAtPath:nestedPath targetDir:wpDir newImportedPaths:newImportedPaths];
+                    }
                     [fm removeItemAtPath:finalDest error:nil];
                 } else {
                     // 就是壁纸本体，正常优化并加入列表
