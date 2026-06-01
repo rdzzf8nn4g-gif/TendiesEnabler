@@ -592,7 +592,7 @@ static NSString * GetPrefsPlistPath() {
         [gLock setProperty:@"点击应用为锁屏壁纸，向左滑动可删除或重命名。" forKey:@"footerText"];
         [_specifiers addObject:gLock];
         
-        PSSpecifier *btnLockImport = [PSSpecifier preferenceSpecifierNamed:@"导入锁屏素材" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        PSSpecifier *btnLockImport = [PSSpecifier preferenceSpecifierNamed:@"导入锁屏素材" target:self set:nil get:@selector(getLockVideoStatus:) detail:nil cell:PSTitleValueCell edit:nil];
         btnLockImport->action = @selector(importLockMaterial);
         [_specifiers addObject:btnLockImport];
         
@@ -615,7 +615,7 @@ static NSString * GetPrefsPlistPath() {
         [gHome setProperty:@"点击应用为桌面壁纸，向左滑动可删除或重命名。" forKey:@"footerText"];
         [_specifiers addObject:gHome];
         
-        PSSpecifier *btnHomeImport = [PSSpecifier preferenceSpecifierNamed:@"导入桌面素材" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        PSSpecifier *btnHomeImport = [PSSpecifier preferenceSpecifierNamed:@"导入桌面素材" target:self set:nil get:@selector(getHomeVideoStatus:) detail:nil cell:PSTitleValueCell edit:nil];
         btnHomeImport->action = @selector(importHomeMaterial);
         [_specifiers addObject:btnHomeImport];
         
@@ -673,26 +673,44 @@ static NSString * GetPrefsPlistPath() {
 // =======================================================
 // ==================== 视频壁纸专属逻辑 ====================
 // =======================================================
+- (id)getLockVideoStatus:(PSSpecifier *)spec {
+    NSString *plistPath = GetPrefsPlistPath();
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    NSString *path = prefs[@"LockVideoPath"];
+    if (path && path.length > 0) {
+        return [NSString stringWithFormat:@"已选中%@", [path lastPathComponent]];
+    }
+    return @"未选择";
+}
+
+- (id)getHomeVideoStatus:(PSSpecifier *)spec {
+    NSString *plistPath = GetPrefsPlistPath();
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    NSString *path = prefs[@"HomeVideoPath"];
+    if (path && path.length > 0) {
+        return [NSString stringWithFormat:@"已选中%@", [path lastPathComponent]];
+    }
+    return @"未选择";
+}
+
 - (void)setSameMaterialValue:(id)value specifier:(PSSpecifier *)specifier {
     [self setPreferenceValue:value specifier:specifier];
     
-    BOOL isOn = [value boolValue];
-    if (isOn) {
-        NSString *plistPath = GetPrefsPlistPath();
-        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-        
-        [prefs removeObjectForKey:@"LockVideoPath"];
-        [prefs removeObjectForKey:@"HomeVideoPath"];
-        
-        CFPreferencesSetAppValue(CFSTR("LockVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-        CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
-        
-        [prefs writeToFile:plistPath atomically:YES];
-        [self forceOwnershipToMobile:plistPath];
-        
-        CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    }
+    NSString *plistPath = GetPrefsPlistPath();
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+    
+    [prefs removeObjectForKey:@"LockVideoPath"];
+    [prefs removeObjectForKey:@"HomeVideoPath"];
+    
+    CFPreferencesSetAppValue(CFSTR("LockVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+    CFPreferencesSetAppValue(CFSTR("HomeVideoPath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+    
+    [prefs writeToFile:plistPath atomically:YES];
+    [self forceOwnershipToMobile:plistPath];
+    
+    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    
     [self reloadSpecifiers];
 }
 
@@ -1058,6 +1076,66 @@ static NSString * GetPrefsPlistPath() {
         return UITableViewStyleInsetGrouped;
     }
     return UITableViewStyleGrouped;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    if ([view isKindOfClass:[UITableViewHeaderFooterView class]]) {
+        UITableViewHeaderFooterView *header = (UITableViewHeaderFooterView *)view;
+        if ([header.textLabel.text isEqualToString:@"已导入的壁纸"]) {
+            UIButton *clearBtn = [header.contentView viewWithTag:9999];
+            if (!clearBtn) {
+                clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                clearBtn.tag = 9999;
+                [clearBtn setTitle:@"清空壁纸" forState:UIControlStateNormal];
+                clearBtn.titleLabel.font = header.textLabel.font ?: [UIFont systemFontOfSize:13];
+                [clearBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+                [clearBtn addTarget:self action:@selector(promptClearWallpapers) forControlEvents:UIControlEventTouchUpInside];
+                [header.contentView addSubview:clearBtn];
+                
+                clearBtn.translatesAutoresizingMaskIntoConstraints = NO;
+                [NSLayoutConstraint activateConstraints:@[
+                    [clearBtn.trailingAnchor constraintEqualToAnchor:header.contentView.trailingAnchor constant:-16],
+                    [clearBtn.centerYAnchor constraintEqualToAnchor:header.textLabel.centerYAnchor]
+                ]];
+            }
+        }
+    }
+}
+
+- (void)promptClearWallpapers {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"清空壁纸" message:@"确定要清空所有已导入的壁纸吗？此操作不可撤销。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+        [self clearAllWallpapers];
+    }]];
+    
+    UIViewController *topVC = self.view.window.rootViewController ?: self;
+    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
+    [topVC presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)clearAllWallpapers {
+    NSString *wpDir = GetWallpapersDir();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *contents = [fm contentsOfDirectoryAtPath:wpDir error:nil];
+    for (NSString *name in contents) {
+        NSString *path = [wpDir stringByAppendingPathComponent:name];
+        [fm removeItemAtPath:path error:nil];
+        NSString *resKey = [NSString stringWithFormat:@"ResFactor_%@", name];
+        CFPreferencesSetAppValue((__bridge CFStringRef)resKey, NULL, CFSTR("com.iosdump.zoneprefs"));
+    }
+    
+    CFPreferencesSetAppValue(CFSTR("ZonePath"), NULL, CFSTR("com.iosdump.zoneprefs"));
+    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+    
+    NSString *plistPath = GetPrefsPlistPath();
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+    [prefs removeObjectForKey:@"ZonePath"];
+    [prefs writeToFile:plistPath atomically:YES];
+    
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    
+    [self reloadSpecifiers];
 }
 
 - (void)importZone:(PSSpecifier *)spec {
