@@ -1716,12 +1716,11 @@ static void EnsureEngineViewIsMounted() {
         g_portalView.hidden = NO;
         [self viewWillLayoutSubviews];
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
+        // 【防护修复】由于存在 Native Switcher 处理中导致 CA Transaction 碰撞的问题，不在此处强制派发更新，维持同步即可
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+            [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+        }
     }
 }
 
@@ -1731,23 +1730,55 @@ static void EnsureEngineViewIsMounted() {
         g_portalView.hidden = NO;
         [self viewWillLayoutSubviews];
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+            [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+        }
     }
 }
 
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
+    // 【防护修复】：同步发送状态，绝不可进入 dispatch_async 丢掉系统自带的 CA 断言过渡，从根源掐断闪退
     if (g_enabled && g_isScreenOn) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
-        });
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
+    }
+}
+
+// 【补齐 iOS 16/17 息屏/AOD/亮屏 动画触点，保持同步执行不崩溃】
+- (void)setInScreenOffMode:(BOOL)mode {
+    %orig;
+    if (g_enabled) {
+        g_isScreenOn = !mode;
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
+        if (mode) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+        } else {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+        }
+    }
+}
+
+- (void)_startFadeInAnimationForSource:(int)source {
+    %orig;
+    if (g_enabled) {
+        g_isScreenOn = YES;
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+    }
+}
+
+- (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
+    %orig;
+    if (g_enabled) {
+        g_isScreenOn = !inactive;
+        if (inactive) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+        } else {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+        }
     }
 }
 %end
@@ -1770,6 +1801,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     EnsureEngineViewIsMounted();
+    // 进度属于正常的高频轮询计算，安全使用 dispatch
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
         
@@ -1799,6 +1831,40 @@ static void EnsureEngineViewIsMounted() {
             }
         }
     });
+}
+%end
+
+// 【iOS 16+ 硬件背光核心捕获点】
+%hook SBBacklightController
+- (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
+    %orig;
+    if (g_enabled) {
+        BOOL screenOn = (state == 1);
+        if (screenOn != g_isScreenOn) {
+            g_isScreenOn = screenOn;
+            g_lastTickProgress = -1;
+            if (screenOn) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            } else {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+            }
+        }
+    }
+}
+- (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
+    %orig;
+    if (g_enabled) {
+        BOOL screenOn = (state == 1);
+        if (screenOn != g_isScreenOn) {
+            g_isScreenOn = screenOn;
+            g_lastTickProgress = -1;
+            if (screenOn) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            } else {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+            }
+        }
+    }
 }
 %end
 %end // 结束 iOS16Plus
@@ -2069,10 +2135,8 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
-        });
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
     }
 }
 
@@ -2081,10 +2145,8 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isUnlocked = YES;
         g_lastTickProgress = -1; 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
-        });
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
     }
 }
 %end
@@ -2095,10 +2157,8 @@ static void EnsureEngineViewIsMounted() {
     g_isUnlocked = NO;
     g_lastTickProgress = -1; 
     if (g_enabled && g_isScreenOn) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
-        });
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
     }
 }
 - (void)unlockUIFromSource:(int)source withOptions:(id)options {
@@ -2106,10 +2166,8 @@ static void EnsureEngineViewIsMounted() {
     g_isUnlocked = YES;
     g_lastTickProgress = -1; 
     if (g_enabled && g_isScreenOn) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
-        });
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
     }
 }
 %end
@@ -2214,13 +2272,18 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaper { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 
+// 【防护修复】：同步执行状态流转，避免 BSCompoundAssertion 异步崩溃
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled) {
+        g_isScreenOn = !mode;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
-        });
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
+        if (mode) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+        } else {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+        }
     }
 }
 %end
@@ -2256,14 +2319,11 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
+            // 【防护修复】：切勿使用 dispatch_async，直接跟随系统 CA Transaction 动画栈
             if (g_isScreenOn) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                });
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
             } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                });
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
         }
     }
@@ -2275,14 +2335,11 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
+            // 【防护修复】：切勿使用 dispatch_async
             if (g_isScreenOn) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                });
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
             } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                });
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
         }
     }
@@ -2346,6 +2403,51 @@ static void EnsureEngineViewIsMounted() {
     } else if ([self respondsToSelector:@selector(updateLegibility)]) {
         [self performSelector:@selector(updateLegibility)];
     }
+}
+%end
+
+// =========================================================================
+// 【无损增量扩展】：原生级同步捕获防闪退与底层动画注活（不动引擎本体）
+// =========================================================================
+
+// 获取 iOS 14-15 原生锁屏苏醒动画触发点
+%hook SBFLegacyWallpaperWakeAnimator
+- (void)updateWakeEffectsForWake:(BOOL)wake animated:(BOOL)animated completion:(id)completion {
+    %orig;
+    if (g_enabled) {
+        if (wake) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+        } else {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+        }
+    }
+}
+%end
+
+// 劫持引擎动态回调，赋予 CA Transaction 动画能力，绝对不修改原引擎 implementation 代码
+%hook ZoneRenderEngineEnhanced
+- (void)onWakeUp {
+    if (!g_enabled || ![self bgView]) return;
+    [self setIsUnlocking:NO];
+    [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES];
+}
+- (void)onSleep {
+    if (!g_enabled || ![self bgView]) return;
+    [self setIsUnlocking:NO];
+    [self transitionToState:@"Sleep" animated:YES];
+}
+%end
+
+%hook ZoneRenderEngineLegacy
+- (void)onWakeUp {
+    if (!g_enabled || ![self bgView]) return;
+    [self setIsUnlocking:NO];
+    [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES];
+}
+- (void)onSleep {
+    if (!g_enabled || ![self bgView]) return;
+    [self setIsUnlocking:NO];
+    [self transitionToState:@"Sleep" animated:YES];
 }
 %end
 
