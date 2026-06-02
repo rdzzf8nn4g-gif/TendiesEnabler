@@ -1090,6 +1090,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.fgLayerMap = [NSMutableDictionary dictionary];
         
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadWallpaperViews) name:@"ZoneEngineInternalReload" object:nil];
+        // 🔥 【核心修复】接入带有动画标识和强制刷新机制的新发令枪及 AOD 通道
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeAnimationStateChange:) name:@"ZoneEngineWakeAnimation" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onAOD) name:@"ZoneEngineAOD" object:nil];
+        
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
@@ -1167,15 +1171,64 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
+// -------------------------------------------------------------
+// 🔥 【核心修复】响应 SBFLegacyWallpaperWakeAnimator 带有动画参数的调度
+// -------------------------------------------------------------
+- (void)onWakeAnimationStateChange:(NSNotification *)note {
+    if (!g_enabled || !self.bgView) return;
+    
+    NSString *state = note.userInfo[@"state"];
+    BOOL animated = [note.userInfo[@"animated"] boolValue];
+    
+    NSString *targetState = state;
+    if ([state isEqualToString:@"Wake"]) {
+        targetState = g_isUnlocked ? @"Unlock" : @"Locked";
+    } else if ([state isEqualToString:@"Sleep"]) {
+        targetState = @"Sleep";
+    }
+    
+    [CATransaction begin];
+    [CATransaction setDisableActions:!animated];
+    
+    if (animated) {
+        // 使用与 iOS 原生匹配的动画时长和缓冲曲线
+        [CATransaction setAnimationDuration:0.85];
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    }
+    
+    [self transitionToState:targetState animated:animated];
+    
+    [CATransaction commit];
+    
+    // 强制提交渲染树，突破 Runloop 冰冻限制！
+    [CATransaction flush];
+}
+
+// -------------------------------------------------------------
+// 🔥 【核心修复】AOD (熄屏显示) 专供的形变动画通道
+// -------------------------------------------------------------
+- (void)onAOD {
+    if (!g_enabled || !self.bgView) return;
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.85];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    [self transitionToState:@"Sleep" animated:YES];
+    [CATransaction commit];
+    // 强制提交渲染树，突破 Runloop 冰冻限制！
+    [CATransaction flush];
+}
+
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
+    // 作为防呆降级机制保留
     [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
 }
 
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
+    // 作为防呆降级机制保留，实际调度会被 Animator 拦截优先处理
     [self transitionToState:@"Sleep" animated:NO];
 }
 
@@ -1564,6 +1617,53 @@ static void EnsureEngineViewIsMounted() {
     
     if (g_enabled && g_isVideoMode) return NO;
     return %orig;
+}
+%end
+
+// 🔥【核心修复】iOS 16+ 阻断 SpringBoard 暴力强制静止动画 (Layer Speed = 0 杀手)
+%hook PBUIWallpaperView
+- (void)setWallpaperAnimationEnabled:(_Bool)enabled {
+    if (g_enabled && !enabled) {
+        // 拒绝立即暂停，延迟 0.85 秒（匹配原生息屏动画时间）再放行
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            %orig(NO);
+        });
+        return;
+    }
+    %orig;
+}
+
+- (void)setHidden:(_Bool)hidden {
+    if (g_enabled && hidden) {
+        // 延迟隐藏，给动画留出渲染生命周期
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            %orig(YES);
+        });
+        return;
+    }
+    %orig;
+}
+%end
+
+// 🔥【核心修复】挂载 BLSBacklight 服务，精准识别 AOD (Always-On Display) 及设备背光
+%hook BLSBacklight
+- (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
+    %orig;
+    if (g_enabled) {
+        if (state == 2) {
+            // State 2 即代表屏幕进入 AOD 显示模式，而非彻底死黑
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineAOD" object:nil];
+        }
+    }
+}
+
+- (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvents:(id)events abortedEvents:(id)aborted {
+    %orig;
+    if (g_enabled) {
+        if (state == 2) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineAOD" object:nil];
+        }
+    }
 }
 %end
 
@@ -2121,6 +2221,39 @@ static void EnsureEngineViewIsMounted() {
 // ==================== 【全版本通用 Hook 区域】 ============================
 // =========================================================================
 
+// 🔥 【核心发令枪】精准捕捉系统的唤醒/息屏平滑数值进度 (防冻结、驱动动画)
+%hook SBFLegacyWallpaperWakeAnimator
+- (void)updateWakeEffectsForWake:(_Bool)wake animated:(_Bool)animated completion:(id /* block */)completion {
+    %orig;
+    if (g_enabled) {
+        // 强行同步通知，禁止 dispatch_async 丢入下个冰冻的 Runloop 中
+        NSDictionary *userInfo = @{
+            @"state": wake ? @"Wake" : @"Sleep",
+            @"animated": @(animated)
+        };
+        void (^notifyBlock)(void) = ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWakeAnimation" object:nil userInfo:userInfo];
+        };
+        if ([NSThread isMainThread]) {
+            notifyBlock();
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), notifyBlock);
+        }
+    }
+}
+
+- (void)removeAllWakeEffects {
+    %orig;
+    if (g_enabled) {
+        void (^notifyBlock)(void) = ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWakeAnimation" object:nil userInfo:@{@"state": @"Sleep", @"animated": @(NO)}];
+        };
+        if ([NSThread isMainThread]) notifyBlock();
+        else dispatch_sync(dispatch_get_main_queue(), notifyBlock);
+    }
+}
+%end
+
 %hook SBWallpaperEffectView
 - (void)didMoveToSuperview {
     %orig;
@@ -2249,6 +2382,7 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBBacklightController
+// 🔥 【拆除异步炸弹】解决异步派发造成的 Runloop 时序错乱
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
     if (g_enabled) {
@@ -2256,14 +2390,20 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
-            if (g_isScreenOn) {
-                dispatch_async(dispatch_get_main_queue(), ^{
+            
+            void (^notifyBlock)(void) = ^{
+                if (g_isScreenOn) {
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                });
-            } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
+                } else {
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                });
+                }
+            };
+            
+            // 绝对同步驱动，赶在 GPU 渲染挂起前送达
+            if ([NSThread isMainThread]) {
+                notifyBlock();
+            } else {
+                dispatch_sync(dispatch_get_main_queue(), notifyBlock);
             }
         }
     }
@@ -2275,14 +2415,20 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
-            if (g_isScreenOn) {
-                dispatch_async(dispatch_get_main_queue(), ^{
+            
+            void (^notifyBlock)(void) = ^{
+                if (g_isScreenOn) {
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                });
-            } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
+                } else {
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                });
+                }
+            };
+            
+            // 绝对同步驱动，赶在 GPU 渲染挂起前送达
+            if ([NSThread isMainThread]) {
+                notifyBlock();
+            } else {
+                dispatch_sync(dispatch_get_main_queue(), notifyBlock);
             }
         }
     }
