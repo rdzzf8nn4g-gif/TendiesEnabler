@@ -157,8 +157,16 @@ typedef struct {
 }
 
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated {
-    if (_uiPackageView && [_uiPackageView respondsToSelector:@selector(setState:)]) {
-        return (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
+    if (_uiPackageView) {
+        if ([_uiPackageView respondsToSelector:@selector(setState:animated:)]) {
+            void (*setStateAnimated)(id, SEL, id, BOOL) = (void(*)(id, SEL, id, BOOL))[_uiPackageView methodForSelector:@selector(setState:animated:)];
+            if (setStateAnimated) {
+                setStateAnimated(_uiPackageView, @selector(setState:animated:), state, animated);
+                return YES;
+            }
+        } else if ([_uiPackageView respondsToSelector:@selector(setState:)]) {
+            return (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
+        }
     }
     if (_stateController && _package) {
         CALayer *root = [_package valueForKey:@"rootLayer"];
@@ -769,8 +777,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    if ([self.currentState isEqualToString:@"Sleep"]) return; // 【极度关键：防止在息屏时复写坐标毁掉动画】
+    
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
+    
+    if (progress == 0.0 && [self.currentState isEqualToString:@"Locked"]) return; // 防止刚唤醒时捕捉 0.0 瞬移打断动画
+    if (progress == 1.0 && [self.currentState isEqualToString:@"Unlock"]) return;
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -785,12 +798,23 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
     if ([self.currentState isEqualToString:stateName]) return;
+    
+    NSString *oldState = self.currentState;
     self.currentState = [stateName copy];
     
-    if ([stateName isEqualToString:@"Unlock"]) {
-        [self ensureAllLayerMaps]; [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Locked"]) {
-        [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    // 【极度关键】：如果不是从 Sleep 醒来，我们才强制复写物理坐标系，否则给苹果 CAStateController 留路平滑飞行！
+    if (![oldState isEqualToString:@"Sleep"] || !animated) {
+        if ([stateName isEqualToString:@"Unlock"]) {
+            [self ensureAllLayerMaps]; 
+            [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        } else if ([stateName isEqualToString:@"Locked"]) {
+            [self ensureAllLayerMaps]; 
+            [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        }
     }
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
@@ -1243,8 +1267,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    if ([self.currentState isEqualToString:@"Sleep"]) return; // 【极度关键：阻断帧刷新器对息屏坐标复写】
+    
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
+    
+    if (progress == 0.0 && [self.currentState isEqualToString:@"Locked"]) return; // 防止刚唤醒时捕捉 0.0 瞬移打断动画
+    if (progress == 1.0 && [self.currentState isEqualToString:@"Unlock"]) return;
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -1259,18 +1288,23 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
     if ([self.currentState isEqualToString:stateName]) return;
+    
+    NSString *oldState = self.currentState;
     self.currentState = [stateName copy];
     
-    if ([stateName isEqualToString:@"Unlock"]) {
-        [self ensureAllLayerMaps]; 
-        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Locked"]) {
-        [self ensureAllLayerMaps]; 
-        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    // 【极度关键】：如果不是从 Sleep 醒来，我们才强制复写物理坐标系，否则给苹果 CAStateController 留路平滑飞行！
+    if (![oldState isEqualToString:@"Sleep"] || !animated) {
+        if ([stateName isEqualToString:@"Unlock"]) {
+            [self ensureAllLayerMaps]; 
+            [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        } else if ([stateName isEqualToString:@"Locked"]) {
+            [self ensureAllLayerMaps]; 
+            [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        }
     }
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -1515,8 +1549,23 @@ static void EnsureEngineViewIsMounted() {
 %group iOS16Plus
 
 %hook SBBacklightController
-// iOS 16 及更高版本的背光状态监听 (0=关闭, 1=亮起, 2=AOD)
+// 【全天候与亮灭屏完美覆盖】：兼顾 iOS 16/17 原生调用与 BLS Backlight 体系回调
 - (void)setBacklightState:(long long)state source:(long long)source {
+    %orig;
+    if (g_enabled) {
+        BOOL isAwake = (state == 1); // 1 = 亮屏, 0 = 灭屏, 2 = AOD息屏显示
+        if (isAwake != g_isScreenOn) {
+            g_isScreenOn = isAwake;
+            g_lastTickProgress = -1;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:isAwake ? @"ZoneEngineWake" : @"ZoneEngineSleep" object:nil];
+                NSString *targetState = isAwake ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": targetState}];
+            });
+        }
+    }
+}
+- (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
         BOOL isAwake = (state == 1);
@@ -1531,7 +1580,7 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
-- (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
+- (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled) {
         BOOL isAwake = (state == 1);
@@ -1837,7 +1886,7 @@ static void EnsureEngineViewIsMounted() {
 %group iOS14_15
 
 %hook SBBacklightController
-// iOS 14-15 的背光判定 (Factor == 0.0 为黑)
+// 【完美适配 iOS 14-15 旧版系统背光管理】(Factor 为浮点亮度，大于 0.01 视为亮起)
 - (void)setBacklightFactor:(float)factor source:(long long)source {
     %orig;
     if (g_enabled) {
@@ -2274,6 +2323,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaper { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 
+// 去除对 Screen Off Mode 强依赖（已通过更底层的 Backlight 接管）
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
@@ -2369,7 +2419,6 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %ctor {
-    // 【核心修复】：进程隔离保护
     NSString *processName = [[NSProcessInfo processInfo] processName];
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
     
