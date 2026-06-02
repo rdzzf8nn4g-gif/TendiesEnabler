@@ -323,7 +323,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) AVPlayerLooper *looper;
 @property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, copy) NSString *currentPath;
-@property (nonatomic, assign) BOOL isManuallyPaused; 
+@property (nonatomic, assign) BOOL isManuallyPaused; // 用于区别系统强杀和主动暂停
 - (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path;
 - (void)playVideo;
 - (void)pauseVideo;
@@ -347,17 +347,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
         if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
             NSURL *url = [NSURL fileURLWithPath:path];
+            // 关闭精准时序，全面拥抱硬件解码提速
             AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
             AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
             
+            // 【4K内存防护】：限制预读缓冲秒数，即使 2GB 的原画也能控制在最低内存
             if ([item respondsToSelector:@selector(setPreferredForwardBufferDuration:)]) {
                 item.preferredForwardBufferDuration = 1.0;
             }
             
             self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
             self.player.muted = YES;
-            self.player.allowsExternalPlayback = NO; 
-            self.player.automaticallyWaitsToMinimizeStalling = NO; 
+            self.player.allowsExternalPlayback = NO; // 切断投屏和外界干扰
+            self.player.automaticallyWaitsToMinimizeStalling = NO; // 拒绝网络级防卡顿策略导致的假死
             self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
             
             if (@available(iOS 12.0, *)) {
@@ -371,9 +373,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.playerLayer.frame = self.bounds;
             [self.layer addSublayer:self.playerLayer];
             
+            // 【系统级防死锁监听】
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:UIApplicationDidBecomeActiveNotification object:nil];
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:AVPlayerItemPlaybackStalledNotification object:nil];
             
+            // KVO 底层速率监控（幽灵唤醒）
             [self.player addObserver:self forKeyPath:@"rate" options:NSKeyValueObservingOptionNew context:nil];
         }
     }
@@ -385,11 +389,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
+    // 渲染管线刷新时激进校验播放状态
     if (g_isScreenOn && g_enabled && g_isVideoMode) {
         [self playVideo];
     }
 }
 
+// 核心 KVO 回调：只要不是我主动暂停的，谁敢停我视频我就秒开拉起
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
@@ -403,6 +409,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)playVideo {
     if (!self.player) return;
     
+    // 【电量哨兵检测】
     if (g_lowPowerPause && [[NSProcessInfo processInfo] isLowPowerModeEnabled]) {
         [self pauseVideo];
         return;
@@ -467,6 +474,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
+        
+        // 监听系统低电量状态突变
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(powerStateChanged) name:NSProcessInfoPowerStateDidChangeNotification object:nil];
     }
     return self;
@@ -486,13 +495,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)powerStateChanged {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_enabled && g_isVideoMode && g_isScreenOn) {
-            [self onWakeUp]; 
+            [self onWakeUp]; // 复用校验逻辑秒关/秒开
         }
     });
 }
 
 - (void)onWakeUp {
     if (!g_enabled || !g_isVideoMode) return;
+    
+    // 【电量哨兵】低电量一键熔断
     if (g_lowPowerPause && [[NSProcessInfo processInfo] isLowPowerModeEnabled]) {
         [self.lockVideoView pauseVideo];
         [self.homeVideoView pauseVideo];
@@ -514,6 +525,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onProgress:(NSNotification *)note {
+    // 物理层面上，Lock就是Lock，Home就是Home。滑动交由系统处理。
     if (!g_enabled || !g_isVideoMode) return;
 }
 
@@ -547,6 +559,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.backgroundColor = [UIColor clearColor];
         
         if (IsSingleVideoMode()) {
+            // 【同素材极限优化：显存直降 50%】
+            // 永远只实例化唯一的 homeVideoView 作为物理底板，锁屏那边靠 _UIPortalView 以纯显卡镜像拉出！
             self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
             if (self.homeVideoView) {
                 self.homeVideoView.alpha = 1.0;
@@ -557,6 +571,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (hasLock) {
                 self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
                 if (self.lockVideoView) {
+                    // 双视频模式：锁屏在这里隐身，只交给 CoverSheet 传送门显形
                     self.lockVideoView.alpha = 0.0;
                     [self addSubview:self.lockVideoView];
                 }
@@ -669,7 +684,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil]; // 新增监听
     }
     return self;
 }
@@ -708,28 +723,25 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
+// 新增 State Change 监听处理方法
+- (void)onStateChange:(NSNotification *)note {
+    if (!g_enabled || !self.bgView) return;
+    NSString *state = note.userInfo[@"state"];
+    if (state) {
+        [self transitionToState:state animated:YES];
+    }
+}
+
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES]; 
+    [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
 }
 
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:YES];
-}
-
-- (void)onStateChange:(NSNotification *)note {
-    if (!g_enabled || !self.bgView) return;
-    NSString *state = note.userInfo[@"state"];
-    
-    // 【终极护盾】：如果屏幕是黑的，坚决无视别人发来的 Locked/Unlock 状态，我们就在 Sleep 老老实实待着
-    if (!g_isScreenOn && ![state isEqualToString:@"Sleep"]) return;
-    
-    if (state) {
-        [self transitionToState:state animated:YES];
-    }
+    [self transitionToState:@"Sleep" animated:NO];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -764,49 +776,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             NSNumber *lockNum = lockedVals[keyPath]; NSNumber *unlockNum = unlockVals[keyPath];
             if (lockNum && unlockNum) {
                 double currentVal = [lockNum doubleValue] + ([unlockNum doubleValue] - [lockNum doubleValue]) * progress;
-                [layer removeAnimationForKey:keyPath];
                 @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch (NSException *e) {}
             }
-        }
-    }
-    [CATransaction commit];
-}
-
-// 【原神启动】：强制越过 Apple 屏蔽机制，直接对显卡下发过渡坐标命令！
-- (void)applyManualState:(NSString *)stateName parser:(ZoneCAMLParserLegacy *)parser layerMap:(NSDictionary *)layerMap animated:(BOOL)animated {
-    if (layerMap.count == 0 || !parser) return;
-    
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    
-    NSTimeInterval duration = [stateName isEqualToString:@"Sleep"] ? 0.45 : 0.6;
-    CAMediaTimingFunction *timing = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    
-    for (NSString *targetId in parser.statesData) {
-        CALayer *layer = layerMap[targetId]; if (!layer) continue;
-        NSDictionary *states = parser.statesData[targetId];
-        NSDictionary *vals = states[stateName];
-        if (!vals) continue;
-        
-        for (NSString *keyPath in vals) {
-            id endVal = vals[keyPath];
-            // 【无缝衔接核心】：从图层空中飞行的当前绝对坐标开始，而不是模型坐标！
-            id startVal = [[layer presentationLayer] valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
-            
-            [layer removeAnimationForKey:keyPath];
-            
-            if (animated && startVal && endVal && ![startVal isEqual:endVal]) {
-                CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:keyPath];
-                anim.fromValue = startVal;
-                anim.toValue = endVal;
-                anim.duration = duration;
-                anim.timingFunction = timing;
-                anim.fillMode = kCAFillModeForwards;
-                anim.removedOnCompletion = YES;
-                [layer addAnimation:anim forKey:keyPath];
-            }
-            
-            @try { [layer setValue:endVal forKeyPath:keyPath]; } @catch (NSException *e) {}
         }
     }
     [CATransaction commit];
@@ -816,11 +787,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
-    
-    // 【进度条防误杀墙】：息屏期间、或者到达两端后，坚决不响应多余的 0.0 滑动干扰！
-    if ([self.currentState isEqualToString:@"Sleep"]) return;
-    if (progress <= 0.001 && [self.currentState isEqualToString:@"Locked"]) return;
-    if (progress >= 0.999 && [self.currentState isEqualToString:@"Unlock"]) return;
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -837,33 +803,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
-    [self ensureAllLayerMaps];
+    if ([stateName isEqualToString:@"Unlock"]) {
+        [self ensureAllLayerMaps]; [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    } else if ([stateName isEqualToString:@"Locked"]) {
+        [self ensureAllLayerMaps]; [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    }
+    // 注意：如果是 Sleep 状态，直接跳过 applyProgress 锁定，放行给底层的 BSUICAPackageView
     
-    // 【接管控制流】：但凡需要动画，我们自己操作，系统原生靠边站！
-    if (animated) {
-        [self applyManualState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:YES];
-        [self applyManualState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:YES];
-        [self applyManualState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:YES];
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:stateName animated:animated]; [self.floatingView setState:stateName animated:animated]; [self.fgView setState:stateName animated:animated];
     } else {
-        if ([stateName isEqualToString:@"Unlock"]) {
-            [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-            [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-            [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-        } else if ([stateName isEqualToString:@"Locked"]) {
-            [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-            [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
-        } else {
-            [self applyManualState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-            [self applyManualState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-            [self applyManualState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        }
-        
-        if ([self.bgView respondsToSelector:@selector(setState:)]) {
-            [self.bgView setState:stateName]; 
-            [self.floatingView setState:stateName]; 
-            [self.fgView setState:stateName];
-        }
+        [self.bgView setState:stateName]; [self.floatingView setState:stateName]; [self.fgView setState:stateName];
     }
 }
 
@@ -1154,7 +1104,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWakeUp) name:@"ZoneEngineWake" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil]; // 新增监听
     }
     return self;
 }
@@ -1229,28 +1179,25 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
+// 新增 State Change 监听处理方法
+- (void)onStateChange:(NSNotification *)note {
+    if (!g_enabled || !self.bgView) return;
+    NSString *state = note.userInfo[@"state"];
+    if (state) {
+        [self transitionToState:state animated:YES];
+    }
+}
+
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES]; 
+    [CATransaction begin]; [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO]; [CATransaction commit]; [CATransaction flush];
 }
 
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:YES];
-}
-
-- (void)onStateChange:(NSNotification *)note {
-    if (!g_enabled || !self.bgView) return;
-    NSString *state = note.userInfo[@"state"];
-    
-    // 【终极护盾】：如果屏幕是黑的，坚决无视别人发来的 Locked/Unlock 状态，我们就在 Sleep 老老实实待着
-    if (!g_isScreenOn && ![state isEqualToString:@"Sleep"]) return;
-    
-    if (state) {
-        [self transitionToState:state animated:YES];
-    }
+    [self transitionToState:@"Sleep" animated:NO];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserEnhanced *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -1312,69 +1259,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction commit];
 }
 
-// 【原神启动】：强制越过 Apple 屏蔽机制，直接对显卡下发过渡坐标命令！
-- (void)applyManualState:(NSString *)stateName parser:(ZoneCAMLParserEnhanced *)parser layerMap:(NSDictionary *)layerMap animated:(BOOL)animated {
-    if (layerMap.count == 0 || !parser) return;
-    
-    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    NSString *realState = [parser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    
-    NSTimeInterval duration = [stateName isEqualToString:@"Sleep"] ? 0.45 : 0.6;
-    CAMediaTimingFunction *timing = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    
-    for (NSString *targetId in parser.statesData) {
-        CALayer *layer = layerMap[targetId]; if (!layer) continue;
-        NSDictionary *states = parser.statesData[targetId];
-        NSDictionary *vals = states[realState];
-        if (!vals) continue;
-        
-        for (NSString *keyPath in vals) {
-            id endVal = vals[keyPath];
-            // 【无缝衔接核心】：从图层空中飞行的当前绝对坐标开始，而不是模型坐标！
-            id startVal = [[layer presentationLayer] valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
-            
-            [layer removeAnimationForKey:keyPath];
-            
-            if (animated && startVal && endVal && ![startVal isEqual:endVal]) {
-                CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:keyPath];
-                
-                // 智能适配对象类型
-                if ([startVal isKindOfClass:[NSValue class]] && [endVal isKindOfClass:[NSValue class]]) {
-                    anim.fromValue = startVal;
-                    anim.toValue = endVal;
-                } else if ([startVal isKindOfClass:[NSNumber class]] && [endVal isKindOfClass:[NSNumber class]]) {
-                    anim.fromValue = startVal;
-                    anim.toValue = endVal;
-                } else {
-                    anim.fromValue = startVal;
-                    anim.toValue = endVal;
-                }
-                
-                anim.duration = duration;
-                anim.timingFunction = timing;
-                anim.fillMode = kCAFillModeForwards;
-                anim.removedOnCompletion = YES;
-                [layer addAnimation:anim forKey:keyPath];
-            }
-            
-            @try { [layer setValue:endVal forKeyPath:keyPath]; } @catch (NSException *e) {}
-        }
-    }
-    [CATransaction commit];
-}
-
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
-    
-    // 【进度条防误杀墙】：息屏期间、或者到达两端后，坚决不响应多余的 0.0 滑动干扰！
-    if ([self.currentState isEqualToString:@"Sleep"]) return;
-    if (progress <= 0.001 && [self.currentState isEqualToString:@"Locked"]) return;
-    if (progress >= 0.999 && [self.currentState isEqualToString:@"Unlock"]) return;
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -1391,38 +1279,33 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
-    [self ensureAllLayerMaps];
+    if ([stateName isEqualToString:@"Unlock"]) {
+        [self ensureAllLayerMaps]; 
+        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    } else if ([stateName isEqualToString:@"Locked"]) {
+        [self ensureAllLayerMaps]; 
+        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+    }
+    // 注意：如果是 Sleep 状态，直接跳过 applyProgress 锁定，放行给底层的 BSUICAPackageView
     
-    // 【接管控制流】：但凡需要动画，我们自己操作，系统原生靠边站！
-    if (animated) {
-        [self applyManualState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:YES];
-        [self applyManualState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:YES];
-        [self applyManualState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:YES];
+    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:realBgState animated:animated]; 
+        [self.floatingView setState:realFloatState animated:animated]; 
+        [self.fgView setState:realFgState animated:animated];
     } else {
-        if ([stateName isEqualToString:@"Unlock"]) {
-            [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-            [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-            [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-        } else if ([stateName isEqualToString:@"Locked"]) {
-            [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-            [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
-        } else {
-            [self applyManualState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-            [self applyManualState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-            [self applyManualState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        }
-        
-        BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-        NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-        NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-        NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-        
-        if ([self.bgView respondsToSelector:@selector(setState:)]) {
-            [self.bgView setState:realBgState]; 
-            [self.floatingView setState:realFloatState]; 
-            [self.fgView setState:realFgState];
-        }
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
     }
 }
 
@@ -1882,7 +1765,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    // 【去除了 g_isScreenOn 条件，保证状态命令100%下发】
     if (g_enabled) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2245,7 +2127,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     g_isUnlocked = YES;
     g_lastTickProgress = -1; 
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
@@ -2396,16 +2278,15 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
-            
-            NSString *stateName = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (screenOn) {
+            if (g_isScreenOn) {
+                dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                } else {
+                });
+            } else {
+                dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                }
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": stateName}];
-            });
+                });
+            }
         }
     }
 }
@@ -2416,16 +2297,15 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
-            
-            NSString *stateName = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (screenOn) {
+            if (g_isScreenOn) {
+                dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                } else {
+                });
+            } else {
+                dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                }
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": stateName}];
-            });
+                });
+            }
         }
     }
 }
