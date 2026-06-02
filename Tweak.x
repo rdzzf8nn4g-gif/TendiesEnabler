@@ -639,6 +639,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 @property (nonatomic, assign) BOOL isAnimatingState; 
 @property (nonatomic, assign) NSInteger animationGeneration;
+@property (nonatomic, strong) UIColor *plistBackgroundColor; // 新增：支持 Plist 背景解析
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 @end
@@ -685,6 +686,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.bounds;
+    
+    if (self.plistBackgroundColor) {
+        self.backgroundColor = self.plistBackgroundColor;
+    } else {
+        self.backgroundColor = [UIColor clearColor];
+    }
     
     if (self.bgView) self.bgView.frame = bounds;
     if (self.floatingView) self.floatingView.frame = bounds;
@@ -881,6 +888,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         NSFileManager *fm = [NSFileManager defaultManager];
         __block NSString *foundBg = nil; __block NSString *foundFloat = nil; __block NSString *foundFg = nil;
+        __block NSString *foundPlist = nil;
         
         NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
         NSString *subPath;
@@ -889,13 +897,28 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
             NSString *fileName = [subPath lastPathComponent];
             BOOL isDir = NO;
-            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-                if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
+            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir]) {
+                if (isDir && [[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
                     if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) foundBg = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) foundFloat = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) foundFg = fullPath;
                     [dirEnum skipDescendants];
+                } else if (!isDir && [fileName isEqualToString:@"Wallpaper.plist"]) {
+                    foundPlist = fullPath;
                 }
+            }
+        }
+        
+        __block UIColor *parsedBgColor = nil;
+        if (foundPlist) {
+            NSDictionary *plistData = [NSDictionary dictionaryWithContentsOfFile:foundPlist];
+            NSArray *bgArray = plistData[@"backgroundColor"];
+            if ([bgArray isKindOfClass:[NSArray class]] && bgArray.count >= 3) {
+                CGFloat r = [bgArray[0] doubleValue];
+                CGFloat g = [bgArray[1] doubleValue];
+                CGFloat b = [bgArray[2] doubleValue];
+                CGFloat a = (bgArray.count >= 4) ? [bgArray[3] doubleValue] : 1.0;
+                parsedBgColor = [UIColor colorWithRed:r green:g blue:b alpha:a];
             }
         }
         
@@ -904,6 +927,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         dispatch_async(dispatch_get_main_queue(), ^{
             if (currentGen != self.reloadGeneration) return; 
             [self clearCurrentViewsSafely]; 
+            self.plistBackgroundColor = parsedBgColor;
             
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
@@ -1133,6 +1157,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 @property (nonatomic, assign) BOOL isAnimatingState; 
 @property (nonatomic, assign) NSInteger animationGeneration;
+@property (nonatomic, strong) UIColor *plistBackgroundColor; // 新增：支持 Plist 背景解析
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 @end
@@ -1198,6 +1223,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         bounds.origin = CGPointZero;
     }
     
+    if (self.plistBackgroundColor) {
+        self.backgroundColor = self.plistBackgroundColor;
+    } else if (self.bgParser && self.bgParser.rootBackgroundColor) {
+        self.backgroundColor = self.bgParser.rootBackgroundColor;
+    } else {
+        self.backgroundColor = [UIColor clearColor];
+    }
+    
     BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
     ZoneCAMLParserEnhanced *parsers[] = {self.bgParser, self.floatParser, self.fgParser};
     
@@ -1207,13 +1240,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (!v) continue;
         
         v.frame = bounds;
-        
-        if (p && p.rootBackgroundColor) {
-            v.backgroundColor = p.rootBackgroundColor;
-            v.layer.backgroundColor = p.rootBackgroundColor.CGColor;
-        } else {
-            v.backgroundColor = [UIColor clearColor];
-        }
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
@@ -1350,10 +1376,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    // 只在真正的 Sleep 动画期间才阻挡，一旦屏幕点亮，即可随时被手势拖拽打断
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    // 强制解除所有动画锁，保证手指拖拽过程 0 延迟、0 卡顿，与原生完全同步！
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
@@ -1465,6 +1489,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         __block CGSize targetSize = CGSizeZero;
+        __block UIColor *parsedBgColor = nil;
+        
         if (foundPlist) {
             NSDictionary *plistData = [NSDictionary dictionaryWithContentsOfFile:foundPlist];
             NSString *logicalClassStr = plistData[@"logicalScreenClass"];
@@ -1479,6 +1505,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     }
                 }
             }
+            
+            NSArray *bgArray = plistData[@"backgroundColor"];
+            if ([bgArray isKindOfClass:[NSArray class]] && bgArray.count >= 3) {
+                CGFloat r = [bgArray[0] doubleValue];
+                CGFloat g = [bgArray[1] doubleValue];
+                CGFloat b = [bgArray[2] doubleValue];
+                CGFloat a = (bgArray.count >= 4) ? [bgArray[3] doubleValue] : 1.0;
+                parsedBgColor = [UIColor colorWithRed:r green:g blue:b alpha:a];
+            }
         }
         
         if (currentGen != self.reloadGeneration) return; 
@@ -1487,6 +1522,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (currentGen != self.reloadGeneration) return; 
             [self clearCurrentViewsSafely]; 
             self.logicalScreenSize = targetSize; 
+            self.plistBackgroundColor = parsedBgColor;
             
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
@@ -1581,7 +1617,6 @@ static void EnsureEngineViewIsMounted() {
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
 
-    // 【极速释放】：关闭开关直接摧毁，毫无残留
     if (!g_enabled) {
         if (existingEngine) {
             if ([existingEngine respondsToSelector:@selector(clearCurrentViewsSafely)]) {
