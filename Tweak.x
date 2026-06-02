@@ -1195,10 +1195,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (!v) continue;
         
         v.frame = bounds;
+        
+        // 彻底根治背景消失 Bug，同时把背景赋给 view 和 layer
         if (p && p.rootBackgroundColor) {
             v.backgroundColor = p.rootBackgroundColor;
+            v.layer.backgroundColor = p.rootBackgroundColor.CGColor;
         } else {
             v.backgroundColor = [UIColor clearColor];
+            v.layer.backgroundColor = [UIColor clearColor].CGColor;
         }
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
@@ -1714,7 +1718,6 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
-    // 【完美隔离：视频模式按需屏蔽原生，不设就露出系统自带！】
     BOOL hideHome = !g_isVideoMode || (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
     BOOL hideLock = !g_isVideoMode || (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
 
@@ -1729,7 +1732,6 @@ static void EnsureEngineViewIsMounted() {
 }
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
     if (g_enabled && !g_isVideoMode) return nil;
-    // 【保留原生地毛玻璃模糊】单素材同源视频时必须放行
     if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
     
     if (g_enabled && g_isVideoMode) return nil;
@@ -1744,20 +1746,75 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+@interface CSCoverSheetViewController (Zone16)
+- (void)zone_tickProgress;
+@end
+
 %hook CSCoverSheetViewController
 - (void)setSuspendWallpaperAnimationAssertion:(id)assertion {
-    if (g_enabled) return; // 【防冻结】：拦截锁屏界面触发的冻结
+    if (g_enabled) return; 
     %orig;
 }
 
 - (void)viewDidLoad {
     %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
+    
+    // 【加入 CADisplayLink 解决不跟手卡顿问题】
+    if (g_enabled) {
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zone_tickProgress)];
+        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        objc_setAssociatedObject(self, "ZoneTicker16", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceLayout" object:nil];
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker16");
+    if (link) [link invalidate];
     %orig;
+}
+
+%new
+- (void)zone_tickProgress {
+    if (!g_enabled || !g_isScreenOn) return;
+    CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
+    CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
+    double yOffset = absoluteRect.origin.y;
+    double screenHeight = [UIScreen mainScreen].bounds.size.height;
+    double engineProgress = -yOffset / screenHeight;
+    engineProgress = MAX(0.0, MIN(1.0, engineProgress));
+    
+    if (ABS(engineProgress - g_lastTickProgress) > 0.0001) {
+        g_lastTickProgress = engineProgress;
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
+        
+        if (g_portalView) {
+            if (g_isVideoMode) {
+                if (g_portalView.alpha != 1.0) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    g_portalView.alpha = 1.0;
+                    [CATransaction commit];
+                }
+            } else {
+                double alpha = 0.0;
+                if (engineProgress > 0.7) {
+                    alpha = (1.0 - engineProgress) * (0.05 / 0.3);
+                } else if (engineProgress > 0.6) {
+                    alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
+                } else {
+                    alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
+                }
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
+            }
+        }
+    }
 }
 
 - (void)viewWillLayoutSubviews {
@@ -1790,7 +1847,6 @@ static void EnsureEngineViewIsMounted() {
     if (engineView) {
         UIView *sourceForPortal = engineView;
         if (g_isVideoMode) {
-            // 【同素材极简通道】：只拿 Home 进行渲染投射
             if (IsSingleVideoMode()) {
                 if ([engineView respondsToSelector:@selector(homeVideoView)]) {
                     UIView *homeView = [engineView performSelector:@selector(homeVideoView)];
@@ -1800,7 +1856,7 @@ static void EnsureEngineViewIsMounted() {
                 if ([engineView respondsToSelector:@selector(lockVideoView)]) {
                     UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
                     if (lockView) sourceForPortal = lockView;
-                    else sourceForPortal = nil; // 没设锁屏不搞传送门
+                    else sourceForPortal = nil; 
                 }
             }
         }
@@ -1810,7 +1866,6 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            // 同素材时必须绝对贴合底层坐标 (YES)
             portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
@@ -1837,7 +1892,6 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidden = YES;
         }
 
-        // 【核心】：判断是否需要强制隐藏原生背景及其子视图
         BOOL hideNativeBlurs = !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
 
         if (bgVC && bgVC.view) {
@@ -1854,7 +1908,6 @@ static void EnsureEngineViewIsMounted() {
                         sub.alpha = 0.0;
                         sub.hidden = YES;
                     } else {
-                        // 解锁原生地毛玻璃控制权限
                         sub.alpha = 1.0;
                         sub.hidden = NO;
                     }
@@ -1882,13 +1935,11 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-- (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
-
+// 【修复锁屏长按进入海报编辑模式闪退问题】
 - (void)_prepareForPosterSwitcherPresentation {
     %orig;
     if (g_enabled && g_portalView) {
         g_portalView.hidden = YES;
-        g_portalView.alpha = 0.0;
     }
 }
 
@@ -1896,14 +1947,6 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled && g_portalView) {
         g_portalView.hidden = NO;
-        [self viewWillLayoutSubviews];
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
     }
 }
 
@@ -1911,14 +1954,6 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled && g_portalView) {
         g_portalView.hidden = NO;
-        [self viewWillLayoutSubviews];
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
     }
 }
 
@@ -1927,12 +1962,10 @@ static void EnsureEngineViewIsMounted() {
     g_isUnlocked = dismissed;
     if (g_enabled && g_isScreenOn) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
-        // 必须同步！
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
 }
 
-// 【补齐 iOS 16/17 从彻底黑屏唤醒的切入点】
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
@@ -1942,7 +1975,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// 【补齐 iOS 16/17 原生唤醒渐变入口】
 - (void)_startFadeInAnimationForSource:(int)source {
     %orig;
     if (g_enabled) {
@@ -1957,7 +1989,6 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isScreenOn = !inactive;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        // 必须同步执行，在当前动画块中加入咱们的动画！
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
 }
@@ -1979,46 +2010,16 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
+    // 不再通过这个方法干预，完全交给 zone_tickProgress，杜绝抢占竞争
     if (!g_enabled) return; 
     EnsureEngineViewIsMounted();
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-        
-        if (g_portalView) {
-            // 【物理斩断】：视频模式完全不吃透明度，恒为 1.0，完全依靠原生拖拽动画遮盖与系统模糊
-            if (g_isVideoMode) {
-                if (g_portalView.alpha != 1.0) {
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    g_portalView.alpha = 1.0;
-                    [CATransaction commit];
-                }
-            } else {
-                double alpha = 0.0;
-                if (progress > 0.7) {
-                    alpha = (1.0 - progress) * (0.05 / 0.3);
-                } else if (progress > 0.6) {
-                    alpha = 0.05 + (0.7 - progress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-                }
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
-        }
-    });
 }
 %end
 
-// 【抓取 iOS 16/17 原生硬件级唤醒/息屏核心】
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled) {
-        // state = 0(Off), 1(On), 2(AOD iOS16+)
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
@@ -2071,7 +2072,6 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     if (g_isVideoMode) {
-        // 放行同素材模式时的底板显示
         if (IsSingleVideoMode()) {
             self.hidden = NO;
             self.alpha = 1.0;
@@ -2317,6 +2317,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
+// 完美还原 iOS 14-15 原始代码，无强制状态下发
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
@@ -2337,6 +2338,16 @@ static void EnsureEngineViewIsMounted() {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
+        });
+    }
+}
+
+- (void)setInScreenOffMode:(BOOL)mode {
+    %orig;
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
 }
@@ -2382,7 +2393,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
-
 %end // 结束 iOS14_15
 
 
@@ -2414,7 +2424,6 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled) {
         NSString *state = wake ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-        // 捕获到最核心的动画发起点，必须立刻同步下发！
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @(animated)}];
     }
 }
@@ -2509,9 +2518,6 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)viewDidLayoutSubviews { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
-- (void)_updateBackgroundContentView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
-- (void)_updateWallpaperEffectView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
-- (void)_updateWallpaper { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 %end
 
 %hook CSBackgroundContentView
