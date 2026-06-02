@@ -673,6 +673,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
+- (void)lockSolidBackground;
 @end
 
 @implementation ZoneRenderEngineLegacy
@@ -718,33 +719,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [super layoutSubviews];
     CGRect bounds = self.bounds;
     
-    UIColor *finalBgColor = [UIColor clearColor];
-    if (self.plistBackgroundColor) {
-        finalBgColor = self.plistBackgroundColor;
-    } else if (self.bgParser && self.bgParser.fallbackBackgroundColor) {
-        finalBgColor = self.bgParser.fallbackBackgroundColor;
-    }
-    self.backgroundColor = finalBgColor;
-    
     if (self.bgView) {
         self.bgView.frame = bounds;
-        if (finalBgColor != [UIColor clearColor]) {
-            self.bgView.backgroundColor = finalBgColor;
-            self.bgView.layer.backgroundColor = finalBgColor.CGColor;
-        } else {
-            self.bgView.backgroundColor = [UIColor clearColor];
-            self.bgView.layer.backgroundColor = [UIColor clearColor].CGColor;
-        }
     }
     if (self.floatingView) {
         self.floatingView.frame = bounds;
-        self.floatingView.backgroundColor = [UIColor clearColor];
-        self.floatingView.layer.backgroundColor = [UIColor clearColor].CGColor;
     }
     if (self.fgView) {
         self.fgView.frame = bounds;
-        self.fgView.backgroundColor = [UIColor clearColor];
-        self.fgView.layer.backgroundColor = [UIColor clearColor].CGColor;
     }
 
     if (@available(iOS 16.0, *)) {
@@ -923,6 +905,47 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
 }
 
+// 终极背景捕捉锁定：强行扫描出纯色背景，焊死在引擎底板上，防系统偷杀！
+- (void)lockSolidBackground {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.bgView) return;
+        
+        UIColor *targetColor = nil;
+        if ([self respondsToSelector:@selector(plistBackgroundColor)] && self.plistBackgroundColor) {
+            targetColor = self.plistBackgroundColor;
+        } else if (self.bgParser && [self.bgParser respondsToSelector:@selector(fallbackBackgroundColor)] && [(id)self.bgParser fallbackBackgroundColor]) {
+            targetColor = [(id)self.bgParser fallbackBackgroundColor];
+        }
+        
+        if (targetColor) {
+            self.backgroundColor = targetColor;
+            self.bgView.backgroundColor = targetColor;
+            self.bgView.layer.backgroundColor = targetColor.CGColor;
+            return;
+        }
+        
+        CALayer *rootLayer = [self.bgView.layer.sublayers firstObject];
+        if (!rootLayer) return;
+        
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:rootLayer];
+        while (queue.count > 0) {
+            CALayer *layer = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            
+            if (layer.backgroundColor && CGColorGetAlpha(layer.backgroundColor) > 0.05) {
+                targetColor = [UIColor colorWithCGColor:layer.backgroundColor];
+                self.backgroundColor = targetColor;
+                self.bgView.backgroundColor = targetColor;
+                self.bgView.layer.backgroundColor = targetColor.CGColor;
+                return;
+            }
+            if (layer.sublayers) {
+                [queue addObjectsFromArray:layer.sublayers];
+            }
+        }
+    });
+}
+
 - (void)reloadWallpaperViews {
     self.reloadGeneration++;
     NSInteger currentGen = self.reloadGeneration;
@@ -1049,6 +1072,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 
                 [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
                 [CATransaction commit];
+                
+                [self lockSolidBackground]; // 执行深层锁定
             });
         });
     });
@@ -1208,6 +1233,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
+- (void)lockSolidBackground;
 @end
 
 @implementation ZoneRenderEngineEnhanced
@@ -1519,6 +1545,47 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.logicalScreenSize = CGSizeZero;
 }
 
+// 终极背景捕捉锁定：强行扫描出纯色背景，焊死在引擎底板上，防系统偷杀！
+- (void)lockSolidBackground {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.bgView) return;
+        
+        UIColor *targetColor = nil;
+        if ([self respondsToSelector:@selector(plistBackgroundColor)] && self.plistBackgroundColor) {
+            targetColor = self.plistBackgroundColor;
+        } else if (self.bgParser && [self.bgParser respondsToSelector:@selector(fallbackBackgroundColor)] && [(id)self.bgParser fallbackBackgroundColor]) {
+            targetColor = [(id)self.bgParser fallbackBackgroundColor];
+        }
+        
+        if (targetColor) {
+            self.backgroundColor = targetColor;
+            self.bgView.backgroundColor = targetColor;
+            self.bgView.layer.backgroundColor = targetColor.CGColor;
+            return;
+        }
+        
+        CALayer *rootLayer = [self.bgView.layer.sublayers firstObject];
+        if (!rootLayer) return;
+        
+        NSMutableArray *queue = [NSMutableArray arrayWithObject:rootLayer];
+        while (queue.count > 0) {
+            CALayer *layer = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            
+            if (layer.backgroundColor && CGColorGetAlpha(layer.backgroundColor) > 0.05) {
+                targetColor = [UIColor colorWithCGColor:layer.backgroundColor];
+                self.backgroundColor = targetColor;
+                self.bgView.backgroundColor = targetColor;
+                self.bgView.layer.backgroundColor = targetColor.CGColor;
+                return;
+            }
+            if (layer.sublayers) {
+                [queue addObjectsFromArray:layer.sublayers];
+            }
+        }
+    });
+}
+
 - (void)reloadWallpaperViews {
     self.reloadGeneration++;
     NSInteger currentGen = self.reloadGeneration;
@@ -1662,6 +1729,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 
                 [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
                 [CATransaction commit];
+                
+                [self lockSolidBackground]; // 执行深层锁定
             });
         });
     });
