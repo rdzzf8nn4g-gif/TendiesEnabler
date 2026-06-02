@@ -38,11 +38,6 @@ typedef struct {
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
 @end
 
-@interface SBBacklightController : NSObject
-+ (id)sharedInstance;
-@property (readonly, nonatomic) long long backlightState;
-@end
-
 @interface CSCoverSheetViewController : UIViewController
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
@@ -661,6 +656,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *bgLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *floatLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
+@property (nonatomic, assign) BOOL isAnimatingState; // 动画锁
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 @end
@@ -675,6 +671,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.isUnlocking = NO;
         self.currentState = @"Init";
         self.reloadGeneration = 0;
+        self.isAnimatingState = NO;
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
@@ -778,35 +775,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             NSNumber *lockNum = lockedVals[keyPath]; NSNumber *unlockNum = unlockVals[keyPath];
             if (lockNum && unlockNum) {
                 double currentVal = [lockNum doubleValue] + ([unlockNum doubleValue] - [lockNum doubleValue]) * progress;
-                @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch (NSException *e) {}
-            }
-        }
-    }
-    [CATransaction commit];
-}
-
-- (void)applyExplicitState:(NSString *)stateName parser:(ZoneCAMLParserLegacy *)parser layerMap:(NSDictionary *)layerMap animated:(BOOL)animated {
-    if (layerMap.count == 0 || !parser) return;
-    
-    [CATransaction begin]; 
-    if (!animated) {
-        [CATransaction setDisableActions:YES];
-    } else {
-        [CATransaction setAnimationDuration:0.8];
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
-    }
-    
-    for (NSString *targetId in parser.statesData) {
-        CALayer *layer = layerMap[targetId]; if (!layer) continue;
-        NSDictionary *states = parser.statesData[targetId];
-        NSDictionary *targetVals = states[stateName];
-        if (!targetVals) continue;
-        
-        for (NSString *keyPath in targetVals) {
-            NSNumber *targetVal = targetVals[keyPath];
-            if (targetVal) {
                 [layer removeAnimationForKey:keyPath];
-                @try { [layer setValue:targetVal forKeyPath:keyPath]; } @catch(NSException *e) {}
+                @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch (NSException *e) {}
             }
         }
     }
@@ -815,7 +785,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if ([self.currentState isEqualToString:@"Sleep"]) return; // 防止进度条在息屏时覆盖动画
+    if (self.isAnimatingState) return; 
+    if ([self.currentState isEqualToString:@"Sleep"]) return; 
     
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
@@ -835,20 +806,22 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
-    [self ensureAllLayerMaps];
-    
-    if ([stateName isEqualToString:@"Unlock"]) {
-        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Locked"]) {
-        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Sleep"]) {
-        [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
+    if (animated) {
+        self.isAnimatingState = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            self.isAnimatingState = NO;
+        });
+    } else {
+        [self ensureAllLayerMaps];
+        if ([stateName isEqualToString:@"Unlock"]) {
+            [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        } else if ([stateName isEqualToString:@"Locked"]) {
+            [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        }
     }
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
@@ -1125,6 +1098,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *bgLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *floatLayerMap;
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
+@property (nonatomic, assign) BOOL isAnimatingState; // 动画锁
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 @end
@@ -1140,6 +1114,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.currentState = @"Init";
         self.reloadGeneration = 0;
         self.logicalScreenSize = CGSizeZero;
+        self.isAnimatingState = NO;
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
@@ -1306,39 +1281,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction commit];
 }
 
-- (void)applyExplicitState:(NSString *)stateName parser:(ZoneCAMLParserEnhanced *)parser layerMap:(NSDictionary *)layerMap animated:(BOOL)animated {
-    if (layerMap.count == 0 || !parser) return;
-    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    NSString *realState = [parser resolveRealStateNameFor:stateName isDark:isDark];
-    
-    [CATransaction begin];
-    if (!animated) {
-        [CATransaction setDisableActions:YES];
-    } else {
-        [CATransaction setAnimationDuration:0.8]; 
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
-    }
-    
-    for (NSString *targetId in parser.statesData) {
-        CALayer *layer = layerMap[targetId]; if (!layer) continue;
-        NSDictionary *states = parser.statesData[targetId];
-        NSDictionary *targetVals = states[realState];
-        if (!targetVals) continue;
-        
-        for (NSString *keyPath in targetVals) {
-            id targetVal = targetVals[keyPath];
-            if (targetVal) {
-                [layer removeAnimationForKey:keyPath];
-                [layer setValue:targetVal forKeyPath:keyPath];
-            }
-        }
-    }
-    [CATransaction commit];
-}
-
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if ([self.currentState isEqualToString:@"Sleep"]) return; // 防止进度条在息屏时覆盖动画
+    if (self.isAnimatingState) return; 
+    if ([self.currentState isEqualToString:@"Sleep"]) return; 
     
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
@@ -1358,27 +1304,28 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
-    [self ensureAllLayerMaps];
-    
-    if ([stateName isEqualToString:@"Unlock"]) {
-        [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Locked"]) {
-        [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-        [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
-        [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
-    } else if ([stateName isEqualToString:@"Sleep"]) {
-        [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
-    }
-    
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    
+    if (animated) {
+        self.isAnimatingState = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            self.isAnimatingState = NO;
+        });
+    } else {
+        [self ensureAllLayerMaps]; 
+        if ([stateName isEqualToString:@"Unlock"]) {
+            [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        } else if ([stateName isEqualToString:@"Locked"]) {
+            [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
+            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
+        }
+    }
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:realBgState animated:animated]; 
@@ -1847,7 +1794,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
@@ -1858,6 +1805,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
     if (g_enabled) {
+        g_isScreenOn = !inactive;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
@@ -2201,28 +2149,35 @@ static void EnsureEngineViewIsMounted() {
         });
     }
 }
+
+- (void)setInScreenOffMode:(BOOL)mode {
+    %orig;
+    if (g_enabled) {
+        g_isScreenOn = !mode;
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+        });
+    }
+}
 %end
 
 %hook SBLockScreenManager
 - (void)lockUIFromSource:(int)source withOptions:(id)options {
     %orig;
     g_isUnlocked = NO;
-    g_lastTickProgress = -1; 
     if (g_enabled && g_isScreenOn) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
         });
     }
 }
 - (void)unlockUIFromSource:(int)source withOptions:(id)options {
     %orig;
     g_isUnlocked = YES;
-    g_lastTickProgress = -1; 
     if (g_enabled && g_isScreenOn) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock", @"animated": @YES}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
         });
     }
 }
@@ -2327,16 +2282,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateBackgroundContentView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaperEffectView { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
 - (void)_updateWallpaper { %orig; if (g_enabled) EnsureEngineViewIsMounted(); }
-
-- (void)setInScreenOffMode:(BOOL)mode {
-    %orig;
-    if (g_enabled) {
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        });
-    }
-}
 %end
 
 %hook CSBackgroundContentView
@@ -2357,49 +2302,6 @@ static void EnsureEngineViewIsMounted() {
         } else {
             presentationView.hidden = NO;
             presentationView.alpha = 1.0;
-        }
-    }
-}
-%end
-
-%hook SBBacklightController
-- (void)setBacklightState:(long long)state source:(long long)source {
-    %orig;
-    if (g_enabled) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (screenOn) {
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                } else {
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                }
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
-            });
-        }
-    }
-}
-- (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
-    %orig;
-    if (g_enabled) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (screenOn) {
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                } else {
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                }
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
-            });
         }
     }
 }
