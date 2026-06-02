@@ -996,7 +996,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) BOOL rootParsed;
 @property (nonatomic, strong) UIColor *rootBackgroundColor;
 @property (nonatomic, assign) BOOL isGeometryFlipped;
-@property (nonatomic, assign) BOOL isParsingBackgroundColor;
 - (void)parseFile:(NSString *)path;
 - (NSString *)resolveRealStateNameFor:(NSString *)logicalState isDark:(BOOL)isDark;
 @end
@@ -1040,16 +1039,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         NSString *layerId = attributeDict[@"id"];
         NSString *layerName = attributeDict[@"name"];
         if (layerId && layerName) self.idToNameMap[layerId] = layerName;
-    } else if ([elementName isEqualToString:@"backgroundColor"]) {
-        self.isParsingBackgroundColor = YES;
-        if (attributeDict[@"value"] && !self.rootBackgroundColor) {
+    } else if ([elementName isEqualToString:@"backgroundColor"] && !self.rootBackgroundColor) {
+        if (attributeDict[@"value"]) {
             self.rootBackgroundColor = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
-        }
-    } else if ([elementName isEqualToString:@"CGColor"]) {
-        if (self.isParsingBackgroundColor && !self.rootBackgroundColor) {
-            if (attributeDict[@"value"]) {
-                self.rootBackgroundColor = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
-            }
         }
     } else if ([elementName isEqualToString:@"LKState"]) {
         self.currentParsingState = attributeDict[@"name"];
@@ -1083,8 +1075,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
-    if ([elementName isEqualToString:@"backgroundColor"]) self.isParsingBackgroundColor = NO;
-    else if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
+    if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
     else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
 }
 - (NSString *)resolveRealStateNameFor:(NSString *)logicalState isDark:(BOOL)isDark {
