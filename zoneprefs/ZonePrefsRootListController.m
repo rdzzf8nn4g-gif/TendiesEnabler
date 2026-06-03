@@ -581,6 +581,7 @@ static NSString * GetPrefsPlistPath() {
 
 // 新增：循环切换壁纸动画速度
 - (void)cycleAnimSpeed:(UIButton *)sender {
+    if (!@available(iOS 16.0, *)) return;
     NSString *name = sender.accessibilityIdentifier;
     if (!name) return;
     
@@ -1160,7 +1161,10 @@ static NSString * GetPrefsPlistPath() {
         }
         
         // === 读取开关状态 ===
-        BOOL isAnimEnabled = prefs[@"EnableAnimSpeed"] ? [prefs[@"EnableAnimSpeed"] boolValue] : YES;
+        BOOL isAnimEnabled = NO;
+        if (@available(iOS 16.0, *)) {
+            isAnimEnabled = prefs[@"EnableAnimSpeed"] ? [prefs[@"EnableAnimSpeed"] boolValue] : YES;
+        }
         CGFloat targetAccWidth = isAnimEnabled ? 190 : 140; // 开启后动态加宽给速度按钮腾位置
         
         UIView *accView = cell.accessoryView;
