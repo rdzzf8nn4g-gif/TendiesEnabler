@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <QuartzCore/QuartzCore.h>
-#import <AVFoundation/AVFoundation.h>
+#import <AVFoundation/AVFoundation.h> 
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -196,15 +196,6 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
         if (found) return found;
     }
     return nil;
-}
-
-// 核心修复函数：强行暴力剥离所有隐式附加的CAAnimation，确保真正无动画
-static void ZoneRemoveAllAnimations(CALayer *layer) {
-    if (!layer) return;
-    [layer removeAllAnimations];
-    for (CALayer *sub in layer.sublayers) {
-        ZoneRemoveAllAnimations(sub);
-    }
 }
 
 // ==========================================
@@ -904,7 +895,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if (!g_enableAnimSpeed) return;
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -925,12 +915,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
-    if (!g_enableAnimSpeed) {
-        animated = NO; // 开关未开启时强制无动画
-        if ([stateName isEqualToString:@"Sleep"]) return; // 直接操作Sleep来控制，彻底切断原生息屏/亮屏动画
-    }
+    if (!g_enableAnimSpeed) animated = NO; // 开关未开启时强制无动画
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
+    
+    if (!g_enableAnimSpeed && [stateName isEqualToString:@"Sleep"]) {
+        return; 
+    }
     
     if (animated) {
         self.animationGeneration++;
@@ -977,14 +968,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:stateName]; 
         [self.fgView setState:stateName];
     }
-    
-    // 【核心剥离修正】: 底层拦截，拔掉任何强行添加的显式 CAAnimation，做到真正无动画秒切
-    if (!animated) {
-        ZoneRemoveAllAnimations(self.bgView.layer);
-        ZoneRemoveAllAnimations(self.floatingView.layer);
-        ZoneRemoveAllAnimations(self.fgView.layer);
-    }
-    
     [CATransaction commit];
 }
 
@@ -1563,7 +1546,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if (!g_enableAnimSpeed) return; // 核心修复：拦截进度动画
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -1584,12 +1566,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
-    if (!g_enableAnimSpeed) {
-        animated = NO; // 开关未开启时强制无动画
-        if ([stateName isEqualToString:@"Sleep"]) return; // 直接操作Sleep来控制，彻底切断原生息屏/亮屏动画
-    }
+    if (!g_enableAnimSpeed) animated = NO; // 开关未开启时强制无动画
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
+    
+    if (!g_enableAnimSpeed && [stateName isEqualToString:@"Sleep"]) {
+        return; 
+    }
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
@@ -1641,14 +1624,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:realFloatState]; 
         [self.fgView setState:realFgState];
     }
-    
-    // 【核心剥离修正】: 底层拦截，拔掉任何强行添加的显式 CAAnimation，做到真正无动画秒切
-    if (!animated) {
-        ZoneRemoveAllAnimations(self.bgView.layer);
-        ZoneRemoveAllAnimations(self.floatingView.layer);
-        ZoneRemoveAllAnimations(self.fgView.layer);
-    }
-    
     [CATransaction commit];
 }
 
