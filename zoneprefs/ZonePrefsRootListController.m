@@ -581,7 +581,10 @@ static NSString * GetPrefsPlistPath() {
 
 // 新增：循环切换壁纸动画速度
 - (void)cycleAnimSpeed:(UIButton *)sender {
-    if (!@available(iOS 16.0, *)) return;
+    if (@available(iOS 16.0, *)) {
+    } else {
+        return;
+    }
     NSString *name = sender.accessibilityIdentifier;
     if (!name) return;
     
