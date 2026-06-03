@@ -2223,6 +2223,17 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
+// 【终极物理锁】：在 iOS 16/17 的锁屏界面，绝不信任系统的任何 Progress！
+
+    // 无论是来通知的模糊，还是边缘误触，只要没真正解锁进桌面，强行归零！
+
+    // 这样壁纸绝对不会乱跳。只有在进入桌面后 (g_isUnlocked == YES) 下滑锁屏，才放行进度，完美保留透明度渐变！
+
+    if (!g_isUnlocked) {
+
+        progress = 0.0;
+
+    }
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
