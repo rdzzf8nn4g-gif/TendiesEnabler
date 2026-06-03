@@ -2223,6 +2223,15 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
+    // 安全锁：如果设备未解锁(还在锁屏)，并且系统突然发来 progress == 1.0 (通常是系统强制通知模糊指令)，直接屏蔽！
+
+    // 这样既保留了真实滑动(0.1~0.99)的动画，也完美保留了桌面下滑锁屏时的透明度渐变。
+
+    if (!g_isUnlocked && progress >= 1.0) {
+
+        return;
+
+    }
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
@@ -2556,17 +2565,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    if (g_enabled) {
-        g_isUnlocked = NO;
-        g_lastTickProgress = -1; 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
-        });
-    }
-}
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
