@@ -1895,12 +1895,6 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 // ==================== 【iOS 16+ 专属 Hook 区域】===========================
 // =========================================================================
-@interface CSCoverSheetViewController (Zone16)
-- (void)zone_tickProgress16;
-- (void)zone_screenSleep16;
-- (void)zone_screenWake16;
-@end
-
 %group iOS16Plus
 
 %hook PBUIWallpaperView
@@ -2006,80 +2000,38 @@ static void EnsureEngineViewIsMounted() {
 
 %hook CSCoverSheetViewController
 - (void)viewDidLoad {
-    %orig;
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
-    
-    if (g_enabled) {
-        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zone_tickProgress16)];
-        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        objc_setAssociatedObject(self, "ZoneTicker16", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenSleep16) name:@"ZoneEngineSleep" object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenWake16) name:@"ZoneEngineWake" object:nil];
-    }
+    %orig;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
+    if (g_enabled) {
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_syncPortalState:) name:@"ZoneEngineStateChange" object:nil];
+    }
 }
 
 - (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceLayout" object:nil];
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineSleep" object:nil];
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineWake" object:nil];
-    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker16");
-    if (link) [link invalidate];
-    %orig;
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceLayout" object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineStateChange" object:nil];
+    %orig;
 }
 
 %new
-- (void)zone_tickProgress16 {
-    if (!g_enabled || !g_isScreenOn) return;
-    CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
-    CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
-    double yOffset = absoluteRect.origin.y;
-    double screenHeight = [UIScreen mainScreen].bounds.size.height;
-    double engineProgress = -yOffset / screenHeight;
-    engineProgress = MAX(0.0, MIN(1.0, engineProgress));
-    
-    if (ABS(engineProgress - g_lastTickProgress) > 0.0001) {
-        g_lastTickProgress = engineProgress;
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
-        
-        if (g_portalView) {
-            if (g_isVideoMode) {
-                if (g_portalView.alpha != 1.0) {
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    g_portalView.alpha = 1.0;
-                    [CATransaction commit];
-                }
-            } else {
-                double alpha = 0.0;
-                if (engineProgress > 0.7) {
-                    alpha = (1.0 - engineProgress) * (0.05 / 0.3);
-                } else if (engineProgress > 0.6) {
-                    alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
-                }
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
-        }
-    }
-}
-
-%new
-- (void)zone_screenSleep16 {
-    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker16");
-    if (link) link.paused = YES;
-}
-
-%new
-- (void)zone_screenWake16 {
-    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker16");
-    if (link) link.paused = NO;
+- (void)zone_syncPortalState:(NSNotification *)note {
+    if (g_isVideoMode) return;
+    
+    NSString *state = note.userInfo[@"state"];
+    BOOL animated = note.userInfo[@"animated"] ? [note.userInfo[@"animated"] boolValue] : YES;
+    
+    _UIPortalView *portal = objc_getAssociatedObject(self, "CoverSheetZonePortal");
+    if (!portal) return;
+    
+    double targetAlpha = [state isEqualToString:@"Unlock"] ? 0.0 : 1.0;
+    
+    if (animated) {
+        [UIView animateWithDuration:g_animDuration delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            portal.alpha = targetAlpha;
+        } completion:nil];
+    } else {
+        portal.alpha = targetAlpha;
+    }
 }
 
 - (void)viewWillLayoutSubviews {
@@ -2296,12 +2248,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
-
-    // 【核心防御】：状态机单向拦截网
-    // 如果设备处于锁定状态（在锁屏），直接拦截系统发来的伪造进度（如通知带来的模糊进度）。
-    // 这样彻底解决来通知跳动画的 Bug。而在桌面（已解锁）下滑锁屏时正常放行，完美保留透明度渐变！
-    if (!g_isUnlocked) return;
-
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
@@ -2558,12 +2504,12 @@ static void EnsureEngineViewIsMounted() {
         }
 
         if (!portalView) {
-            portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-            portalView.hidesSourceView = NO;
-            portalView.matchesAlpha = NO; 
-            portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
-            portalView.matchesTransform = YES;
+            portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
+            portalView.hidesSourceView = NO;
+            portalView.matchesAlpha = NO; 
+            portalView.alpha = g_isVideoMode ? 1.0 : (g_isUnlocked ? 0.0 : 1.0); 
+            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
+            portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
             objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
