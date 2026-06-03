@@ -47,7 +47,6 @@ typedef struct {
 @end
 
 @interface CSCoverSheetViewController (Zone)
-- (void)zone_updateYOffset;
 - (void)zone_tickProgress;
 - (void)zone_screenSleep;
 - (void)zone_screenWake;
@@ -75,8 +74,6 @@ typedef struct {
 @interface SBLockScreenManager : NSObject
 + (id)sharedInstance;
 - (void)lockUIFromSource:(int)source withOptions:(id)options;
-- (void)unlockUIFromSource:(int)source withOptions:(id)options;
-- (BOOL)isUILocked;
 @end
 
 @interface SBFWallpaperView : UIView
@@ -241,14 +238,13 @@ static BOOL g_hideTextShadow = NO;
 static BOOL g_lowPowerPause = NO; 
 static NSString *g_zonePath = nil;
 
-// ✅ g_isUnlocked 现在唯一的含义是：“锁屏视图是否被完全推走（在桌面）”
+// ✅ 这是本次修复的最核心变量：
+// 它代表的不再是"手机是否解锁"，而是"锁屏界面(CoverSheet)是否完全消失"！
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
-static BOOL g_isCoverSheetPanning = NO; 
 
 static double g_resolutionFactor = 1.0;
 static double g_lastTickProgress = -1; 
-static double g_coverSheetYOffset = 0.0; 
 static BOOL old_hideTextShadow = NO; 
 
 static BOOL g_enableAnimSpeed = YES; 
@@ -482,7 +478,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self cleanUpEngineSafely];
 }
 @end
-
 
 @interface ZoneVideoEngine : UIView
 @property (nonatomic, strong) ZoneVideoPlayerView *lockVideoView;
@@ -719,7 +714,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) BOOL isAnimatingState; 
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
-@property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
+@property (nonatomic, strong) UIColor *dynamicSolidColor; 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 - (void)lockSolidBackground;
@@ -1122,7 +1117,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
             self.currentState = @"Init";
             
-            // ✅ 直接使用 g_isUnlocked，不使用异步，恢复初始化动画顺滑度
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             
@@ -1778,7 +1772,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
             self.currentState = @"Init";
             
-            // ✅ 直接使用 g_isUnlocked，无异步延迟
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             
@@ -2135,12 +2128,10 @@ static void EnsureEngineViewIsMounted() {
         g_portalView.hidden = NO;
         [self viewWillLayoutSubviews];
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+            [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+        }
     }
 }
 
@@ -2150,19 +2141,17 @@ static void EnsureEngineViewIsMounted() {
         g_portalView.hidden = NO;
         [self viewWillLayoutSubviews];
         
-        dispatch_async(dispatch_get_main_queue(), ^{
-            id wallpaperController = [%c(SBWallpaperController) sharedInstance];
-            if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
-                [wallpaperController updateWallpaperAnimationWithProgress:0.0];
-            }
-        });
+        id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+        if ([wallpaperController respondsToSelector:@selector(updateWallpaperAnimationWithProgress:)]) {
+            [wallpaperController updateWallpaperAnimationWithProgress:0.0];
+        }
     }
 }
 
-// ✅ 完全以锁屏UI的消失状态为唯一基准
+// ✅ 唯一且绝对准确的视觉状态：只有当 CoverSheet 真消失了，才是真正进入了桌面！
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
-    g_isUnlocked = dismissed; // 记录真实的视觉状态
+    g_isUnlocked = dismissed; 
     if (g_enabled && g_isScreenOn) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
@@ -2248,40 +2237,38 @@ static void EnsureEngineViewIsMounted() {
     
     double effectiveProgress = progress;
     
-    // 【✅ 终极防弹盾】：没进桌面，且手没在划（比如通知系统瞎改模糊度），强制拦截进度！
+    // ✅ 物理防弹盾：没进桌面，且手没在划（比如通知系统瞎改模糊度），强制拦截进度！
     if (!g_isUnlocked && !g_isCoverSheetPanning) {
         effectiveProgress = 0.0;
     }
     
     EnsureEngineViewIsMounted();
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(effectiveProgress)}];
-        
-        if (g_portalView) {
-            if (g_isVideoMode) {
-                if (g_portalView.alpha != 1.0) {
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    g_portalView.alpha = 1.0;
-                    [CATransaction commit];
-                }
-            } else {
-                double alpha = 0.0;
-                if (progress > 0.7) {
-                    alpha = (1.0 - progress) * (0.05 / 0.3);
-                } else if (progress > 0.6) {
-                    alpha = 0.05 + (0.7 - progress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-                }
-                alpha = MAX(0.0, MIN(1.0, alpha));
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(effectiveProgress)}];
+    
+    if (g_portalView) {
+        if (g_isVideoMode) {
+            if (g_portalView.alpha != 1.0) {
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
+                g_portalView.alpha = 1.0;
                 [CATransaction commit];
             }
+        } else {
+            double alpha = 0.0;
+            if (progress > 0.7) {
+                alpha = (1.0 - progress) * (0.05 / 0.3);
+            } else if (progress > 0.6) {
+                alpha = 0.05 + (0.7 - progress) * 1.0; 
+            } else {
+                alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+            }
+            alpha = MAX(0.0, MIN(1.0, alpha));
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            g_portalView.alpha = alpha;
+            [CATransaction commit];
         }
-    });
+    }
 }
 %end
 
@@ -2294,7 +2281,6 @@ static void EnsureEngineViewIsMounted() {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1;
             
-            // ✅ 直接使用 g_isUnlocked 判定当前视觉状态，发令枪瞬间开火，恢复丝滑亮屏
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
             if (screenOn) {
@@ -2624,7 +2610,7 @@ static void EnsureEngineViewIsMounted() {
             
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
-            if (g_isScreenOn) {
+            if (screenOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
             } else {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
@@ -2643,7 +2629,7 @@ static void EnsureEngineViewIsMounted() {
             
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
-            if (g_isScreenOn) {
+            if (screenOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
             } else {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
@@ -2664,12 +2650,12 @@ static void EnsureEngineViewIsMounted() {
 %hook SBLockScreenManager
 - (void)lockUIFromSource:(int)source withOptions:(id)options {
     %orig;
-    g_isUnlocked = NO; // ✅ 明确锁屏时重置状态
+    // ✅ 设备即将锁定时，强制重置标记
+    g_isUnlocked = NO; 
     if (g_enabled && g_isScreenOn) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
     }
 }
-// 🛑 核心修复：刻意不 hook unlockUIFromSource:，拒绝 FaceID 在视觉上劫持壁纸状态！
 %end
 
 %hook SBFLegacyWallpaperWakeAnimator
