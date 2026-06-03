@@ -572,6 +572,47 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
+// 新增：壁纸动画开关回调
+- (void)setAnimEnableValue:(id)value specifier:(PSSpecifier *)specifier {
+    [self setPreferenceValue:value specifier:specifier];
+    // 强制重载 UI，让速度调节按钮平滑出现/消失
+    [self reloadSpecifiers]; 
+}
+
+// 新增：循环切换壁纸动画速度
+- (void)cycleAnimSpeed:(UIButton *)sender {
+    NSString *name = sender.accessibilityIdentifier;
+    if (!name) return;
+    
+    NSString *key = [NSString stringWithFormat:@"AnimSpeed_%@", name];
+    CFPropertyListRef prefRef = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.iosdump.zoneprefs"));
+    NSInteger currentSpeed = 0;
+    if (prefRef) {
+        if (CFGetTypeID(prefRef) == CFNumberGetTypeID()) currentSpeed = [(__bridge NSNumber *)prefRef integerValue];
+        CFRelease(prefRef);
+    }
+    
+    NSInteger nextSpeed = currentSpeed + 1;
+    if (nextSpeed > 3) nextSpeed = 0; // 0, 1, 2, 3 循环
+    
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFNumberRef)@(nextSpeed), CFSTR("com.iosdump.zoneprefs"));
+    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
+    
+    NSString *plistPath = GetPrefsPlistPath();
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
+    prefs[key] = @(nextSpeed);
+    [prefs writeToFile:plistPath atomically:YES];
+    [self forceOwnershipToMobile:plistPath];
+    
+    // 通知 SpringBoard 刷新引擎
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    
+    if (nextSpeed == 1) [sender setTitle:@"较快" forState:UIControlStateNormal];
+    else if (nextSpeed == 2) [sender setTitle:@"极快" forState:UIControlStateNormal];
+    else if (nextSpeed == 3) [sender setTitle:@"光速" forState:UIControlStateNormal];
+    else [sender setTitle:@"默认" forState:UIControlStateNormal];
+}
+
 // =======================================
 // 动态双重 Specifiers 渲染核心 
 // =======================================
@@ -664,6 +705,31 @@ static NSString * GetPrefsPlistPath() {
         
     } else {
         NSArray *rootSpecs = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        
+        // ====== 新增：仅在 iOS 16 及以上动态注入“壁纸动画”开关 ======
+        if (@available(iOS 16.0, *)) {
+            NSUInteger insertIndex = NSNotFound;
+            for (NSUInteger i = 0; i < rootSpecs.count; i++) {
+                PSSpecifier *spec = rootSpecs[i];
+                if ([[spec propertyForKey:@"key"] isEqualToString:@"HideTextShadow"]) {
+                    insertIndex = i + 1; // 插入在文字阴影下方
+                    break;
+                }
+            }
+            if (insertIndex != NSNotFound) {
+                PSSpecifier *animSpec = [PSSpecifier preferenceSpecifierNamed:@"壁纸动画" target:self set:@selector(setAnimEnableValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+                [animSpec setProperty:@"EnableAnimSpeed" forKey:@"key"];
+                [animSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+                [animSpec setProperty:@NO forKey:@"default"];
+                animSpec->action = @selector(setAnimEnableValue:specifier:);
+                
+                NSMutableArray *mutRoot = [rootSpecs mutableCopy];
+                [mutRoot insertObject:animSpec atIndex:insertIndex];
+                rootSpecs = mutRoot;
+            }
+        }
+        // ==========================================================
+
         [_specifiers addObjectsFromArray:rootSpecs];
         
         PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸(如果遇到设置壁纸不正常右上角注销尝试)" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
@@ -954,6 +1020,9 @@ static NSString * GetPrefsPlistPath() {
     NSString *specKey = [spec propertyForKey:@"key"];
     NSString *labelString = [spec propertyForKey:@"label"];
     
+    NSString *plistPath = GetPrefsPlistPath();
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    
     // 【全新功能】：导入壁纸右侧添加“已导入 x 张”徽章圈
     if ([labelString isEqualToString:@"导入壁纸"]) {
         cell.textLabel.textAlignment = NSTextAlignmentLeft; 
@@ -1004,8 +1073,6 @@ static NSString * GetPrefsPlistPath() {
         NSInteger target = [[spec propertyForKey:@"VideoTarget"] integerValue];
         NSString *fullPath = [(target == 1 ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir()) stringByAppendingPathComponent:name];
 
-        NSString *plistPath = GetPrefsPlistPath();
-        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
         NSString *currentLock = prefs[@"LockVideoPath"];
         NSString *currentHome = prefs[@"HomeVideoPath"];
         BOOL isSameMaterialOn = [prefs[@"SameVideoMaterial"] boolValue];
@@ -1065,10 +1132,7 @@ static NSString * GetPrefsPlistPath() {
         NSString *name = [spec propertyForKey:@"WallpaperName"];
         NSString *fullWpPath = [GetWallpapersDir() stringByAppendingPathComponent:name];
         
-        NSString *plistPath = GetPrefsPlistPath();
-        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
         NSString *currentPath = prefs[@"ZonePath"];
-        
         BOOL isSelected = [currentPath isEqualToString:fullWpPath];
         
         if (isSelected) {
@@ -1077,13 +1141,19 @@ static NSString * GetPrefsPlistPath() {
             cell.textLabel.textColor = [UIColor labelColor];
         }
         
+        // === 读取开关状态 ===
+        BOOL isAnimEnabled = [prefs[@"EnableAnimSpeed"] boolValue];
+        CGFloat targetAccWidth = isAnimEnabled ? 190 : 140; // 开启后动态加宽给速度按钮腾位置
+        
         UIView *accView = cell.accessoryView;
         UIButton *resBtn = nil;
+        UIButton *speedBtn = nil;
         UILabel *sizeLabel = nil;
         UIImageView *checkMark = nil;
         
-        if (![accView isKindOfClass:[UIView class]] || accView.tag != 999) {
-            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 140, 30)];
+        // 如果视图不存在，或者宽度不对（说明开关被切换了），就重建视图
+        if (![accView isKindOfClass:[UIView class]] || accView.tag != 999 || accView.frame.size.width != targetAccWidth) {
+            accView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, targetAccWidth, 30)];
             accView.tag = 999;
             
             sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 65, 30)];
@@ -1104,8 +1174,26 @@ static NSString * GetPrefsPlistPath() {
             resBtn.tag = 777;
             [accView addSubview:resBtn];
             
-            checkMark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
-            checkMark.frame = CGRectMake(115, 5, 20, 20);
+            // ====== 核心：动态生成动画调速按钮 ======
+            if (isAnimEnabled) {
+                speedBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+                speedBtn.frame = CGRectMake(115, 1, 45, 28);
+                speedBtn.layer.cornerRadius = 14;
+                speedBtn.layer.borderWidth = 1;
+                speedBtn.layer.borderColor = [UIColor systemGreenColor].CGColor;
+                speedBtn.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+                [speedBtn setTitleColor:[UIColor systemGreenColor] forState:UIControlStateNormal];
+                [speedBtn addTarget:self action:@selector(cycleAnimSpeed:) forControlEvents:UIControlEventTouchUpInside];
+                speedBtn.tag = 778;
+                [accView addSubview:speedBtn];
+                
+                checkMark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
+                checkMark.frame = CGRectMake(165, 5, 20, 20); // 往后挪
+            } else {
+                checkMark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
+                checkMark.frame = CGRectMake(115, 5, 20, 20); // 原来的位置
+            }
+            
             checkMark.tintColor = [UIColor systemBlueColor];
             checkMark.tag = 666;
             [accView addSubview:checkMark];
@@ -1114,14 +1202,15 @@ static NSString * GetPrefsPlistPath() {
         } else {
             sizeLabel = [accView viewWithTag:888];
             resBtn = [accView viewWithTag:777];
+            speedBtn = [accView viewWithTag:778];
             checkMark = [accView viewWithTag:666];
         }
         
         checkMark.hidden = !isSelected;
-        
         double sizeMB = getDirectorySize(fullWpPath) / (1024.0 * 1024.0);
         sizeLabel.text = [NSString stringWithFormat:@"%.1f MB", sizeMB];
         
+        // 绑定资源参数
         resBtn.accessibilityIdentifier = name;
         NSString *key = [NSString stringWithFormat:@"ResFactor_%@", name];
         CFPropertyListRef resRef = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.iosdump.zoneprefs"));
@@ -1133,6 +1222,17 @@ static NSString * GetPrefsPlistPath() {
         
         if (factor >= 0.99) [resBtn setTitle:@"原画" forState:UIControlStateNormal];
         else [resBtn setTitle:[NSString stringWithFormat:@"%.0f%%", factor * 100] forState:UIControlStateNormal];
+        
+        // ====== 绑定动画调速参数 ======
+        if (isAnimEnabled && speedBtn) {
+            speedBtn.accessibilityIdentifier = name;
+            NSString *speedKey = [NSString stringWithFormat:@"AnimSpeed_%@", name];
+            NSInteger speedLevel = [prefs[speedKey] integerValue];
+            if (speedLevel == 1) [speedBtn setTitle:@"较快" forState:UIControlStateNormal];
+            else if (speedLevel == 2) [speedBtn setTitle:@"极快" forState:UIControlStateNormal];
+            else if (speedLevel == 3) [speedBtn setTitle:@"光速" forState:UIControlStateNormal];
+            else [speedBtn setTitle:@"默认" forState:UIControlStateNormal];
+        }
         
         cell.detailTextLabel.hidden = YES;
         cell.detailTextLabel.text = @"";
@@ -1169,6 +1269,9 @@ static NSString * GetPrefsPlistPath() {
         [fm removeItemAtPath:path error:nil];
         NSString *resKey = [NSString stringWithFormat:@"ResFactor_%@", name];
         CFPreferencesSetAppValue((__bridge CFStringRef)resKey, NULL, CFSTR("com.iosdump.zoneprefs"));
+        
+        NSString *animKey = [NSString stringWithFormat:@"AnimSpeed_%@", name];
+        CFPreferencesSetAppValue((__bridge CFStringRef)animKey, NULL, CFSTR("com.iosdump.zoneprefs"));
     }
     
     CFPreferencesSetAppValue(CFSTR("ZonePath"), NULL, CFSTR("com.iosdump.zoneprefs"));
@@ -1523,6 +1626,9 @@ static NSString * GetPrefsPlistPath() {
         NSString *resKey = [NSString stringWithFormat:@"ResFactor_%@", name];
         CFPreferencesSetAppValue((__bridge CFStringRef)resKey, NULL, CFSTR("com.iosdump.zoneprefs"));
         
+        NSString *animKey = [NSString stringWithFormat:@"AnimSpeed_%@", name];
+        CFPreferencesSetAppValue((__bridge CFStringRef)animKey, NULL, CFSTR("com.iosdump.zoneprefs"));
+        
         [self removeSpecifier:spec animated:YES];
     }
 }
@@ -1582,6 +1688,15 @@ static NSString * GetPrefsPlistPath() {
                     CFPreferencesSetAppValue((__bridge CFStringRef)newResKey, resRef, CFSTR("com.iosdump.zoneprefs"));
                     CFPreferencesSetAppValue((__bridge CFStringRef)oldResKey, NULL, CFSTR("com.iosdump.zoneprefs"));
                     CFRelease(resRef);
+                }
+                
+                NSString *oldAnimKey = [NSString stringWithFormat:@"AnimSpeed_%@", oldName];
+                NSString *newAnimKey = [NSString stringWithFormat:@"AnimSpeed_%@", newName];
+                CFPropertyListRef animRef = CFPreferencesCopyAppValue((__bridge CFStringRef)oldAnimKey, CFSTR("com.iosdump.zoneprefs"));
+                if (animRef) {
+                    CFPreferencesSetAppValue((__bridge CFStringRef)newAnimKey, animRef, CFSTR("com.iosdump.zoneprefs"));
+                    CFPreferencesSetAppValue((__bridge CFStringRef)oldAnimKey, NULL, CFSTR("com.iosdump.zoneprefs"));
+                    CFRelease(animRef);
                 }
                 
                 CFPropertyListRef pathRef = CFPreferencesCopyAppValue(CFSTR("ZonePath"), CFSTR("com.iosdump.zoneprefs"));
@@ -1668,7 +1783,7 @@ static NSString * GetPrefsPlistPath() {
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     
     NSString *key = [specifier propertyForKey:@"key"];
-    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"]) {
+    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"] || [key isEqualToString:@"EnableAnimSpeed"]) {
         CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, appID);
         CFPreferencesAppSynchronize(appID);
         
