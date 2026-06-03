@@ -235,6 +235,7 @@ static BOOL g_lowPowerPause = NO;
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
+static BOOL g_isUserDragging = NO; // 新增：识别是否是人为滑动
 
 static double g_resolutionFactor = 1.0;
 static double g_lastTickProgress = -1; 
@@ -919,10 +920,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
-    if (!g_enableAnimSpeed && [stateName isEqualToString:@"Sleep"]) {
-        return; 
-    }
-    
     if (animated) {
         self.animationGeneration++;
         NSInteger currentGen = self.animationGeneration;
@@ -1569,10 +1566,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enableAnimSpeed) animated = NO; // 开关未开启时强制无动画
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
-    
-    if (!g_enableAnimSpeed && [stateName isEqualToString:@"Sleep"]) {
-        return; 
-    }
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
@@ -2232,6 +2225,11 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     EnsureEngineViewIsMounted();
+    
+    if (!g_isUnlocked && !g_isUserDragging) {
+        progress = 0.0;
+    }
+    
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
         
@@ -2733,9 +2731,10 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook CSCoverSheetViewController
-- (void)_scrollPanGestureBegan:(id)arg1 { %orig; }
+- (void)_scrollPanGestureBegan:(id)arg1 { %orig; g_isUserDragging = YES; }
 - (void)_scrollPanGestureChanged:(id)arg1 { %orig; }
-- (void)_scrollPanGestureEnded:(id)arg1 { %orig; }
+- (void)_scrollPanGestureEnded:(id)arg1 { %orig; g_isUserDragging = NO; }
+- (void)_scrollPanGestureCancelled:(id)arg1 { %orig; g_isUserDragging = NO; }
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
