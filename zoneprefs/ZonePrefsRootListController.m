@@ -720,7 +720,7 @@ static NSString * GetPrefsPlistPath() {
                 PSSpecifier *animSpec = [PSSpecifier preferenceSpecifierNamed:@"壁纸动画" target:self set:@selector(setAnimEnableValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
                 [animSpec setProperty:@"EnableAnimSpeed" forKey:@"key"];
                 [animSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-                [animSpec setProperty:@NO forKey:@"default"];
+                [animSpec setProperty:@YES forKey:@"default"];
                 animSpec->action = @selector(setAnimEnableValue:specifier:);
                 
                 NSMutableArray *mutRoot = [rootSpecs mutableCopy];
@@ -974,6 +974,12 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)showAnimSpeedInfo {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后将加载壁纸自带的原生息屏跟关屏动画。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (id)getWallpaperSize:(PSSpecifier *)spec { return @""; }
 - (id)getDummyValue:(PSSpecifier *)spec { return @""; }
 
@@ -1127,6 +1133,18 @@ static NSString * GetPrefsPlistPath() {
         }
     }
     
+    if ([specKey isEqualToString:@"EnableAnimSpeed"]) {
+        UIButton *existingBtn = [cell.contentView viewWithTag:883];
+        if (!existingBtn) {
+            UIButton *infoBtn = [UIButton buttonWithType:UIButtonTypeInfoLight];
+            infoBtn.tag = 883;
+            infoBtn.frame = CGRectMake(100, (cell.bounds.size.height - 22) / 2.0, 22, 22);
+            infoBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
+            [infoBtn addTarget:self action:@selector(showAnimSpeedInfo) forControlEvents:UIControlEventTouchUpInside];
+            [cell.contentView addSubview:infoBtn];
+        }
+    }
+    
     if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         NSString *name = [spec propertyForKey:@"WallpaperName"];
@@ -1142,7 +1160,7 @@ static NSString * GetPrefsPlistPath() {
         }
         
         // === 读取开关状态 ===
-        BOOL isAnimEnabled = [prefs[@"EnableAnimSpeed"] boolValue];
+        BOOL isAnimEnabled = prefs[@"EnableAnimSpeed"] ? [prefs[@"EnableAnimSpeed"] boolValue] : YES;
         CGFloat targetAccWidth = isAnimEnabled ? 190 : 140; // 开启后动态加宽给速度按钮腾位置
         
         UIView *accView = cell.accessoryView;
