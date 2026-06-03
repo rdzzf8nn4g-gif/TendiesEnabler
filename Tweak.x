@@ -232,7 +232,7 @@ static double g_lastTickProgress = -1;
 static BOOL old_hideTextShadow = NO; 
 
 // ====== 新增：壁纸动画速度控制 ======
-static BOOL g_enableAnimSpeed = NO;
+static BOOL g_enableAnimSpeed = YES; // 默认开启
 static double g_animDuration = 0.85; 
 // ===================================
 
@@ -260,8 +260,8 @@ static void reloadPrefs() {
     g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO;
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
     
-    // ====== 新增：读取壁纸动画开关 ======
-    g_enableAnimSpeed = CFPreferencesGetAppBooleanValue(CFSTR("EnableAnimSpeed"), appID, &valid) ? valid : NO;
+    // ====== 新增：读取壁纸动画开关 (默认开启) ======
+    g_enableAnimSpeed = CFPreferencesGetAppBooleanValue(CFSTR("EnableAnimSpeed"), appID, &valid) ? valid : YES;
     
     CFPropertyListRef lockVidRef = CFPreferencesCopyAppValue(CFSTR("LockVideoPath"), appID);
     if (lockVidRef && CFGetTypeID(lockVidRef) == CFStringGetTypeID()) {
@@ -308,7 +308,7 @@ static void reloadPrefs() {
             else if (speedLevel == 3) g_animDuration = 0.20;
             else g_animDuration = 0.85;
         } else {
-            g_animDuration = 0.85;
+            g_animDuration = 0.0;
         }
         // ============================================
         
@@ -907,6 +907,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
+    if (!g_enableAnimSpeed) animated = NO; // 开关未开启时强制无动画
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
@@ -1544,6 +1545,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
+    if (!g_enableAnimSpeed) animated = NO; // 开关未开启时强制无动画
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
