@@ -2191,6 +2191,42 @@ static void EnsureEngineViewIsMounted() {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
 }
+
+// ✅ 终极防御：精准接管锁屏手势与滑动状态，只认人手，不认系统瞎模糊
+- (void)_scrollPanGestureBegan:(id)arg1 { %orig; g_isCoverSheetPanning = YES; }
+- (void)_scrollPanGestureChanged:(id)arg1 { %orig; g_isCoverSheetPanning = YES; }
+- (void)_scrollPanGestureEnded:(id)arg1 { %orig; g_isCoverSheetPanning = NO; }
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    %orig;
+    if ([scrollView isKindOfClass:[UIScrollView class]]) {
+        g_isCoverSheetPanning = (scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating);
+    }
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        g_isUnlocked = NO;
+        g_lastTickProgress = -1; 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
+        });
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        g_isUnlocked = YES;
+        g_lastTickProgress = -1; 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
+        });
+    }
+}
 %end
 
 %hook SBWallpaperController
@@ -2211,10 +2247,10 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
-    // 【终极防御机制】：拦截锁屏通知亮屏等系统伪造的进度突变！
-    // 如果设备未解锁 (还在锁屏) 并且用户手没有在物理滑动屏幕，强制拒绝大于 0 的干扰进度
+    // 【✅ 核心防乱跳拦截器】：
+    // 如果还没进桌面 (锁屏态)，且你的手指没有真的在划动它 (比如是系统来了通知强行下发的突变进度)，一律无视拦截！
     if (!g_isUnlocked && !g_isCoverSheetPanning) {
-        if (progress > 0.0) return;
+        if (progress > 0.0) return; 
     }
     
     EnsureEngineViewIsMounted();
@@ -2544,6 +2580,30 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        g_isUnlocked = NO;
+        g_lastTickProgress = -1; 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
+        });
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        g_isUnlocked = YES;
+        g_lastTickProgress = -1; 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
+        });
+    }
+}
+
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled && g_isScreenOn) {
@@ -2602,6 +2662,20 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 // ==================== 【全版本通用 Hook 区域】 ============================
 // =========================================================================
+
+%hook SBLockScreenManager
+- (void)lockUIFromSource:(int)source withOptions:(id)options {
+    %orig;
+    g_isUnlocked = NO;
+    if (g_enabled && g_isScreenOn) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
+    }
+}
+- (void)unlockUIFromSource:(int)source withOptions:(id)options {
+    %orig;
+    g_isUnlocked = YES;
+}
+%end
 
 %hook SBFLegacyWallpaperWakeAnimator
 - (void)updateWakeEffectsForWake:(BOOL)wake animated:(BOOL)animated completion:(id)completion {
@@ -2706,31 +2780,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateBackgroundContentView { %orig; }
 - (void)_updateWallpaperEffectView { %orig; }
 - (void)_updateWallpaper { %orig; }
-
-// 【保证多版本状态同步，修复 FaceID 导致的状态乱跳】
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    if (g_enabled) {
-        g_isUnlocked = NO;
-        g_lastTickProgress = -1; 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
-        });
-    }
-}
-
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    if (g_enabled) {
-        g_isUnlocked = YES;
-        g_lastTickProgress = -1; 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
-        });
-    }
-}
 %end
 
 %hook CSBackgroundContentView
