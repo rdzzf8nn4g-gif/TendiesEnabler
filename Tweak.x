@@ -231,6 +231,11 @@ static double g_resolutionFactor = 1.0;
 static double g_lastTickProgress = -1; 
 static BOOL old_hideTextShadow = NO; 
 
+// ====== 新增：壁纸动画速度控制 ======
+static BOOL g_enableAnimSpeed = NO;
+static double g_animDuration = 0.85; 
+// ===================================
+
 static BOOL g_isVideoMode = NO;
 static NSString *g_lockVideoPath = nil;
 static NSString *g_homeVideoPath = nil;
@@ -254,6 +259,9 @@ static void reloadPrefs() {
     g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
     g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO;
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
+    
+    // ====== 新增：读取壁纸动画开关 ======
+    g_enableAnimSpeed = CFPreferencesGetAppBooleanValue(CFSTR("EnableAnimSpeed"), appID, &valid) ? valid : NO;
     
     CFPropertyListRef lockVidRef = CFPreferencesCopyAppValue(CFSTR("LockVideoPath"), appID);
     if (lockVidRef && CFGetTypeID(lockVidRef) == CFStringGetTypeID()) {
@@ -284,9 +292,30 @@ static void reloadPrefs() {
             g_resolutionFactor = 1.0;
         }
         if (resRef) CFRelease(resRef);
+        
+        // ====== 新增：计算当前壁纸的专属动画速度 ======
+        NSString *speedKey = [NSString stringWithFormat:@"AnimSpeed_%@", wpName];
+        CFPropertyListRef speedRef = CFPreferencesCopyAppValue((__bridge CFStringRef)speedKey, appID);
+        NSInteger speedLevel = 0;
+        if (speedRef && CFGetTypeID(speedRef) == CFNumberGetTypeID()) {
+            speedLevel = [(__bridge NSNumber *)speedRef integerValue];
+        }
+        if (speedRef) CFRelease(speedRef);
+        
+        if (g_enableAnimSpeed) {
+            if (speedLevel == 1) g_animDuration = 0.60;
+            else if (speedLevel == 2) g_animDuration = 0.40;
+            else if (speedLevel == 3) g_animDuration = 0.20;
+            else g_animDuration = 0.85;
+        } else {
+            g_animDuration = 0.85;
+        }
+        // ============================================
+        
     } else {
         g_zonePath = nil; 
         g_resolutionFactor = 1.0;
+        g_animDuration = 0.85; // 没选中壁纸时恢复默认
     }
     if (pathRef) CFRelease(pathRef);
 }
@@ -835,7 +864,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!animated) {
         [CATransaction setDisableActions:YES];
     } else {
-        [CATransaction setAnimationDuration:0.85];
+        [CATransaction setAnimationDuration:g_animDuration]; 
         [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
     }
     
@@ -885,7 +914,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.animationGeneration++;
         NSInteger currentGen = self.animationGeneration;
         self.isAnimatingState = YES;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(g_animDuration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (self.animationGeneration == currentGen) {
                 self.isAnimatingState = NO;
             }
@@ -1472,7 +1501,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!animated) {
         [CATransaction setDisableActions:YES];
     } else {
-        [CATransaction setAnimationDuration:0.85]; 
+        [CATransaction setAnimationDuration:g_animDuration]; 
         [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
     }
     
@@ -1527,7 +1556,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.animationGeneration++;
         NSInteger currentGen = self.animationGeneration;
         self.isAnimatingState = YES;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(g_animDuration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (self.animationGeneration == currentGen) {
                 self.isAnimatingState = NO;
             }
