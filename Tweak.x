@@ -109,9 +109,18 @@ static double g_animDuration;
     self = [super initWithFrame:CGRectZero];
     if (self) {
         NSURL *dirURL = [url copy];
+        Class UICPClass = NSClassFromString(@"_UICAPackageView");
+        if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
+            @try {
+                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
+                if (_uiPackageView) {
+                    _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                    [self addSubview:_uiPackageView];
+                    return self;
+                }
+            } @catch (NSException *e) {}
+        }
         
-        // 【终极物理阉割】彻底抛弃苹果私有的 PackageView，
-        // 强制使用纯血的 CAPackage，斩断视图与 iOS 16/17 系统状态机的一切监听联系！
         Class CAPackageClass = NSClassFromString(@"CAPackage");
         if (CAPackageClass) {
             NSError *err = nil;
@@ -1062,8 +1071,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self clearCurrentViewsSafely]; 
             self.plistBackgroundColor = parsedBgColor;
             
-            // 【终极物理阉割】不再使用叛变的 BSUICAPackageView
-            Class PackageViewClass = [ZonePackageFallbackView class];
+            dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
+            Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
+            
+            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
+                PackageViewClass = [ZonePackageFallbackView class];
+            }
             if (!PackageViewClass) return;
             
             @autoreleasepool {
@@ -1727,8 +1740,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.logicalScreenSize = targetSize; 
             self.plistBackgroundColor = parsedBgColor;
             
-            // 【终极物理阉割】不再使用叛变的 BSUICAPackageView
-            Class PackageViewClass = [ZonePackageFallbackView class];
+            dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
+            Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
+            
+            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
+                PackageViewClass = [ZonePackageFallbackView class];
+            }
             if (!PackageViewClass) return;
             
             @autoreleasepool {
