@@ -978,9 +978,22 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     // 【核心剥离修正】: 底层拦截，拔掉任何强行添加的显式 CAAnimation，做到真正无动画秒切
     if (!animated) {
+        self.bgView.layer.speed = 9999.0;
+        self.floatingView.layer.speed = 9999.0;
+        self.fgView.layer.speed = 9999.0;
+        
         ZoneRemoveAllAnimations(self.bgView.layer);
         ZoneRemoveAllAnimations(self.floatingView.layer);
         ZoneRemoveAllAnimations(self.fgView.layer);
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.bgView.layer.speed = 1.0;
+            self.floatingView.layer.speed = 1.0;
+            self.fgView.layer.speed = 1.0;
+            ZoneRemoveAllAnimations(self.bgView.layer);
+            ZoneRemoveAllAnimations(self.floatingView.layer);
+            ZoneRemoveAllAnimations(self.fgView.layer);
+        });
     }
     
     [CATransaction commit];
@@ -1640,9 +1653,22 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     // 【核心剥离修正】: 底层拦截，拔掉任何强行添加的显式 CAAnimation，做到真正无动画秒切
     if (!animated) {
+        self.bgView.layer.speed = 9999.0;
+        self.floatingView.layer.speed = 9999.0;
+        self.fgView.layer.speed = 9999.0;
+        
         ZoneRemoveAllAnimations(self.bgView.layer);
         ZoneRemoveAllAnimations(self.floatingView.layer);
         ZoneRemoveAllAnimations(self.fgView.layer);
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.bgView.layer.speed = 1.0;
+            self.floatingView.layer.speed = 1.0;
+            self.fgView.layer.speed = 1.0;
+            ZoneRemoveAllAnimations(self.bgView.layer);
+            ZoneRemoveAllAnimations(self.floatingView.layer);
+            ZoneRemoveAllAnimations(self.fgView.layer);
+        });
     }
     
     [CATransaction commit];
@@ -2209,11 +2235,20 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setInScreenOffMode:(BOOL)mode {
     if (g_enabled && !g_enableAnimSpeed) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        %orig;
-        if (g_portalView) ZoneRemoveAllAnimations(g_portalView.layer);
-        [CATransaction commit];
+        [UIView performWithoutAnimation:^{
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            %orig;
+            if (g_portalView) {
+                g_portalView.layer.speed = 9999.0;
+                ZoneRemoveAllAnimations(g_portalView.layer);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    g_portalView.layer.speed = 1.0;
+                    ZoneRemoveAllAnimations(g_portalView.layer);
+                });
+            }
+            [CATransaction commit];
+        }];
     } else {
         %orig;
     }
@@ -2226,10 +2261,12 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_startFadeInAnimationForSource:(int)source {
     if (g_enabled && !g_enableAnimSpeed) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        %orig;
-        [CATransaction commit];
+        [UIView performWithoutAnimation:^{
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            %orig;
+            [CATransaction commit];
+        }];
     } else {
         %orig;
     }
@@ -2242,10 +2279,12 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     if (g_enabled && !g_enableAnimSpeed) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        %orig;
-        [CATransaction commit];
+        [UIView performWithoutAnimation:^{
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            %orig;
+            [CATransaction commit];
+        }];
     } else {
         %orig;
     }
@@ -2277,6 +2316,7 @@ static void EnsureEngineViewIsMounted() {
     }
     
     %orig(progress);
+    
     if (!g_enabled) return; 
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
