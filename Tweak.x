@@ -924,7 +924,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
-    if (!g_enableAnimSpeed) animated = NO; // 开关未开启时强制无动画
+    if (!g_enableAnimSpeed) {
+        animated = NO; // 开关未开启时强制无动画
+        if ([stateName isEqualToString:@"Sleep"]) return; // 直接操作Sleep来控制，彻底切断原生息屏/亮屏动画
+    }
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
@@ -1579,7 +1582,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
-    if (!g_enableAnimSpeed) animated = NO; // 开关未开启时强制无动画
+    if (!g_enableAnimSpeed) {
+        animated = NO; // 开关未开启时强制无动画
+        if ([stateName isEqualToString:@"Sleep"]) return; // 直接操作Sleep来控制，彻底切断原生息屏/亮屏动画
+    }
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
