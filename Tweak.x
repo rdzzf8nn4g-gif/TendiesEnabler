@@ -926,7 +926,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) {
         animated = NO; // 开关未开启时强制无动画
-        if ([stateName isEqualToString:@"Sleep"]) return; // 直接操作Sleep来控制，彻底切断原生息屏/亮屏动画
     }
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
@@ -1584,7 +1583,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) {
         animated = NO; // 开关未开启时强制无动画
-        if ([stateName isEqualToString:@"Sleep"]) return; // 直接操作Sleep来控制，彻底切断原生息屏/亮屏动画
     }
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
@@ -2210,29 +2208,51 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
-    %orig;
+    if (g_enabled && !g_enableAnimSpeed) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        %orig;
+        if (g_portalView) ZoneRemoveAllAnimations(g_portalView.layer);
+        [CATransaction commit];
+    } else {
+        %orig;
+    }
     if (g_enabled) {
         g_isScreenOn = !mode;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @(g_enableAnimSpeed)}];
     }
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
-    %orig;
+    if (g_enabled && !g_enableAnimSpeed) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        %orig;
+        [CATransaction commit];
+    } else {
+        %orig;
+    }
     if (g_enabled) {
         g_isScreenOn = YES;
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @(g_enableAnimSpeed)}];
     }
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
-    %orig;
+    if (g_enabled && !g_enableAnimSpeed) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        %orig;
+        [CATransaction commit];
+    } else {
+        %orig;
+    }
     if (g_enabled) {
         g_isScreenOn = !inactive;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @(g_enableAnimSpeed)}];
     }
 }
 %end
@@ -2252,7 +2272,11 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
-    %orig;
+    if (g_enabled && !g_enableAnimSpeed) {
+        progress = (progress > 0.5) ? 1.0 : 0.0;
+    }
+    
+    %orig(progress);
     if (!g_enabled) return; 
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
