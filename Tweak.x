@@ -2248,6 +2248,12 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
+
+    // 【核心防御】：状态机单向拦截网
+    // 如果设备处于锁定状态（在锁屏），直接拦截系统发来的伪造进度（如通知带来的模糊进度）。
+    // 这样彻底解决来通知跳动画的 Bug。而在桌面（已解锁）下滑锁屏时正常放行，完美保留透明度渐变！
+    if (!g_isUnlocked) return;
+
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
@@ -2504,12 +2510,12 @@ static void EnsureEngineViewIsMounted() {
         }
 
         if (!portalView) {
-            portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-            portalView.hidesSourceView = NO;
-            portalView.matchesAlpha = NO; 
-            portalView.alpha = g_isVideoMode ? 1.0 : (g_isUnlocked ? 0.0 : 1.0); 
-            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
-            portalView.matchesTransform = YES;
+            portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
+            portalView.hidesSourceView = NO;
+            portalView.matchesAlpha = NO;
+            portalView.alpha = g_isVideoMode ? 1.0 : (g_isUnlocked ? 0.0 : 1.0);
+            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
+            portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
             objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
