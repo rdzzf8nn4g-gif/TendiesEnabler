@@ -198,6 +198,15 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     return nil;
 }
 
+// 核心修复函数：强行暴力剥离所有隐式附加的CAAnimation，确保真正无动画
+static void ZoneRemoveAllAnimations(CALayer *layer) {
+    if (!layer) return;
+    [layer removeAllAnimations];
+    for (CALayer *sub in layer.sublayers) {
+        ZoneRemoveAllAnimations(sub);
+    }
+}
+
 // ==========================================
 // 绝对安全的底层变量获取函数 (防止 Safe Mode)
 // ==========================================
@@ -964,6 +973,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:stateName]; 
         [self.fgView setState:stateName];
     }
+    
+    // 【核心剥离修正】: 底层拦截，拔掉任何强行添加的显式 CAAnimation，做到真正无动画秒切
+    if (!animated) {
+        ZoneRemoveAllAnimations(self.bgView.layer);
+        ZoneRemoveAllAnimations(self.floatingView.layer);
+        ZoneRemoveAllAnimations(self.fgView.layer);
+    }
+    
     [CATransaction commit];
 }
 
@@ -1616,6 +1633,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:realFloatState]; 
         [self.fgView setState:realFgState];
     }
+    
+    // 【核心剥离修正】: 底层拦截，拔掉任何强行添加的显式 CAAnimation，做到真正无动画秒切
+    if (!animated) {
+        ZoneRemoveAllAnimations(self.bgView.layer);
+        ZoneRemoveAllAnimations(self.floatingView.layer);
+        ZoneRemoveAllAnimations(self.fgView.layer);
+    }
+    
     [CATransaction commit];
 }
 
