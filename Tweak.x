@@ -2000,38 +2000,38 @@ static void EnsureEngineViewIsMounted() {
 
 %hook CSCoverSheetViewController
 - (void)viewDidLoad {
-    %orig;
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
-    if (g_enabled) {
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_syncPortalState:) name:@"ZoneEngineStateChange" object:nil];
-    }
+    %orig;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
+    if (g_enabled) {
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_syncPortalState:) name:@"ZoneEngineStateChange" object:nil];
+    }
 }
 
 - (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceLayout" object:nil];
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineStateChange" object:nil];
-    %orig;
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceLayout" object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineStateChange" object:nil];
+    %orig;
 }
 
 %new
 - (void)zone_syncPortalState:(NSNotification *)note {
-    if (g_isVideoMode) return;
-    
-    NSString *state = note.userInfo[@"state"];
-    BOOL animated = note.userInfo[@"animated"] ? [note.userInfo[@"animated"] boolValue] : YES;
-    
-    _UIPortalView *portal = objc_getAssociatedObject(self, "CoverSheetZonePortal");
-    if (!portal) return;
-    
-    double targetAlpha = [state isEqualToString:@"Unlock"] ? 0.0 : 1.0;
-    
-    if (animated) {
-        [UIView animateWithDuration:g_animDuration delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-            portal.alpha = targetAlpha;
-        } completion:nil];
-    } else {
-        portal.alpha = targetAlpha;
-    }
+    if (g_isVideoMode) return;
+    
+    NSString *state = note.userInfo[@"state"];
+    BOOL animated = note.userInfo[@"animated"] ? [note.userInfo[@"animated"] boolValue] : YES;
+    
+    _UIPortalView *portal = objc_getAssociatedObject(self, "CoverSheetZonePortal");
+    if (!portal) return;
+    
+    double targetAlpha = [state isEqualToString:@"Unlock"] ? 0.0 : 1.0;
+    
+    if (animated) {
+        [UIView animateWithDuration:g_animDuration delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            portal.alpha = targetAlpha;
+        } completion:nil];
+    } else {
+        portal.alpha = targetAlpha;
+    }
 }
 
 - (void)viewWillLayoutSubviews {
