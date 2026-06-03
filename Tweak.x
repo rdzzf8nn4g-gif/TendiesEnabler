@@ -2002,36 +2002,11 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidLoad {
     %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
-    if (g_enabled) {
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_syncPortalState:) name:@"ZoneEngineStateChange" object:nil];
-    }
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceLayout" object:nil];
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineStateChange" object:nil];
     %orig;
-}
-
-%new
-- (void)zone_syncPortalState:(NSNotification *)note {
-    if (g_isVideoMode) return;
-    
-    NSString *state = note.userInfo[@"state"];
-    BOOL animated = note.userInfo[@"animated"] ? [note.userInfo[@"animated"] boolValue] : YES;
-    
-    _UIPortalView *portal = objc_getAssociatedObject(self, "CoverSheetZonePortal");
-    if (!portal) return;
-    
-    double targetAlpha = [state isEqualToString:@"Unlock"] ? 0.0 : 1.0;
-    
-    if (animated) {
-        [UIView animateWithDuration:g_animDuration delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:^{
-            portal.alpha = targetAlpha;
-        } completion:nil];
-    } else {
-        portal.alpha = targetAlpha;
-    }
 }
 
 - (void)viewWillLayoutSubviews {
@@ -2248,12 +2223,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
-
-    // 【核心防御】：状态机单向拦截网
-    // 如果设备处于锁定状态（在锁屏），直接拦截系统发来的伪造进度（如通知带来的模糊进度）。
-    // 这样彻底解决来通知跳动画的 Bug。而在桌面（已解锁）下滑锁屏时正常放行，完美保留透明度渐变！
-    if (!g_isUnlocked) return;
-
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
@@ -2512,8 +2481,8 @@ static void EnsureEngineViewIsMounted() {
         if (!portalView) {
             portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
             portalView.hidesSourceView = NO;
-            portalView.matchesAlpha = NO;
-            portalView.alpha = g_isVideoMode ? 1.0 : (g_isUnlocked ? 0.0 : 1.0);
+            portalView.matchesAlpha = NO; 
+            portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
             portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
