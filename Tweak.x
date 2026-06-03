@@ -102,6 +102,8 @@ typedef struct {
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
+static double g_animDuration; 
+
 @implementation ZonePackageFallbackView
 - (instancetype)initWithURL:(NSURL *)url {
     self = [super initWithFrame:CGRectZero];
@@ -156,6 +158,13 @@ typedef struct {
 
 - (BOOL)setState:(NSString *)state animated:(BOOL)animated {
     if (_uiPackageView && [_uiPackageView respondsToSelector:@selector(setState:)]) {
+        if (!animated) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            BOOL result = (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
+            [CATransaction commit];
+            return result;
+        }
         return (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
     }
     if (_stateController && _package) {
@@ -168,7 +177,7 @@ typedef struct {
                 [inv setTarget:_stateController];
                 [inv setArgument:&state atIndex:2];
                 [inv setArgument:&root atIndex:3];
-                float speed = animated ? 1.0f : 0.0f;
+                float speed = animated ? (0.85f / (g_animDuration > 0 ? g_animDuration : 0.85f)) : 0.0f;
                 [inv setArgument:&speed atIndex:4];
                 [inv invoke];
                 return YES;
@@ -233,7 +242,6 @@ static BOOL old_hideTextShadow = NO;
 
 // ====== 新增：壁纸动画速度控制 ======
 static BOOL g_enableAnimSpeed = YES; // 默认开启
-static double g_animDuration = 0.85; 
 // ===================================
 
 static BOOL g_isVideoMode = NO;
@@ -552,47 +560,47 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)reloadWallpaperViews {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self clearCurrentViewsSafely];
-        if (!g_enabled || !g_isVideoMode) return;
-        
-        BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-        BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        
-        if (!hasLock && !hasHome) {
-            self.backgroundColor = [UIColor clearColor];
-            return;
-        }
-        
+    [self clearCurrentViewsSafely];
+    if (!g_enabled || !g_isVideoMode) return;
+    
+    BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+    BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
+    
+    if (!hasLock && !hasHome) {
         self.backgroundColor = [UIColor clearColor];
-        
-        if (IsSingleVideoMode()) {
+        return;
+    }
+    
+    self.backgroundColor = [UIColor clearColor];
+    
+    if (IsSingleVideoMode()) {
+        self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
+        if (self.homeVideoView) {
+            self.homeVideoView.alpha = 1.0;
+            [self addSubview:self.homeVideoView];
+        }
+        if (g_isScreenOn) [self onWakeUp];
+    } else {
+        if (hasLock) {
+            self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
+            if (self.lockVideoView) {
+                self.lockVideoView.alpha = 0.0;
+                [self addSubview:self.lockVideoView];
+            }
+        }
+        if (hasHome) {
             self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
             if (self.homeVideoView) {
                 self.homeVideoView.alpha = 1.0;
                 [self addSubview:self.homeVideoView];
             }
-            if (g_isScreenOn) [self onWakeUp];
-        } else {
-            if (hasLock) {
-                self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
-                if (self.lockVideoView) {
-                    self.lockVideoView.alpha = 0.0;
-                    [self addSubview:self.lockVideoView];
-                }
-            }
-            if (hasHome) {
-                self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
-                if (self.homeVideoView) {
-                    self.homeVideoView.alpha = 1.0;
-                    [self addSubview:self.homeVideoView];
-                }
-            }
-            if (g_isScreenOn) {
-                [self onWakeUp];
-            }
         }
-    });
+        if (g_isScreenOn) {
+            [self onWakeUp];
+        }
+    }
+    // 强制触发更新，消除切换延迟
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
 }
 @end
 
@@ -939,6 +947,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
     }
     
+    [CATransaction begin];
+    if (!animated) {
+        [CATransaction setDisableActions:YES];
+    } else {
+        [CATransaction setAnimationDuration:g_animDuration];
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    }
+    
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:stateName animated:animated]; 
         [self.floatingView setState:stateName animated:animated]; 
@@ -948,6 +964,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:stateName]; 
         [self.fgView setState:stateName];
     }
+    [CATransaction commit];
 }
 
 - (void)clearCurrentViewsSafely {
@@ -1582,6 +1599,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
     }
     
+    [CATransaction begin];
+    if (!animated) {
+        [CATransaction setDisableActions:YES];
+    } else {
+        [CATransaction setAnimationDuration:g_animDuration];
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    }
+    
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:realBgState animated:animated]; 
         [self.floatingView setState:realFloatState animated:animated]; 
@@ -1591,6 +1616,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:realFloatState]; 
         [self.fgView setState:realFgState];
     }
+    [CATransaction commit];
 }
 
 - (void)clearCurrentViewsSafely {
