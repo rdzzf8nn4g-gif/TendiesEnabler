@@ -235,6 +235,8 @@ static BOOL g_lowPowerPause = NO;
 static NSString *g_zonePath = nil;
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
+static BOOL g_isLockScreenScrolling = NO;
+static NSInteger g_scrollSessionID = 0;
 
 static double g_resolutionFactor = 1.0;
 static double g_lastTickProgress = -1; 
@@ -2223,6 +2225,15 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
+
+    // 【终极状态机拦截】：完美过滤掉系统通知的假动作！
+    // 逻辑：
+    // 1. 如果在桌面状态 (g_isUnlocked == YES) -> 放行 (保留你下滑锁屏时的完美透明度渐变)
+    // 2. 如果在锁屏状态 -> 必须是人类正在物理滑动屏幕 (g_isLockScreenScrolling == YES) 才放行
+    if (!g_isUnlocked && !g_isLockScreenScrolling) {
+        return;
+    }
+
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
@@ -2725,9 +2736,25 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook CSCoverSheetViewController
-- (void)_scrollPanGestureBegan:(id)arg1 { %orig; }
-- (void)_scrollPanGestureChanged:(id)arg1 { %orig; }
-- (void)_scrollPanGestureEnded:(id)arg1 { %orig; }
+- (void)_scrollPanGestureBegan:(id)arg1 { 
+    %orig; 
+    g_scrollSessionID++;
+    g_isLockScreenScrolling = YES;
+}
+- (void)_scrollPanGestureChanged:(id)arg1 { 
+    %orig; 
+    g_isLockScreenScrolling = YES;
+}
+- (void)_scrollPanGestureEnded:(id)arg1 { 
+    %orig; 
+    NSInteger currentSession = g_scrollSessionID;
+    // 给予 1.2 秒的惯性回弹窗口期，保证手指离开后壁纸还能顺滑播完剩余动画
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (currentSession == g_scrollSessionID) {
+            g_isLockScreenScrolling = NO;
+        }
+    });
+}
 
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
@@ -2860,3 +2887,4 @@ static void EnsureEngineViewIsMounted() {
     
     %init;
 }
+
