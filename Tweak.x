@@ -109,18 +109,9 @@ static double g_animDuration;
     self = [super initWithFrame:CGRectZero];
     if (self) {
         NSURL *dirURL = [url copy];
-        Class UICPClass = NSClassFromString(@"_UICAPackageView");
-        if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
-            @try {
-                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
-                if (_uiPackageView) {
-                    _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                    [self addSubview:_uiPackageView];
-                    return self;
-                }
-            } @catch (NSException *e) {}
-        }
         
+        // 【终极物理阉割】彻底抛弃苹果私有的 PackageView，
+        // 强制使用纯血的 CAPackage，斩断视图与 iOS 16/17 系统状态机的一切监听联系！
         Class CAPackageClass = NSClassFromString(@"CAPackage");
         if (CAPackageClass) {
             NSError *err = nil;
@@ -1071,12 +1062,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self clearCurrentViewsSafely]; 
             self.plistBackgroundColor = parsedBgColor;
             
-            dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
-            Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
-            
-            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
-                PackageViewClass = [ZonePackageFallbackView class];
-            }
+            // 【终极物理阉割】不再使用叛变的 BSUICAPackageView
+            Class PackageViewClass = [ZonePackageFallbackView class];
             if (!PackageViewClass) return;
             
             @autoreleasepool {
@@ -1740,12 +1727,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.logicalScreenSize = targetSize; 
             self.plistBackgroundColor = parsedBgColor;
             
-            dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
-            Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
-            
-            if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
-                PackageViewClass = [ZonePackageFallbackView class];
-            }
+            // 【终极物理阉割】不再使用叛变的 BSUICAPackageView
+            Class PackageViewClass = [ZonePackageFallbackView class];
             if (!PackageViewClass) return;
             
             @autoreleasepool {
@@ -2223,15 +2206,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
-    // 安全锁：如果设备未解锁(还在锁屏)，并且系统突然发来 progress == 1.0 (通常是系统强制通知模糊指令)，直接屏蔽！
-
-    // 这样既保留了真实滑动(0.1~0.99)的动画，也完美保留了桌面下滑锁屏时的透明度渐变。
-
-    if (!g_isUnlocked && progress >= 1.0) {
-
-        return;
-
-    }
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
@@ -2565,6 +2539,17 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        g_isUnlocked = NO;
+        g_lastTickProgress = -1; 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
+        });
+    }
+}
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
