@@ -574,11 +574,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @interface ZoneCAMLParserLegacy : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
-@property (nonatomic, strong) NSMutableSet *validAnimatedStates;
-@property (nonatomic, copy) NSString *currentParsingStateOrTransition;
 @property (nonatomic, copy) NSString *currentParsingState;
 @property (nonatomic, copy) NSString *currentParsingTargetId;
 @property (nonatomic, copy) NSString *currentParsingKeyPath;
+@property (nonatomic, assign) BOOL rootParsed;
+@property (nonatomic, strong) UIColor *fallbackBackgroundColor;
+@property (nonatomic, assign) BOOL isParsingBackgroundColor;
 - (void)parseFile:(NSString *)path;
 @end
 
@@ -587,7 +588,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self = [super init]) {
         _idToNameMap = [NSMutableDictionary new];
         _statesData = [NSMutableDictionary new];
-        _validAnimatedStates = [NSMutableSet new];
     }
     return self;
 }
@@ -598,22 +598,52 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     parser.delegate = self;
     [parser parse];
 }
+- (UIColor *)parseColorString:(NSString *)val opacity:(NSString *)opacityStr {
+    NSArray *comps = [val componentsSeparatedByString:@" "];
+    if (comps.count >= 3) {
+        CGFloat r = [comps[0] doubleValue];
+        CGFloat g = [comps[1] doubleValue];
+        CGFloat b = [comps[2] doubleValue];
+        CGFloat a = opacityStr ? [opacityStr doubleValue] : (comps.count >= 4 ? [comps[3] doubleValue] : 1.0);
+        return [UIColor colorWithRed:r green:g blue:b alpha:a];
+    }
+    return nil;
+}
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
     if ([elementName isEqualToString:@"CALayer"]) {
+        if (!self.rootParsed) {
+            self.rootParsed = YES;
+        }
+        // 【核心修复】：忽略透明层，抓取第一个不透明的深层背景色
+        if (attributeDict[@"backgroundColor"] && !self.fallbackBackgroundColor) {
+            UIColor *c = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
+            if (c && CGColorGetAlpha(c.CGColor) > 0.05) {
+                self.fallbackBackgroundColor = c;
+            }
+        }
         NSString *layerId = attributeDict[@"id"];
         NSString *layerName = attributeDict[@"name"];
         if (layerId && layerName) self.idToNameMap[layerId] = layerName;
+    } else if ([elementName isEqualToString:@"backgroundColor"]) {
+        self.isParsingBackgroundColor = YES;
+        if (attributeDict[@"value"] && !self.fallbackBackgroundColor) {
+            UIColor *c = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
+            if (c && CGColorGetAlpha(c.CGColor) > 0.05) {
+                self.fallbackBackgroundColor = c;
+            }
+        }
+    } else if ([elementName isEqualToString:@"CGColor"]) {
+        if (self.isParsingBackgroundColor && attributeDict[@"value"] && !self.fallbackBackgroundColor) {
+            UIColor *c = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
+            if (c && CGColorGetAlpha(c.CGColor) > 0.05) {
+                self.fallbackBackgroundColor = c;
+            }
+        }
     } else if ([elementName isEqualToString:@"LKState"]) {
         self.currentParsingState = attributeDict[@"name"];
-        self.currentParsingStateOrTransition = self.currentParsingState;
-    } else if ([elementName isEqualToString:@"LKStateTransition"]) {
-        self.currentParsingStateOrTransition = attributeDict[@"toState"];
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
         self.currentParsingTargetId = attributeDict[@"targetId"];
         self.currentParsingKeyPath = attributeDict[@"keyPath"];
-        if (self.currentParsingStateOrTransition) {
-            [self.validAnimatedStates addObject:self.currentParsingStateOrTransition];
-        }
     } else if ([elementName isEqualToString:@"value"]) {
         if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
             NSString *valStr = attributeDict[@"value"];
@@ -625,22 +655,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 stateDict[self.currentParsingKeyPath] = @([valStr doubleValue]);
             }
         }
-    } else {
-        if (self.currentParsingStateOrTransition && ![elementName isEqualToString:@"elements"]) {
-            [self.validAnimatedStates addObject:self.currentParsingStateOrTransition];
-        }
     }
 }
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
-    if ([elementName isEqualToString:@"LKState"]) {
-        self.currentParsingState = nil;
-        self.currentParsingStateOrTransition = nil;
-    } else if ([elementName isEqualToString:@"LKStateTransition"]) {
-        self.currentParsingStateOrTransition = nil;
-    } else if ([elementName isEqualToString:@"LKStateSetValue"]) { 
-        self.currentParsingTargetId = nil; 
-        self.currentParsingKeyPath = nil; 
-    }
+    if ([elementName isEqualToString:@"backgroundColor"]) {
+        self.isParsingBackgroundColor = NO;
+    } else if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
+    else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
 }
 @end
 
@@ -659,8 +680,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 @property (nonatomic, assign) BOOL isAnimatingState; 
 @property (nonatomic, assign) NSInteger animationGeneration;
+@property (nonatomic, strong) UIColor *plistBackgroundColor; 
+@property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
+- (void)lockSolidBackground;
 @end
 
 @implementation ZoneRenderEngineLegacy
@@ -706,9 +730,27 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [super layoutSubviews];
     CGRect bounds = self.bounds;
     
-    if (self.bgView) self.bgView.frame = bounds;
-    if (self.floatingView) self.floatingView.frame = bounds;
-    if (self.fgView) self.fgView.frame = bounds;
+    // 【核心修复】：优先读取扫描出的持久化颜色
+    UIColor *finalBgColor = [UIColor clearColor];
+    if (self.dynamicSolidColor) {
+        finalBgColor = self.dynamicSolidColor;
+    } else if (self.plistBackgroundColor) {
+        finalBgColor = self.plistBackgroundColor;
+    } else if (self.bgParser && self.bgParser.fallbackBackgroundColor) {
+        finalBgColor = self.bgParser.fallbackBackgroundColor;
+    }
+    self.backgroundColor = finalBgColor;
+    
+    if (self.bgView) {
+        self.bgView.frame = bounds;
+        self.bgView.backgroundColor = finalBgColor;
+    }
+    if (self.floatingView) {
+        self.floatingView.frame = bounds;
+    }
+    if (self.fgView) {
+        self.fgView.frame = bounds;
+    }
 
     if (@available(iOS 16.0, *)) {
     } else {
@@ -816,10 +858,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    // 只在真正的 Sleep 动画期间才阻挡，一旦屏幕点亮，即可被拖拽打断
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    // 解除动画锁，让拖拽具有最高优先级，防止动画不同步
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
@@ -869,21 +909,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
     }
     
-    BOOL shouldSendBg = ![stateName isEqualToString:@"Sleep"] || [self.bgParser.validAnimatedStates containsObject:stateName];
-    BOOL shouldSendFloat = ![stateName isEqualToString:@"Sleep"] || [self.floatParser.validAnimatedStates containsObject:stateName];
-    BOOL shouldSendFg = ![stateName isEqualToString:@"Sleep"] || [self.fgParser.validAnimatedStates containsObject:stateName];
-
-    if (shouldSendBg) {
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) [self.bgView setState:stateName animated:animated];
-        else [self.bgView setState:stateName];
-    }
-    if (shouldSendFloat) {
-        if ([self.floatingView respondsToSelector:@selector(setState:animated:)]) [self.floatingView setState:stateName animated:animated];
-        else [self.floatingView setState:stateName];
-    }
-    if (shouldSendFg) {
-        if ([self.fgView respondsToSelector:@selector(setState:animated:)]) [self.fgView setState:stateName animated:animated];
-        else [self.fgView setState:stateName];
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:stateName animated:animated]; 
+        [self.floatingView setState:stateName animated:animated]; 
+        [self.fgView setState:stateName animated:animated];
+    } else {
+        [self.bgView setState:stateName]; 
+        [self.floatingView setState:stateName]; 
+        [self.fgView setState:stateName];
     }
 }
 
@@ -893,6 +926,46 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self.fgView removeFromSuperview]; self.fgView = nil;
     [self.bgLayerMap removeAllObjects]; [self.floatLayerMap removeAllObjects]; [self.fgLayerMap removeAllObjects];
     self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
+    self.dynamicSolidColor = nil;
+}
+
+// 终极背景捕捉锁定：强行扫描出纯色背景，焊死在引擎底板上，防系统偷杀！
+- (void)lockSolidBackground {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.bgView) return;
+        
+        UIColor *targetColor = nil;
+        if (self.plistBackgroundColor) {
+            targetColor = self.plistBackgroundColor;
+        } else if (self.bgParser && [self.bgParser respondsToSelector:@selector(fallbackBackgroundColor)] && [(id)self.bgParser fallbackBackgroundColor]) {
+            targetColor = [(id)self.bgParser fallbackBackgroundColor];
+        }
+        
+        if (!targetColor) {
+            CALayer *rootLayer = [self.bgView.layer.sublayers firstObject];
+            if (rootLayer) {
+                NSMutableArray *queue = [NSMutableArray arrayWithObject:rootLayer];
+                while (queue.count > 0) {
+                    CALayer *layer = queue.firstObject;
+                    [queue removeObjectAtIndex:0];
+                    
+                    if (layer.backgroundColor && CGColorGetAlpha(layer.backgroundColor) > 0.05) {
+                        targetColor = [UIColor colorWithCGColor:layer.backgroundColor];
+                        break;
+                    }
+                    if (layer.sublayers) {
+                        [queue addObjectsFromArray:layer.sublayers];
+                    }
+                }
+            }
+        }
+        
+        if (targetColor) {
+            self.dynamicSolidColor = targetColor;
+            self.backgroundColor = targetColor;
+            self.bgView.backgroundColor = targetColor;
+        }
+    });
 }
 
 - (void)reloadWallpaperViews {
@@ -910,6 +983,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         NSFileManager *fm = [NSFileManager defaultManager];
         __block NSString *foundBg = nil; __block NSString *foundFloat = nil; __block NSString *foundFg = nil;
+        __block NSString *foundPlist = nil;
         
         NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:g_zonePath];
         NSString *subPath;
@@ -918,13 +992,28 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             NSString *fullPath = [g_zonePath stringByAppendingPathComponent:subPath];
             NSString *fileName = [subPath lastPathComponent];
             BOOL isDir = NO;
-            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-                if ([[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
+            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir]) {
+                if (isDir && [[[fileName pathExtension] lowercaseString] isEqualToString:@"ca"]) {
                     if ([fileName localizedCaseInsensitiveContainsString:@"Background"]) foundBg = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Floating"]) foundFloat = fullPath;
                     else if ([fileName localizedCaseInsensitiveContainsString:@"Foreground"]) foundFg = fullPath;
                     [dirEnum skipDescendants];
+                } else if (!isDir && [fileName isEqualToString:@"Wallpaper.plist"]) {
+                    foundPlist = fullPath;
                 }
+            }
+        }
+        
+        __block UIColor *parsedBgColor = nil;
+        if (foundPlist) {
+            NSDictionary *plistData = [NSDictionary dictionaryWithContentsOfFile:foundPlist];
+            NSArray *bgArray = plistData[@"backgroundColor"];
+            if ([bgArray isKindOfClass:[NSArray class]] && bgArray.count >= 3) {
+                CGFloat r = [bgArray[0] doubleValue];
+                CGFloat g = [bgArray[1] doubleValue];
+                CGFloat b = [bgArray[2] doubleValue];
+                CGFloat a = (bgArray.count >= 4) ? [bgArray[3] doubleValue] : 1.0;
+                parsedBgColor = [UIColor colorWithRed:r green:g blue:b alpha:a];
             }
         }
         
@@ -933,6 +1022,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         dispatch_async(dispatch_get_main_queue(), ^{
             if (currentGen != self.reloadGeneration) return; 
             [self clearCurrentViewsSafely]; 
+            self.plistBackgroundColor = parsedBgColor;
             
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
@@ -1004,6 +1094,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 
                 [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
                 [CATransaction commit];
+                
+                [self lockSolidBackground]; 
             });
         });
     });
@@ -1017,14 +1109,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
 @property (nonatomic, strong) NSMutableSet *availableStates;
-@property (nonatomic, strong) NSMutableSet *validAnimatedStates;
-@property (nonatomic, copy) NSString *currentParsingStateOrTransition;
 @property (nonatomic, copy) NSString *currentParsingState;
 @property (nonatomic, copy) NSString *currentParsingTargetId;
 @property (nonatomic, copy) NSString *currentParsingKeyPath;
 @property (nonatomic, assign) BOOL rootParsed;
-@property (nonatomic, strong) UIColor *rootBackgroundColor;
+@property (nonatomic, strong) UIColor *fallbackBackgroundColor;
 @property (nonatomic, assign) BOOL isGeometryFlipped;
+@property (nonatomic, assign) BOOL isParsingBackgroundColor;
 - (void)parseFile:(NSString *)path;
 - (NSString *)resolveRealStateNameFor:(NSString *)logicalState isDark:(BOOL)isDark;
 @end
@@ -1035,7 +1126,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         _idToNameMap = [NSMutableDictionary new];
         _statesData = [NSMutableDictionary new];
         _availableStates = [NSMutableSet new];
-        _validAnimatedStates = [NSMutableSet new];
     }
     return self;
 }
@@ -1061,30 +1151,39 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([elementName isEqualToString:@"CALayer"]) {
         if (!self.rootParsed) {
             self.rootParsed = YES;
-            if (attributeDict[@"backgroundColor"]) {
-                self.rootBackgroundColor = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
-            }
             if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
+        }
+        // 【核心修复】：忽略透明层，抓取第一个不透明的深层背景色
+        if (attributeDict[@"backgroundColor"] && !self.fallbackBackgroundColor) {
+            UIColor *c = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
+            if (c && CGColorGetAlpha(c.CGColor) > 0.05) {
+                self.fallbackBackgroundColor = c;
+            }
         }
         NSString *layerId = attributeDict[@"id"];
         NSString *layerName = attributeDict[@"name"];
         if (layerId && layerName) self.idToNameMap[layerId] = layerName;
-    } else if ([elementName isEqualToString:@"backgroundColor"] && !self.rootBackgroundColor) {
-        if (attributeDict[@"value"]) {
-            self.rootBackgroundColor = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
+    } else if ([elementName isEqualToString:@"backgroundColor"]) {
+        self.isParsingBackgroundColor = YES;
+        if (attributeDict[@"value"] && !self.fallbackBackgroundColor) {
+            UIColor *c = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
+            if (c && CGColorGetAlpha(c.CGColor) > 0.05) {
+                self.fallbackBackgroundColor = c;
+            }
+        }
+    } else if ([elementName isEqualToString:@"CGColor"]) {
+        if (self.isParsingBackgroundColor && attributeDict[@"value"] && !self.fallbackBackgroundColor) {
+            UIColor *c = [self parseColorString:attributeDict[@"value"] opacity:attributeDict[@"opacity"]];
+            if (c && CGColorGetAlpha(c.CGColor) > 0.05) {
+                self.fallbackBackgroundColor = c;
+            }
         }
     } else if ([elementName isEqualToString:@"LKState"]) {
         self.currentParsingState = attributeDict[@"name"];
         if (self.currentParsingState) [self.availableStates addObject:self.currentParsingState];
-        self.currentParsingStateOrTransition = self.currentParsingState;
-    } else if ([elementName isEqualToString:@"LKStateTransition"]) {
-        self.currentParsingStateOrTransition = attributeDict[@"toState"];
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
         self.currentParsingTargetId = attributeDict[@"targetId"];
         self.currentParsingKeyPath = attributeDict[@"keyPath"];
-        if (self.currentParsingStateOrTransition) {
-            [self.validAnimatedStates addObject:self.currentParsingStateOrTransition];
-        }
     } else if ([elementName isEqualToString:@"value"]) {
         if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
             NSString *valStr = attributeDict[@"value"];
@@ -1108,22 +1207,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
             }
         }
-    } else {
-        if (self.currentParsingStateOrTransition && ![elementName isEqualToString:@"elements"]) {
-            [self.validAnimatedStates addObject:self.currentParsingStateOrTransition];
-        }
     }
 }
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
-    if ([elementName isEqualToString:@"LKState"]) {
-        self.currentParsingState = nil;
-        self.currentParsingStateOrTransition = nil;
-    } else if ([elementName isEqualToString:@"LKStateTransition"]) {
-        self.currentParsingStateOrTransition = nil;
-    } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
-        self.currentParsingTargetId = nil;
-        self.currentParsingKeyPath = nil;
-    }
+    if ([elementName isEqualToString:@"backgroundColor"]) {
+        self.isParsingBackgroundColor = NO;
+    } else if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
+    else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
 }
 - (NSString *)resolveRealStateNameFor:(NSString *)logicalState isDark:(BOOL)isDark {
     if ([self.availableStates containsObject:logicalState]) return logicalState;
@@ -1172,8 +1262,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableDictionary *fgLayerMap;
 @property (nonatomic, assign) BOOL isAnimatingState; 
 @property (nonatomic, assign) NSInteger animationGeneration;
+@property (nonatomic, strong) UIColor *plistBackgroundColor; 
+@property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
+- (void)lockSolidBackground;
 @end
 
 @implementation ZoneRenderEngineEnhanced
@@ -1237,6 +1330,28 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         bounds.origin = CGPointZero;
     }
     
+    // 【核心修复】：优先读取扫描出的持久化颜色
+    UIColor *finalBgColor = [UIColor clearColor];
+    if (self.dynamicSolidColor) {
+        finalBgColor = self.dynamicSolidColor;
+    } else if (self.plistBackgroundColor) {
+        finalBgColor = self.plistBackgroundColor;
+    } else if (self.bgParser && self.bgParser.fallbackBackgroundColor) {
+        finalBgColor = self.bgParser.fallbackBackgroundColor;
+    }
+    self.backgroundColor = finalBgColor;
+    
+    if (self.bgView) {
+        self.bgView.frame = bounds;
+        self.bgView.backgroundColor = finalBgColor;
+    }
+    if (self.floatingView) {
+        self.floatingView.frame = bounds;
+    }
+    if (self.fgView) {
+        self.fgView.frame = bounds;
+    }
+    
     BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
     ZoneCAMLParserEnhanced *parsers[] = {self.bgParser, self.floatParser, self.fgParser};
     
@@ -1244,17 +1359,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         BSUICAPackageView *v = views[i];
         ZoneCAMLParserEnhanced *p = parsers[i];
         if (!v) continue;
-        
-        v.frame = bounds;
-        
-        // 【核心修复】：将背景色死死焊在 Layer 层，避免 BSUICAPackageView 更新状态时丢失纯色背景
-        if (p && p.rootBackgroundColor) {
-            v.backgroundColor = p.rootBackgroundColor;
-            v.layer.backgroundColor = p.rootBackgroundColor.CGColor;
-        } else {
-            v.backgroundColor = [UIColor clearColor];
-            v.layer.backgroundColor = [UIColor clearColor].CGColor;
-        }
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
@@ -1391,10 +1495,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    // 只在真正的 Sleep 动画期间才阻挡，一旦屏幕点亮，即可随时被手势拖拽打断
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    // 强制解除所有动画锁，保证手指拖拽过程 0 延迟、0 卡顿，与原生完全同步！
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
@@ -1449,21 +1551,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
     }
     
-    BOOL shouldSendBg = ![stateName isEqualToString:@"Sleep"] || [self.bgParser.validAnimatedStates containsObject:realBgState];
-    BOOL shouldSendFloat = ![stateName isEqualToString:@"Sleep"] || [self.floatParser.validAnimatedStates containsObject:realFloatState];
-    BOOL shouldSendFg = ![stateName isEqualToString:@"Sleep"] || [self.fgParser.validAnimatedStates containsObject:realFgState];
-
-    if (shouldSendBg) {
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) [self.bgView setState:realBgState animated:animated];
-        else [self.bgView setState:realBgState];
-    }
-    if (shouldSendFloat) {
-        if ([self.floatingView respondsToSelector:@selector(setState:animated:)]) [self.floatingView setState:realFloatState animated:animated];
-        else [self.floatingView setState:realFloatState];
-    }
-    if (shouldSendFg) {
-        if ([self.fgView respondsToSelector:@selector(setState:animated:)]) [self.fgView setState:realFgState animated:animated];
-        else [self.fgView setState:realFgState];
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:realBgState animated:animated]; 
+        [self.floatingView setState:realFloatState animated:animated]; 
+        [self.fgView setState:realFgState animated:animated];
+    } else {
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
     }
 }
 
@@ -1473,7 +1568,47 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self.fgView removeFromSuperview]; self.fgView = nil;
     [self.bgLayerMap removeAllObjects]; [self.floatLayerMap removeAllObjects]; [self.fgLayerMap removeAllObjects];
     self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
+    self.dynamicSolidColor = nil;
     self.logicalScreenSize = CGSizeZero;
+}
+
+// 终极背景捕捉锁定：强行扫描出纯色背景，焊死在引擎底板上，防系统偷杀！
+- (void)lockSolidBackground {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.bgView) return;
+        
+        UIColor *targetColor = nil;
+        if (self.plistBackgroundColor) {
+            targetColor = self.plistBackgroundColor;
+        } else if (self.bgParser && [self.bgParser respondsToSelector:@selector(fallbackBackgroundColor)] && [(id)self.bgParser fallbackBackgroundColor]) {
+            targetColor = [(id)self.bgParser fallbackBackgroundColor];
+        }
+        
+        if (!targetColor) {
+            CALayer *rootLayer = [self.bgView.layer.sublayers firstObject];
+            if (rootLayer) {
+                NSMutableArray *queue = [NSMutableArray arrayWithObject:rootLayer];
+                while (queue.count > 0) {
+                    CALayer *layer = queue.firstObject;
+                    [queue removeObjectAtIndex:0];
+                    
+                    if (layer.backgroundColor && CGColorGetAlpha(layer.backgroundColor) > 0.05) {
+                        targetColor = [UIColor colorWithCGColor:layer.backgroundColor];
+                        break;
+                    }
+                    if (layer.sublayers) {
+                        [queue addObjectsFromArray:layer.sublayers];
+                    }
+                }
+            }
+        }
+        
+        if (targetColor) {
+            self.dynamicSolidColor = targetColor;
+            self.backgroundColor = targetColor;
+            self.bgView.backgroundColor = targetColor;
+        }
+    });
 }
 
 - (void)reloadWallpaperViews {
@@ -1513,6 +1648,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         __block CGSize targetSize = CGSizeZero;
+        __block UIColor *parsedBgColor = nil;
+        
         if (foundPlist) {
             NSDictionary *plistData = [NSDictionary dictionaryWithContentsOfFile:foundPlist];
             NSString *logicalClassStr = plistData[@"logicalScreenClass"];
@@ -1527,6 +1664,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                     }
                 }
             }
+            
+            NSArray *bgArray = plistData[@"backgroundColor"];
+            if ([bgArray isKindOfClass:[NSArray class]] && bgArray.count >= 3) {
+                CGFloat r = [bgArray[0] doubleValue];
+                CGFloat g = [bgArray[1] doubleValue];
+                CGFloat b = [bgArray[2] doubleValue];
+                CGFloat a = (bgArray.count >= 4) ? [bgArray[3] doubleValue] : 1.0;
+                parsedBgColor = [UIColor colorWithRed:r green:g blue:b alpha:a];
+            }
         }
         
         if (currentGen != self.reloadGeneration) return; 
@@ -1535,6 +1681,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             if (currentGen != self.reloadGeneration) return; 
             [self clearCurrentViewsSafely]; 
             self.logicalScreenSize = targetSize; 
+            self.plistBackgroundColor = parsedBgColor;
             
             dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
             Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
@@ -1607,6 +1754,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 
                 [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
                 [CATransaction commit];
+                
+                [self lockSolidBackground]; 
             });
         });
     });
@@ -1629,7 +1778,6 @@ static void EnsureEngineViewIsMounted() {
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
 
-    // 【极速释放】：关闭开关直接摧毁，毫无残留
     if (!g_enabled) {
         if (existingEngine) {
             if ([existingEngine respondsToSelector:@selector(clearCurrentViewsSafely)]) {
@@ -1692,7 +1840,6 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 %group iOS16Plus
 
-// 【核心修复】：死死钳住 PBUIWallpaperView 的透明度和显隐，绝不允许原生黄底/图底诈尸覆盖
 %hook PBUIWallpaperView
 - (void)layoutSubviews {
     %orig;
@@ -1719,7 +1866,6 @@ static void EnsureEngineViewIsMounted() {
         self.alpha = 0.0;
     }
 }
-
 - (void)setAlpha:(double)alpha {
     if (g_enabled) {
         if (!g_isVideoMode) { %orig(0.0); return; }
@@ -1731,7 +1877,6 @@ static void EnsureEngineViewIsMounted() {
     }
     %orig;
 }
-
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled) {
         if (!g_isVideoMode) { %orig(YES); return; }
@@ -1846,7 +1991,7 @@ static void EnsureEngineViewIsMounted() {
                 if ([engineView respondsToSelector:@selector(lockVideoView)]) {
                     UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
                     if (lockView) sourceForPortal = lockView;
-                    else sourceForPortal = nil;
+                    else sourceForPortal = nil; 
                 }
             }
         }
@@ -1968,11 +2113,10 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    // 【核心修复】：不再强行广播 Unlock，解除动画占位，完全交给滑动 CADisplayLink progress
-    // 如果没有这句话阻挡，解锁会播放一个定死0.85秒的动画，导致滑动卡死或跳变！
-    if (g_enabled && g_isScreenOn && !dismissed) {
+    if (g_enabled && g_isScreenOn) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
         dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state}];
         });
     }
 }
@@ -2101,7 +2245,6 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 %group iOS14_15
 
-// 【回滚为纯净原版代码】: 去除 iOS 14-15 全部的 Sleep/Wake 息屏动画处理
 %hook SBFWallpaperView
 - (void)layoutSubviews {
     %orig;
@@ -2439,7 +2582,6 @@ static void EnsureEngineViewIsMounted() {
 // ==================== 【全版本通用 Hook 区域】 ============================
 // =========================================================================
 
-// 【全局状态修正】：确保所有 iOS 版本解锁流转顺畅，不再卡死 "Locked"
 %hook SBLockScreenManager
 - (void)lockUIFromSource:(int)source withOptions:(id)options {
     %orig;
@@ -2451,17 +2593,14 @@ static void EnsureEngineViewIsMounted() {
 - (void)unlockUIFromSource:(int)source withOptions:(id)options {
     %orig;
     g_isUnlocked = YES;
-    // 取消 Unlock 的强制广播，让 CADisplayLink 拖拽进度全权接管，杜绝进度打架
 }
 %end
 
-// 【核心捕获点】：拦截原生壁纸的苏醒和睡眠动画块，确保和系统的动画时序完美同步
 %hook SBFLegacyWallpaperWakeAnimator
 - (void)updateWakeEffectsForWake:(BOOL)wake animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
         NSString *state = wake ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-        // 捕获到最核心的动画发起点，必须立刻同步下发！
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @(animated)}];
     }
 }
@@ -2557,7 +2696,6 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewDidLayoutSubviews { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
 
-// 解决长按锁屏触发的内存越界崩溃，剥离不安全的实例化操作
 - (void)_updateBackgroundContentView { %orig; }
 - (void)_updateWallpaperEffectView { %orig; }
 - (void)_updateWallpaper { %orig; }
@@ -2647,18 +2785,13 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %ctor {
-    // 【核心修复】：进程隔离保护
-    // 获取当前运行的进程名称
     NSString *processName = [[NSProcessInfo processInfo] processName];
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
     
-    // 如果当前进程不是 SpringBoard，直接退出，不执行任何 Hook！
-    // 这样就能完美屏蔽 Safari (com.apple.mobilesafari) 和 电话 (com.apple.InCallService) 等应用
     if (![processName isEqualToString:@"SpringBoard"] && ![bundleId isEqualToString:@"com.apple.springboard"]) {
         return; 
     }
 
-    // 只有在 SpringBoard 进程中才会执行以下的加载和 Hook 逻辑
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
     
