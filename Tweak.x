@@ -2220,9 +2220,28 @@ static void EnsureEngineViewIsMounted() {
     %orig;
 }
 
+static double s_lastProgress = -1.0;
+
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
+
+    // 【终极硬核防跳变算法】：区分“人类真实滑动”与“系统假动作（通知模糊）”
+    BOOL isJump = NO;
+    if (s_lastProgress >= 0.0) {
+        // 人类真实滑动的单帧变化量通常在 0.01 到 0.08 之间。
+        // 如果瞬间跳变大于 0.25 (相当于1帧滑了四分之一屏幕)，绝对是系统通知发送的强制模糊指令！
+        if (fabs(progress - s_lastProgress) > 0.25) {
+            isJump = YES;
+        }
+    }
+    s_lastProgress = progress;
+
+    // 如果设备处于锁屏，并且检测到瞬间跳变，直接拦截！(完美掐死通知带来的桌面化Bug)
+    if (isJump && !g_isUnlocked) {
+        return;
+    }
+
     EnsureEngineViewIsMounted();
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
