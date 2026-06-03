@@ -2001,15 +2001,110 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+@interface CSCoverSheetViewController (Zone16)
+- (void)zone_tickProgress;
+- (void)zone_screenSleep;
+- (void)zone_screenWake;
+@end
+
 %hook CSCoverSheetViewController
 - (void)viewDidLoad {
     %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
+    if (g_enabled) {
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zone_tickProgress)];
+        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        objc_setAssociatedObject(self, "ZoneTicker16", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenSleep) name:@"ZoneEngineSleep" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenWake) name:@"ZoneEngineWake" object:nil];
+    }
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceLayout" object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineSleep" object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneEngineWake" object:nil];
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker16");
+    if (link) [link invalidate];
     %orig;
+}
+
+%new
+- (void)zone_tickProgress {
+    if (!g_enabled || !g_isScreenOn) return;
+    CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
+    CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
+    double yOffset = absoluteRect.origin.y;
+    double screenHeight = [UIScreen mainScreen].bounds.size.height;
+    double engineProgress = -yOffset / screenHeight;
+    engineProgress = MAX(0.0, MIN(1.0, engineProgress));
+    
+    if (ABS(engineProgress - g_lastTickProgress) > 0.0001) {
+        g_lastTickProgress = engineProgress;
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(engineProgress)}];
+        
+        if (g_portalView) {
+            if (g_isVideoMode) {
+                if (g_portalView.alpha != 1.0) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    g_portalView.alpha = 1.0;
+                    [CATransaction commit];
+                }
+            } else {
+                double alpha = 0.0;
+                if (engineProgress > 0.7) {
+                    alpha = (1.0 - engineProgress) * (0.05 / 0.3);
+                } else if (engineProgress > 0.6) {
+                    alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
+                } else {
+                    alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
+                }
+                alpha = MAX(0.0, MIN(1.0, alpha));
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = alpha;
+                [CATransaction commit];
+            }
+        }
+    }
+}
+
+%new
+- (void)zone_screenSleep {
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker16");
+    if (link) link.paused = YES;
+}
+
+%new
+- (void)zone_screenWake {
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneTicker16");
+    if (link) link.paused = NO;
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        g_isUnlocked = NO;
+        g_lastTickProgress = -1; 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
+        });
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        g_isUnlocked = YES;
+        g_lastTickProgress = -1; 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
+        });
+    }
 }
 
 - (void)viewWillLayoutSubviews {
@@ -2221,45 +2316,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)updatePosterSwitcherSnapshots {
     if (g_enabled) return;
     %orig;
-}
-
-- (void)updateWallpaperAnimationWithProgress:(double)progress {
-    %orig;
-    if (!g_enabled) return; 
-    
-    if (!g_isUnlocked && !g_isCoverSheetScrolling) {
-        progress = 0.0;
-    }
-    
-    EnsureEngineViewIsMounted();
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-        
-        if (g_portalView) {
-            if (g_isVideoMode) {
-                if (g_portalView.alpha != 1.0) {
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    g_portalView.alpha = 1.0;
-                    [CATransaction commit];
-                }
-            } else {
-                double alpha = 0.0;
-                if (progress > 0.7) {
-                    alpha = (1.0 - progress) * (0.05 / 0.3);
-                } else if (progress > 0.6) {
-                    alpha = 0.05 + (0.7 - progress) * 1.0; 
-                } else {
-                    alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-                }
-                alpha = MAX(0.0, MIN(1.0, alpha));
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = alpha;
-                [CATransaction commit];
-            }
-        }
-    });
 }
 %end
 
@@ -2657,7 +2713,6 @@ static void EnsureEngineViewIsMounted() {
 }
 - (void)unlockUIFromSource:(int)source withOptions:(id)options {
     %orig;
-    g_isUnlocked = YES;
 }
 %end
 
