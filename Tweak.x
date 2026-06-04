@@ -1876,31 +1876,23 @@ static void EnsureEngineViewIsMounted() {
 %hook PBUIWallpaperView
 
 // 新增辅助方法：精准判断是否处于主壁纸容器中，排除系统的模糊副本
-%new
+%new%new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
-    BOOL hasWhitelist = NO;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：遇到 App 场景(Safari等)、来电界面，直接拦截，恢复原生壁纸
-        if ([className containsString:@"Scene"] || 
-            [className containsString:@"Call"] || 
-            [className containsString:@"InCallService"] || 
+        // 1. 绝对黑名单：极其精准地拦截所有 App 内界面（如 Safari）和电话来电
+        if ([className containsString:@"ApplicationScene"] || 
+            [className containsString:@"AppContainer"] || 
+            [className containsString:@"InCall"] ||
             [className containsString:@"Telephony"]) {
-            return NO; 
+            return NO; // 恢复系统原生壁纸
         }
-        
-        // 2. 核心白名单：只要是壁纸、锁屏(涵盖下拉过渡)、多任务后台，就标记为通过
-        if ([className containsString:@"Wallpaper"] || 
-            [className containsString:@"CoverSheet"] || 
-            [className containsString:@"Switcher"]) {
-            hasWhitelist = YES;
-        }
-        
         view = view.superview;
     }
-    return hasWhitelist;
+    // 2. 只要不在 App 内部（即在桌面、锁屏、多任务等），全部放行你的动态壁纸
+    return YES;
 }
 
 - (void)layoutSubviews {
@@ -2335,28 +2327,19 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
-    BOOL hasWhitelist = NO;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：拦截应用内(Safari等)和来电界面
-        if ([className containsString:@"Scene"] || 
-            [className containsString:@"Call"] || 
-            [className containsString:@"InCallService"] || 
+        // 精准拦截所有 App 内和电话界面
+        if ([className containsString:@"ApplicationScene"] || 
+            [className containsString:@"AppContainer"] || 
+            [className containsString:@"InCall"] ||
             [className containsString:@"Telephony"]) {
-            return NO;
+            return NO; 
         }
-        
-        // 2. 核心白名单
-        if ([className containsString:@"Wallpaper"] || 
-            [className containsString:@"CoverSheet"] || 
-            [className containsString:@"Switcher"]) {
-            hasWhitelist = YES;
-        }
-        
         view = view.superview;
     }
-    return hasWhitelist;
+    return YES;
 }
 
 - (void)layoutSubviews {
@@ -2705,31 +2688,22 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_shouldHideEffect {
     UIView *view = self;
-    BOOL hasWhitelist = NO;
     while (view) {
-        NSString *name = NSStringFromClass([view class]);
+        NSString *className = NSStringFromClass([view class]);
         
-        // 1. 黑名单：拦截应用内(Safari等)、来电界面
-        // 额外保护：文件夹(Folder)和底栏(Dock)，保留它们的系统模糊，避免变全透明
-        if ([name containsString:@"Scene"] || 
-            [name containsString:@"Call"] || 
-            [name containsString:@"InCallService"] || 
-            [name containsString:@"Telephony"] ||
-            [name containsString:@"Folder"] || 
-            [name containsString:@"Dock"]) {
-            return NO;
+        // 1. 黑名单：在文件夹(Folder)、Dock栏、App内(Safari等)、来电界面，绝对不隐藏模糊
+        if ([className containsString:@"Folder"] || 
+            [className containsString:@"Dock"] || 
+            [className containsString:@"ApplicationScene"] || 
+            [className containsString:@"AppContainer"] || 
+            [className containsString:@"InCall"] ||
+            [className containsString:@"Telephony"]) {
+            return NO; // 保留系统模糊，避免文件夹或Safari背景变全透明穿帮
         }
-        
-        // 2. 白名单：锁屏、桌面、多任务才隐藏原生模糊，把你的动态壁纸透出来
-        if ([name containsString:@"Wallpaper"] || 
-            [name containsString:@"CoverSheet"] || 
-            [name containsString:@"Switcher"]) {
-            hasWhitelist = YES;
-        }
-        
         view = view.superview;
     }
-    return hasWhitelist;
+    // 2. 在纯桌面、锁屏等系统背景处，隐藏原生模糊，让你的动态壁纸清晰透出来
+    return YES;
 }
 
 - (void)didMoveToSuperview {
