@@ -1879,20 +1879,29 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
+    BOOL isMain = NO;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 核心白名单：只要是 锁屏/通知中心(涵盖下拉动画)、主壁纸窗、多任务后台
+        // 1. 绝对黑名单：直接拦截你的精准关键字，立刻恢复系统原生壁纸
+        if ([className containsString:@"Call"] || 
+            [className containsString:@"InCall"] || 
+            [className containsString:@"Safari"]) {
+            return NO;
+        }
+        
+        // 2. 核心白名单：加入 Reachability 完美解决降半屏闪烁问题
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"]) {
-            return YES; // 放行，显示你的动态壁纸
+            [className containsString:@"Switcher"] ||
+            [className containsString:@"Reachability"]) {
+            isMain = YES;
         }
+        
         view = view.superview;
     }
-    // 只要不在上述三个地方（比如身处 Safari、电话 等 App 内），统统返回 NO 恢复系统原生壁纸！
-    return NO;
+    return isMain;
 }
 
 - (void)layoutSubviews {
@@ -2327,20 +2336,27 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
+    BOOL isMain = NO;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 核心白名单：精准放行桌面、锁屏、下拉动画、多任务
+        if ([className containsString:@"Call"] || 
+            [className containsString:@"InCall"] || 
+            [className containsString:@"Safari"]) {
+            return NO;
+        }
+        
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"]) {
-            return YES;
+            [className containsString:@"Switcher"] ||
+            [className containsString:@"Reachability"]) { // 解决降半屏闪烁
+            isMain = YES;
         }
+        
         view = view.superview;
     }
-    // 其他任何 App 统统拦截，保护 Safari 和 电话 呈现原生背景
-    return NO;
+    return isMain;
 }
 
 - (void)layoutSubviews {
@@ -2689,25 +2705,31 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_shouldHideEffect {
     UIView *view = self;
+    BOOL shouldHide = NO;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：坚决保护 Dock 栏和 文件夹(Folder) 的模糊效果，防止变全透明
-        if ([className containsString:@"Dock"] || [className containsString:@"Folder"]) {
+        // 1. 绝对黑名单：遇到 Safari、来电、文件夹、Dock栏，一律不隐藏模糊，防止穿帮
+        if ([className containsString:@"Call"] || 
+            [className containsString:@"InCall"] || 
+            [className containsString:@"Safari"] || 
+            [className containsString:@"Folder"] || 
+            [className containsString:@"Dock"]) {
             return NO;
         }
         
-        // 2. 核心白名单：把桌面、锁屏(含下拉)、多任务的系统模糊抽走，让你的壁纸透出来
+        // 2. 核心白名单：加入 Reachability 解决降半屏时的高斯模糊闪烁
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"]) {
-            return YES;
+            [className containsString:@"Switcher"] ||
+            [className containsString:@"Reachability"]) {
+            shouldHide = YES;
         }
+        
         view = view.superview;
     }
-    // 3. 兜底：其他所有 App（如 Safari、电话）原有的系统模糊效果全部保留
-    return NO;
+    return shouldHide;
 }
 
 - (void)didMoveToSuperview {
