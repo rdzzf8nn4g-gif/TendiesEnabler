@@ -2546,8 +2546,6 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
     }
 }
 
@@ -2556,8 +2554,6 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isUnlocked = YES;
         g_lastTickProgress = -1; 
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
     }
 }
 
