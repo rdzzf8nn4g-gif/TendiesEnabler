@@ -893,13 +893,19 @@ static NSString * GetPrefsPlistPath() {
             
             NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
             
-            NSString *originalName = [url lastPathComponent];
-            NSString *baseName = [originalName stringByDeletingPathExtension];
-            NSString *ext = [originalName pathExtension];
-            NSString *fileName = originalName;
+            // 获取视频的原始后缀名，如果没有则兜底使用 mp4
+            NSString *ext = [url pathExtension];
+            if (ext.length == 0) ext = @"mp4";
+            
+            NSString *fileName = @"";
             int counter = 1;
-            while ([fm fileExistsAtPath:[videoDir stringByAppendingPathComponent:fileName]]) {
-                fileName = [NSString stringWithFormat:@"%@_%d.%@", baseName, counter++, ext];
+            // 循环查找可用的名称：素材1, 素材2, 素材3...
+            while (YES) {
+                fileName = [NSString stringWithFormat:@"素材%d.%@", counter, ext];
+                if (![fm fileExistsAtPath:[videoDir stringByAppendingPathComponent:fileName]]) {
+                    break;
+                }
+                counter++;
             }
             
             NSString *destPath = [videoDir stringByAppendingPathComponent:fileName];
@@ -1748,12 +1754,19 @@ static NSString * GetPrefsPlistPath() {
     
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名" message:@"请输入新的视频名称" preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-        textField.text = oldName;
+        // [修改核心 1]：在输入框中隐藏后缀名，只显示名字主体
+        textField.text = [oldName stringByDeletingPathExtension];
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        NSString *newName = alert.textFields.firstObject.text;
-        if (newName.length > 0 && ![newName isEqualToString:oldName]) {
+        NSString *inputName = alert.textFields.firstObject.text;
+        NSString *oldExt = [oldName pathExtension];
+        
+        // [修改核心 2]：自动把原来的后缀名拼回去
+        NSString *newName = oldExt.length > 0 ? [inputName stringByAppendingPathExtension:oldExt] : inputName;
+        
+        // 校验：输入框不能为空，且拼接后缀后的新名字不能和原名相同
+        if (inputName.length > 0 && ![newName isEqualToString:oldName]) {
             NSString *videoDir = (target == 1) ? GetVideoWallpapersLockDir() : GetVideoWallpapersHomeDir();
             NSString *oldPath = [videoDir stringByAppendingPathComponent:oldName];
             NSString *newPath = [videoDir stringByAppendingPathComponent:newName];
