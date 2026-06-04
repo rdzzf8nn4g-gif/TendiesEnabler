@@ -28,6 +28,7 @@ typedef struct {
 @end
 
 @interface PBUIWallpaperView : UIView
+- (BOOL)zone_isMainWallpaperContainer;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -54,6 +55,7 @@ typedef struct {
 
 @interface SBWallpaperEffectView : UIView
 @property (nonatomic) long long wallpaperStyle;
+- (BOOL)zone_shouldHideEffect;
 @end
 
 @interface _UIPortalView : UIView
@@ -79,6 +81,7 @@ typedef struct {
 @end
 
 @interface SBFWallpaperView : UIView
+- (BOOL)zone_isMainWallpaperContainer;
 @end
 
 // =========================================================================
