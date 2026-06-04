@@ -638,6 +638,14 @@ static NSString * GetPrefsPlistPath() {
         [enableSpec setProperty:@NO forKey:@"default"];
         enableSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:enableSpec];
+
+// --- 双击息屏开关 UI ---
+        PSSpecifier *doubleTapSpec = [PSSpecifier preferenceSpecifierNamed:@"双击空白处息屏" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        [doubleTapSpec setProperty:@"DoubleTapToSleep" forKey:@"key"];
+        [doubleTapSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+        [doubleTapSpec setProperty:@NO forKey:@"default"];
+        doubleTapSpec->action = @selector(setPreferenceValue:specifier:);
+        [_specifiers addObject:doubleTapSpec];
         
         PSSpecifier *lowPowerSpec = [PSSpecifier preferenceSpecifierNamed:@"低电模式暂停" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [lowPowerSpec setProperty:@"LowPowerPause" forKey:@"key"];
