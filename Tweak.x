@@ -4,7 +4,6 @@
 #import <dlfcn.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h> 
-#import <notify.h> // 🚨 新增：导入底层通知系统头文件 
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -357,15 +356,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     });
 }
 
-
 // =========================================================================
 // ==================== 【全新模块】: 极致工业级视频引擎 ===================
 // =========================================================================
 @interface ZoneVideoPlayerView : UIView
-@property (nonatomic, strong) AVPlayer *player;
+@property (nonatomic, strong) AVQueuePlayer *player;
+@property (nonatomic, strong) AVPlayerLooper *looper;
 @property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, copy) NSString *currentPath;
-@property (nonatomic, assign) BOOL isManuallyPaused;
+@property (nonatomic, assign) BOOL isManuallyPaused; 
 - (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path;
 - (void)playVideo;
 - (void)pauseVideo;
@@ -381,55 +380,70 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.currentPath = path;
 
         @try {
-            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient
-                                             withOptions:AVAudioSessionCategoryOptionMixWithOthers
+            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
+                                             withOptions:AVAudioSessionCategoryOptionMixWithOthers 
                                                    error:nil];
             [[AVAudioSession sharedInstance] setActive:YES error:nil];
         } @catch (NSException *e) {}
 
         if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
             NSURL *url = [NSURL fileURLWithPath:path];
-            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
+            AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
+            AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
             
-            self.player = [AVPlayer playerWithPlayerItem:item];
+            if ([item respondsToSelector:@selector(setPreferredForwardBufferDuration:)]) {
+                item.preferredForwardBufferDuration = 1.0;
+            }
+            
+            self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
             self.player.muted = YES;
-            self.player.allowsExternalPlayback = NO;
-            self.player.automaticallyWaitsToMinimizeStalling = NO;
-            self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
+            self.player.allowsExternalPlayback = NO; 
+            self.player.automaticallyWaitsToMinimizeStalling = NO; 
+            self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
             
             if (@available(iOS 12.0, *)) {
                 self.player.preventsDisplaySleepDuringVideoPlayback = NO;
             }
+            
+            self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
             
             self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
             self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
             self.playerLayer.frame = self.bounds;
             [self.layer addSublayer:self.playerLayer];
             
-            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemDidFinishPlaying:) name:AVPlayerItemDidPlayToEndTimeNotification object:item];
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:UIApplicationDidBecomeActiveNotification object:nil];
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:AVPlayerItemPlaybackStalledNotification object:nil];
+            
+            [self.player addObserver:self forKeyPath:@"rate" options:NSKeyValueObservingOptionNew context:nil];
         }
     }
     return self;
 }
 
-- (void)itemDidFinishPlaying:(NSNotification *)notification {
-    if (!self.player) return;
-    [self.player seekToTime:kCMTimeZero toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
-    if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
-        [self.player play];
-    }
-}
-
 - (void)layoutSubviews {
     [super layoutSubviews];
     if (self.playerLayer) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
         self.playerLayer.frame = self.bounds;
-        [CATransaction commit];
     }
     if (g_isScreenOn && g_enabled && g_isVideoMode && !self.isManuallyPaused) {
         [self playVideo];
+    }
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
+    if ([keyPath isEqualToString:@"rate"]) {
+        if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
+            if (self.player.rate == 0.0) {
+                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
+                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
+                        [self playVideo];
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -441,6 +455,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.isManuallyPaused = NO;
     
+    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
     @try {
         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
                                          withOptions:AVAudioSessionCategoryOptionMixWithOthers 
@@ -448,26 +463,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[AVAudioSession sharedInstance] setActive:YES error:nil];
     } @catch (NSException *e) {}
 
-    if (self.playerLayer && self.playerLayer.superlayer == nil) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        self.playerLayer.frame = self.bounds;
-        [self.layer addSublayer:self.playerLayer];
-        [CATransaction commit];
-    }
-    
-    if (self.player.currentItem.status == AVPlayerItemStatusFailed) {
-        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.player.currentItem];
-        AVPlayerItem *newItem = [AVPlayerItem playerItemWithURL:[NSURL fileURLWithPath:self.currentPath]];
-        [self.player replaceCurrentItemWithPlayerItem:newItem];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemDidFinishPlaying:) name:AVPlayerItemDidPlayToEndTimeNotification object:newItem];
+    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
+    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
+    // 【🚨防定格修复2：重新牵手硬件解码器 (iOS16+核心修复)🚨】
+    // 息屏会导致系统切断 AVPlayerLayer 的底层渲染管线。
+    // 不能只判断 nil，必须强制剥离再重新绑定，才能唤醒 CoreAnimation 重建渲染节点。
+    if (self.playerLayer) {
+        self.playerLayer.player = nil;
+        self.playerLayer.player = self.player;
     }
 
-    [self.player seekToTime:[self.player currentTime] toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
-        if (!self.isManuallyPaused && g_isScreenOn) {
-            [self.player play];
-        }
-    }];
+    // 无视 status，暴力执行 play
+    [self.player play];
 }
 
 - (void)pauseVideo {
@@ -475,25 +482,28 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.player) {
         [self.player pause];
     }
-    if (self.playerLayer && self.playerLayer.superlayer != nil) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        [self.playerLayer removeFromSuperlayer];
-        [CATransaction commit];
-    }
 }
 
 - (void)cleanUpEngineSafely {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    @try {
+        [self.player removeObserver:self forKeyPath:@"rate"];
+    } @catch (NSException *e) {}
+    
     [self pauseVideo];
     
+    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
+    if (self.looper) {
+        [self.looper disableLooping];
+        self.looper = nil;
+    }
     if (self.playerLayer) {
-        self.playerLayer.player = nil; 
+        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation 引用
         [self.playerLayer removeFromSuperlayer];
         self.playerLayer = nil;
     }
     if (self.player) {
-        [self.player replaceCurrentItemWithPlayerItem:nil];
+        [self.player removeAllItems];
         self.player = nil;
     }
 }
@@ -502,6 +512,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self cleanUpEngineSafely];
 }
 @end
+
 
 @interface ZoneVideoEngine : UIView
 @property (nonatomic, strong) ZoneVideoPlayerView *lockVideoView;
@@ -2211,7 +2222,16 @@ static void EnsureEngineViewIsMounted() {
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
-        g_isScreenOn = !mode;
+        BOOL screenOn = !mode;
+        if (g_isScreenOn != screenOn) {
+            g_isScreenOn = screenOn;
+            // 必须补发 Wake/Sleep 通知，否则视频引擎无法知道需要解除 pause
+            if (screenOn) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            } else {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+            }
+        }
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
@@ -2313,7 +2333,8 @@ static void EnsureEngineViewIsMounted() {
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled) {
-        BOOL screenOn = (state == 1);
+        // iOS 16+ 兼容 AOD：只要不是 0(完全息屏) 和 3(准备息屏的暗化过渡)，都视为亮屏
+        BOOL screenOn = (state != 0 && state != 3);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1;
@@ -2333,7 +2354,8 @@ static void EnsureEngineViewIsMounted() {
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled) {
-        BOOL screenOn = (state == 1);
+        // iOS 16+ 兼容 AOD：只要不是 0(完全息屏) 和 3(准备息屏的暗化过渡)，都视为亮屏
+        BOOL screenOn = (state != 0 && state != 3);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1;
@@ -2936,30 +2958,6 @@ static void EnsureEngineViewIsMounted() {
 
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
-    
-    // 【🚨 终极防漏检测：硬件级底层屏幕亮灭事件监听】
-    int notify_token;
-    notify_register_dispatch("com.apple.springboard.hasBlankedScreen", &notify_token, dispatch_get_main_queue(), ^(int t) {
-        uint64_t state;
-        notify_get_state(t, &state);
-        
-        BOOL screenOn = (state == 0);
-        
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
-            
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-            
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
-        }
-    });
     
     if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
         %init(iOS16Plus);
