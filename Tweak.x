@@ -1882,17 +1882,17 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：极其精准地拦截所有 App 内界面（如 Safari）和电话来电
-        if ([className containsString:@"ApplicationScene"] || 
-            [className containsString:@"AppContainer"] || 
-            [className containsString:@"InCall"] ||
-            [className containsString:@"Telephony"]) {
-            return NO; // 恢复系统原生壁纸
+        // 核心白名单：只要是 锁屏/通知中心(涵盖下拉动画)、主壁纸窗、多任务后台
+        if ([className containsString:@"CoverSheet"] || 
+            [className containsString:@"WallpaperWindow"] || 
+            [className containsString:@"WallpaperViewController"] || 
+            [className containsString:@"Switcher"]) {
+            return YES; // 放行，显示你的动态壁纸
         }
         view = view.superview;
     }
-    // 2. 只要不在 App 内部（即在桌面、锁屏、多任务等），全部放行你的动态壁纸
-    return YES;
+    // 只要不在上述三个地方（比如身处 Safari、电话 等 App 内），统统返回 NO 恢复系统原生壁纸！
+    return NO;
 }
 
 - (void)layoutSubviews {
@@ -2330,16 +2330,17 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 精准拦截所有 App 内和电话界面
-        if ([className containsString:@"ApplicationScene"] || 
-            [className containsString:@"AppContainer"] || 
-            [className containsString:@"InCall"] ||
-            [className containsString:@"Telephony"]) {
-            return NO; 
+        // 核心白名单：精准放行桌面、锁屏、下拉动画、多任务
+        if ([className containsString:@"CoverSheet"] || 
+            [className containsString:@"WallpaperWindow"] || 
+            [className containsString:@"WallpaperViewController"] || 
+            [className containsString:@"Switcher"]) {
+            return YES;
         }
         view = view.superview;
     }
-    return YES;
+    // 其他任何 App 统统拦截，保护 Safari 和 电话 呈现原生背景
+    return NO;
 }
 
 - (void)layoutSubviews {
@@ -2691,19 +2692,22 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 黑名单：在文件夹(Folder)、Dock栏、App内(Safari等)、来电界面，绝对不隐藏模糊
-        if ([className containsString:@"Folder"] || 
-            [className containsString:@"Dock"] || 
-            [className containsString:@"ApplicationScene"] || 
-            [className containsString:@"AppContainer"] || 
-            [className containsString:@"InCall"] ||
-            [className containsString:@"Telephony"]) {
-            return NO; // 保留系统模糊，避免文件夹或Safari背景变全透明穿帮
+        // 1. 绝对黑名单：坚决保护 Dock 栏和 文件夹(Folder) 的模糊效果，防止变全透明
+        if ([className containsString:@"Dock"] || [className containsString:@"Folder"]) {
+            return NO;
+        }
+        
+        // 2. 核心白名单：把桌面、锁屏(含下拉)、多任务的系统模糊抽走，让你的壁纸透出来
+        if ([className containsString:@"CoverSheet"] || 
+            [className containsString:@"WallpaperWindow"] || 
+            [className containsString:@"WallpaperViewController"] || 
+            [className containsString:@"Switcher"]) {
+            return YES;
         }
         view = view.superview;
     }
-    // 2. 在纯桌面、锁屏等系统背景处，隐藏原生模糊，让你的动态壁纸清晰透出来
-    return YES;
+    // 3. 兜底：其他所有 App（如 Safari、电话）原有的系统模糊效果全部保留
+    return NO;
 }
 
 - (void)didMoveToSuperview {
