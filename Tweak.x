@@ -2169,8 +2169,7 @@ static void EnsureEngineViewIsMounted() {
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 0.0; // 重置过滤器
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
+        
     }
 }
 
@@ -2180,23 +2179,22 @@ static void EnsureEngineViewIsMounted() {
         g_isUnlocked = YES;
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 1.0; // 重置过滤器
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
+        
     }
 }
 %end
 
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
-    // 【修改点】：删除 if (g_enabled) 的拦截逻辑
-    // 让系统永远正常接收来自 PosterBoard (壁纸进程) 的快照表面 (IOSurface)
-    // 这样 Safari 和 电话 就能拿这张快照去生成毛玻璃了
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
     %orig;
 }
 
 - (void)updatePosterSwitcherSnapshots {
-    // 【修改点】：同样放行海报切换器（长按锁屏编辑壁纸）的快照
-    // 否则在编辑锁屏时，背景可能会变成死黑
+    if (g_enabled) return;
     %orig;
 }
 
