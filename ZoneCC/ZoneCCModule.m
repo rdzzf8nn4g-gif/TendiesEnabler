@@ -66,23 +66,45 @@
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), NOTIFY_KEY, NULL, NULL, YES);
 }
 
-// ==================== 苹果原生图标完美排版区域 ====================
+// ==================== 终极图标绝对居中渲染模块 ====================
+
+// 核心辅助方法：把任意尺寸的 SF Symbol 画死在一个 50x50 的绝对正方形画布正中心
+- (UIImage *)centeredImageWithSymbolName:(NSString *)name {
+    // 1. 获取系统图标
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium];
+    UIImage *sysImage = [UIImage systemImageNamed:name withConfiguration:config];
+    
+    if (!sysImage) return nil;
+    
+    // 2. 设定一个绝对正方形画布 (50x50 是控制中心内部最稳的比例)
+    CGSize canvasSize = CGSizeMake(50.0, 50.0);
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:canvasSize];
+    
+    // 3. 将图标画在画布正中心
+    UIImage *centeredImage = [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull context) {
+        CGSize imgSize = sysImage.size;
+        // 计算绝对居中的 CGRect
+        CGRect rect = CGRectMake((canvasSize.width - imgSize.width) / 2.0,
+                                 (canvasSize.height - imgSize.height) / 2.0,
+                                 imgSize.width,
+                                 imgSize.height);
+        
+        // 保证绘制时带有原本的透明度特征
+        [sysImage drawInRect:rect];
+    }];
+    
+    // 4. 返回纯模板模式，让控制中心自动接管上色 (白/黑/蓝)
+    return [centeredImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
 
 // 未选中状态下的图标 (锁屏交互模式：手指点击图标)
 - (UIImage *)iconGlyph {
-    // 26pt 大小，中等粗细，最匹配苹果原生 CC 模块的尺寸配置
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium];
-    UIImage *image = [UIImage systemImageNamed:@"hand.tap" withConfiguration:config];
-    // 强制渲染为模板，让控制中心自动居中并上色
-    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    return [self centeredImageWithSymbolName:@"hand.tap"];
 }
 
-// 选中状态下的图标 (视频模式：已更换为质感更好的“电影胶片”图标)
+// 选中状态下的图标 (视频模式：电影胶片图标)
 - (UIImage *)selectedIconGlyph {
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium];
-    // 使用 film.fill，视觉上更清晰地代表视频/媒体模式
-    UIImage *image = [UIImage systemImageNamed:@"film.fill" withConfiguration:config];
-    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    return [self centeredImageWithSymbolName:@"film.fill"];
 }
 
 // 选中状态下的底色 (跟随系统原生蓝色)
