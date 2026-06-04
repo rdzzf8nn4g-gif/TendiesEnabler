@@ -1882,20 +1882,20 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：精准拦截 iOS 16-17 的应用场景(Safari/电话等)、文件夹、Dock栏
+        // 1. 绝对黑名单：增加 Reachability，只要触发降半屏，立刻拦截并恢复系统原生壁纸
         if ([className containsString:@"SceneView"] || 
             [className containsString:@"AppContainer"] ||
             [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"]) {
+            [className containsString:@"Dock"] ||
+            [className containsString:@"Reachability"]) {
             return NO; 
         }
         
-        // 2. 核心白名单：锁屏、主窗、多任务、降半屏(Reachability)
+        // 2. 核心白名单：去掉 Reachability，保持桌面、锁屏、多任务的自定义壁纸显示
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"] ||
-            [className containsString:@"Reachability"]) {
+            [className containsString:@"Switcher"]) {
             isMain = YES;
         }
         view = view.superview;
@@ -2351,18 +2351,19 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
+        // 把 Reachability 调入黑名单，拦截插件隐藏逻辑
         if ([className containsString:@"SceneView"] || 
             [className containsString:@"AppContainer"] ||
             [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"]) {
+            [className containsString:@"Dock"] ||
+            [className containsString:@"Reachability"]) {
             return NO; 
         }
         
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"] ||
-            [className containsString:@"Reachability"]) {
+            [className containsString:@"Switcher"]) {
             isMain = YES;
         }
         view = view.superview;
@@ -2733,20 +2734,20 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：遇到 App内、文件夹、Dock栏 坚决保留模糊
+        // 1. 绝对黑名单：增加 Reachability。这样降半屏时上半部分的系统高斯模糊也能被完美保留
         if ([className containsString:@"SceneView"] || 
             [className containsString:@"AppContainer"] || 
             [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"]) {
+            [className containsString:@"Dock"] ||
+            [className containsString:@"Reachability"]) {
             return NO;
         }
         
-        // 2. 核心白名单：加入 Reachability 解决降半屏时的高斯模糊闪烁
+        // 2. 核心白名单：不再包含 Reachability
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"] ||
-            [className containsString:@"Reachability"]) {
+            [className containsString:@"Switcher"]) {
             shouldHide = YES;
         }
         
