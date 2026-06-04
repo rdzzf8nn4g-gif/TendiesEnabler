@@ -1,5 +1,8 @@
 #import "ZoneCCModule.h"
 #import <CoreFoundation/CoreFoundation.h>
+// 修复编译报错：引入 C 语言底层文件权限管理头文件
+#include <sys/stat.h>
+#include <unistd.h>
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
