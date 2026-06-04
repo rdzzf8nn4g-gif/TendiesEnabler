@@ -1881,14 +1881,26 @@ static void EnsureEngineViewIsMounted() {
     UIView *view = self;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        // 遇到电话、Safari相关的系统容器直接屏蔽（放行原生系统壁纸）
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) {
+        
+        // 1. 明确排除来电相关
+        if ([className containsString:@"Call"] || [className containsString:@"InCallService"]) {
             return NO;
         }
+        
+        // 2. 扩充核心白名单：包括壁纸主容器、锁屏、多任务后台(Switcher)、文件夹(Folder)、Dock栏
+        if ([className containsString:@"WallpaperWindow"] || 
+            [className containsString:@"WallpaperViewController"] || 
+            [className containsString:@"CSCoverSheetView"] ||
+            [className containsString:@"Switcher"] || 
+            [className containsString:@"Folder"] || 
+            [className containsString:@"Dock"]) {
+            return YES; // 这些正常界面，放行显示自定义壁纸
+        }
+        
         view = view.superview;
     }
-    // 其余情况统统默认放行（显示你的自定义壁纸）
-    return YES;
+    // 3. 只要不在上述白名单中（例如 Safari 等普通APP容器内），直接屏蔽恢复系统原生
+    return NO;
 }
 
 - (void)layoutSubviews {
@@ -2325,14 +2337,25 @@ static void EnsureEngineViewIsMounted() {
     UIView *view = self;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        // 遇到电话、Safari相关的系统容器直接屏蔽
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) {
+        
+        if ([className containsString:@"Call"] || [className containsString:@"InCallService"]) {
             return NO;
         }
+        
+        // 扩充白名单，保护多任务和文件夹不被误杀
+        if ([className containsString:@"WallpaperWindow"] || 
+            [className containsString:@"WallpaperViewController"] || 
+            [className containsString:@"CSCoverSheetView"] ||
+            [className containsString:@"Switcher"] || 
+            [className containsString:@"Folder"] || 
+            [className containsString:@"Dock"]) {
+            return YES;
+        }
+        
         view = view.superview;
     }
-    // 其余情况统统默认放行
-    return YES;
+    // 其他所有APP内（包含 Safari 和 电话）直接屏蔽
+    return NO;
 }
 
 - (void)layoutSubviews {
@@ -2684,21 +2707,21 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *name = NSStringFromClass([view class]);
         
-        // 1. 如果在来电或Safari中，保留系统原生模糊，不隐藏
-        if ([name containsString:@"Call"] || [name containsString:@"Safari"] || [name containsString:@"InCallService"]) {
+        if ([name containsString:@"Call"] || [name containsString:@"InCallService"]) {
             return NO;
         }
         
-        // 2. 只要是在锁屏/桌面的壁纸容器中，隐藏原生模糊（让你的动态壁纸透出来）
+        // 只有在最底层的壁纸主界面、锁屏、多任务界面，才隐藏原生模糊，让动态壁纸透出来
         if ([name containsString:@"WallpaperView"] || 
             [name containsString:@"WallpaperWindow"] || 
-            [name containsString:@"CSCoverSheetView"]) {
+            [name containsString:@"CSCoverSheetView"] ||
+            [name containsString:@"Switcher"]) {
             return YES;
         }
         
         view = view.superview;
     }
-    // 3. 兜底策略：其他系统组件（如Dock栏、文件夹背景）都不隐藏，避免误伤
+    // Safari等应用内、文件夹内保留系统原生模糊背景，避免穿帮
     return NO;
 }
 
