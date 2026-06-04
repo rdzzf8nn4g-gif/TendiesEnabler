@@ -28,7 +28,6 @@ typedef struct {
 @end
 
 @interface PBUIWallpaperView : UIView
-- (BOOL)zone_isMainWallpaperContainer;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -55,7 +54,6 @@ typedef struct {
 
 @interface SBWallpaperEffectView : UIView
 @property (nonatomic) long long wallpaperStyle;
-- (BOOL)zone_shouldHideEffect;
 @end
 
 @interface _UIPortalView : UIView
@@ -81,7 +79,6 @@ typedef struct {
 @end
 
 @interface SBFWallpaperView : UIView
-- (BOOL)zone_isMainWallpaperContainer;
 @end
 
 // =========================================================================
@@ -1803,9 +1800,16 @@ static void EnsureEngineViewIsMounted() {
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     if (!wallpaperController) return;
     
-    UIView *targetContainer = safelyGetIvarAsView(wallpaperController, "_wallpaperWindow");
-    if (!targetContainer) {
-        targetContainer = safelyGetIvarAsView(wallpaperController, "_wallpaperContainerView");
+    // 【核心修复3】尝试获取 _wallpaperViewController，挂载到其 view 上（完美继承便捷访问的下移动画）
+    UIView *targetContainer = nil;
+    UIViewController *wpVC = safelyGetIvarAsViewController(wallpaperController, "_wallpaperViewController");
+    if (wpVC && wpVC.view) {
+        targetContainer = wpVC.view;
+    } else {
+        targetContainer = safelyGetIvarAsView(wallpaperController, "_wallpaperWindow");
+        if (!targetContainer) {
+            targetContainer = safelyGetIvarAsView(wallpaperController, "_wallpaperContainerView");
+        }
     }
     if (!targetContainer) return;
     
@@ -1852,7 +1856,8 @@ static void EnsureEngineViewIsMounted() {
             existingEngine = [[ZoneRenderEngineLegacy alloc] initWithFrame:targetContainer.bounds];
         }
         objc_setAssociatedObject(wallpaperController, "GlobalZoneEngine", existingEngine, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [targetContainer addSubview:existingEngine];
+        // 【核心修复Safari重叠】插入到最底层 (index 0)
+        [targetContainer insertSubview:existingEngine atIndex:0];
         
         if ([existingEngine respondsToSelector:@selector(reloadWallpaperViews)]) {
             [existingEngine performSelector:@selector(reloadWallpaperViews)];
@@ -1861,11 +1866,12 @@ static void EnsureEngineViewIsMounted() {
     
     if (existingEngine.superview != targetContainer) {
         [existingEngine removeFromSuperview];
-        [targetContainer addSubview:existingEngine];
+        [targetContainer insertSubview:existingEngine atIndex:0];
     }
     
     existingEngine.frame = targetContainer.bounds;
-    [targetContainer bringSubviewToFront:existingEngine];
+    // 强制置于最底层，让系统级覆盖和模糊能正常运作！
+    [targetContainer sendSubviewToBack:existingEngine];
 }
 
 // =========================================================================
@@ -1874,26 +1880,6 @@ static void EnsureEngineViewIsMounted() {
 %group iOS16Plus
 
 %hook PBUIWallpaperView
-
-// 新增辅助方法：精准判断是否处于主壁纸容器中，排除系统的模糊副本
-%new
-- (BOOL)zone_isMainWallpaperContainer {
-    UIView *view = self;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        // 遇到系统级应用容器直接放行（如来电、Safari）
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) return NO;
-        // 只要是在核心壁纸控制器/视图下，才算是主壁纸
-        if ([className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"PBUIWallpaperViewController"] || 
-            [className containsString:@"CSCoverSheetView"]) {
-            return YES;
-        }
-        view = view.superview;
-    }
-    return NO;
-}
-
 - (void)layoutSubviews {
     %orig;
     if (!g_enabled) {
@@ -1902,9 +1888,7 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
-    // 核心拦截：非主壁纸容器直接放行
-    if (![self zone_isMainWallpaperContainer]) return;
-
+    // 彻底全局无条件隐藏原生壁纸，绝杀左滑相机和便捷访问时的原壁纸“诈尸”
     if (g_isVideoMode) {
         if (IsSingleVideoMode()) {
             self.hidden = NO;
@@ -1926,28 +1910,24 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setAlpha:(double)alpha {
     if (g_enabled) {
-        if ([self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-            if (!g_isVideoMode) { %orig(0.0); return; }
-            if (IsSingleVideoMode()) { %orig(1.0); return; }
-            long long variant = 0;
-            if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-            if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
-            if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
-        }
+        if (!g_isVideoMode) { %orig(0.0); return; }
+        if (IsSingleVideoMode()) { %orig(1.0); return; }
+        long long variant = 0;
+        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
     }
     %orig;
 }
 
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled) {
-        if ([self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-            if (!g_isVideoMode) { %orig(YES); return; }
-            if (IsSingleVideoMode()) { %orig(NO); return; }
-            long long variant = 0;
-            if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-            if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
-            if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
-        }
+        if (!g_isVideoMode) { %orig(YES); return; }
+        if (IsSingleVideoMode()) { %orig(NO); return; }
+        long long variant = 0;
+        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
     }
     %orig;
 }
@@ -2218,6 +2198,13 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBWallpaperController
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
+    %orig;
+}
 
 - (void)updatePosterSwitcherSnapshots {
     if (g_enabled) return;
@@ -2320,25 +2307,6 @@ static void EnsureEngineViewIsMounted() {
 %group iOS14_15
 
 %hook SBFWallpaperView
-
-// 新增辅助方法
-%new
-- (BOOL)zone_isMainWallpaperContainer {
-    UIView *view = self;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) return NO;
-        if ([className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"PBUIWallpaperViewController"] || 
-            [className containsString:@"SBWallpaperViewController"] || 
-            [className containsString:@"CSCoverSheetView"]) {
-            return YES;
-        }
-        view = view.superview;
-    }
-    return NO;
-}
-
 - (void)layoutSubviews {
     %orig;
     if (!g_enabled) {
@@ -2347,8 +2315,7 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
-    if (![self zone_isMainWallpaperContainer]) return;
-
+    // 彻底全局无条件隐藏原生壁纸，绝杀左滑相机和便捷访问时的原壁纸“诈尸”
     if (g_isVideoMode) {
         if (IsSingleVideoMode()) {
             self.hidden = NO;
@@ -2370,28 +2337,24 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setAlpha:(double)alpha {
     if (g_enabled) {
-        if ([self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-            if (!g_isVideoMode) { %orig(0.0); return; }
-            if (IsSingleVideoMode()) { %orig(1.0); return; }
-            long long variant = 0;
-            if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-            if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
-            if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
-        }
+        if (!g_isVideoMode) { %orig(0.0); return; }
+        if (IsSingleVideoMode()) { %orig(1.0); return; }
+        long long variant = 0;
+        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
     }
     %orig;
 }
 
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled) {
-        if ([self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-            if (!g_isVideoMode) { %orig(YES); return; }
-            if (IsSingleVideoMode()) { %orig(NO); return; }
-            long long variant = 0;
-            if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-            if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
-            if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
-        }
+        if (!g_isVideoMode) { %orig(YES); return; }
+        if (IsSingleVideoMode()) { %orig(NO); return; }
+        long long variant = 0;
+        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
     }
     %orig;
 }
@@ -2680,33 +2643,22 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBWallpaperEffectView
-
-// 新增辅助方法：排除来电与 Safari 误伤，精准定位系统封面/壁纸
-%new
-- (BOOL)zone_shouldHideEffect {
-    UIView *view = self;
-    while (view) {
-        NSString *name = NSStringFromClass([view class]);
-        // 排除打扰：来电、Safari
-        if ([name containsString:@"Call"] || [name containsString:@"Safari"] || [name containsString:@"InCallService"]) {
-            return NO;
-        }
-        // 严格限定只在主壁纸控制器或锁屏封面下才隐藏
-        if ([name isEqualToString:@"PBUIWallpaperViewController"] || 
-            [name isEqualToString:@"SBWallpaperViewController"] || 
-            [name isEqualToString:@"CSCoverSheetViewController"] ||
-            [name isEqualToString:@"CSCoverSheetView"]) {
-            return YES;
-        }
-        view = view.superview;
-    }
-    return NO;
-}
-
 - (void)didMoveToSuperview {
     %orig;
     if (g_enabled && !g_isVideoMode && self.superview) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        UIView *view = self;
+        BOOL isCoverSheetRelated = NO;
+        while (view) {
+            NSString *name = NSStringFromClass([view class]);
+            if ([name containsString:@"Wallpaper"] || 
+                [name containsString:@"CoverSheet"] || 
+                [name containsString:@"CS"]) {
+                isCoverSheetRelated = YES;
+                break;
+            }
+            view = view.superview;
+        }
+        if (isCoverSheetRelated) {
             self.hidden = YES;
             self.alpha = 0.0;
         }
@@ -2716,26 +2668,33 @@ static void EnsureEngineViewIsMounted() {
 - (void)layoutSubviews {
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
             self.hidden = YES;
             self.alpha = 0.0;
         }
     }
 }
-
 - (void)setAlpha:(double)alpha {
     if (g_enabled && !g_isVideoMode) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
             %orig(0.0);
             return;
         }
     }
     %orig;
 }
-
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled && !g_isVideoMode) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
             %orig(YES);
             return;
         }
