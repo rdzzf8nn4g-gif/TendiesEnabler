@@ -15,5 +15,6 @@ Zone_CFLAGS = -fobjc-arc
 Zone_FRAMEWORKS = Foundation UIKit AVFoundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk
-SUBPROJECTS += zoneprefs
+# 在文件末尾添加或者修改 SUBPROJECTS
+SUBPROJECTS += ZonePrefs ZoneCC
 include $(THEOS_MAKE_PATH)/aggregate.mk
