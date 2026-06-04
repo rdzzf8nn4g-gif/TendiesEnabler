@@ -1870,6 +1870,7 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 %group iOS16Plus
 
+/* 💡 修复 Safari/电话 背景穿透：不再强行隐藏原生壁纸
 %hook PBUIWallpaperView
 - (void)layoutSubviews {
     %orig;
@@ -1919,6 +1920,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
 }
 %end
+*/
 
 %hook PBUIWallpaperViewController
 - (void)viewDidLoad {
@@ -1932,7 +1934,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    
+    /* 💡 修复 Safari/电话 背景穿透：释放原生壁纸
     if (!g_enabled) {
         if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
             UIView *homeView = [self homescreenWallpaperView];
@@ -1956,17 +1958,20 @@ static void EnsureEngineViewIsMounted() {
         UIView *lockView = [self lockscreenWallpaperView];
         if (lockView) lockView.alpha = hideLock ? 0.0 : 1.0;
     }
+    */
 }
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
-    if (g_enabled && !g_isVideoMode) return nil;
-    if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
-    if (g_enabled && g_isVideoMode) return nil;
+    // 💡 修复 Safari/电话 背景穿透：保留系统效果图层
+    // if (g_enabled && !g_isVideoMode) return nil;
+    // if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
+    // if (g_enabled && g_isVideoMode) return nil;
     return %orig;
 }
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
-    if (g_enabled && !g_isVideoMode) return NO;
-    if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
-    if (g_enabled && g_isVideoMode) return NO;
+    // 💡 修复 Safari/电话 背景穿透：保留系统效果图层
+    // if (g_enabled && !g_isVideoMode) return NO;
+    // if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
+    // if (g_enabled && g_isVideoMode) return NO;
     return %orig;
 }
 %end
@@ -2028,7 +2033,7 @@ static void EnsureEngineViewIsMounted() {
         
         if (!portalView) {
             portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-            portalView.hidesSourceView = NO;
+            portalView.hidesSourceView = YES; // 💡 修复 Safari/电话 背景穿透：彻底从底层隐身
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
             portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
@@ -2057,7 +2062,7 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidden = YES;
         }
 
-        BOOL hideNativeBlurs = !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+        BOOL hideNativeBlurs = NO; // 💡 修复 Safari/电话 背景穿透：不再隐藏原生遮罩 // !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
 
         if (bgVC && bgVC.view) {
             if (portalView.superview != bgVC.view) {
@@ -2169,7 +2174,8 @@ static void EnsureEngineViewIsMounted() {
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 0.0; // 重置过滤器
-        
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
     }
 }
 
@@ -2179,17 +2185,20 @@ static void EnsureEngineViewIsMounted() {
         g_isUnlocked = YES;
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 1.0; // 重置过滤器
-        
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
     }
 }
 %end
 
 %hook SBWallpaperController
 - (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    /* 💡 修复 Safari/电话 背景穿透：恢复系统快照
     if (g_enabled) {
         if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
         return; 
     }
+    */
     %orig;
 }
 
@@ -2293,6 +2302,7 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 %group iOS14_15
 
+/* 💡 修复 Safari/电话 背景穿透：不再强行隐藏原生壁纸
 %hook SBFWallpaperView
 - (void)layoutSubviews {
     %orig;
@@ -2342,6 +2352,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
 }
 %end
+*/
 
 %hook CSCoverSheetViewController
 - (void)viewDidLoad {
@@ -2465,7 +2476,7 @@ static void EnsureEngineViewIsMounted() {
 
         if (!portalView) {
             portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
-            portalView.hidesSourceView = NO;
+            portalView.hidesSourceView = YES; // 💡 修复 Safari/电话 背景穿透：彻底从底层隐身
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
             portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
@@ -2494,7 +2505,7 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidden = YES;
         }
 
-        BOOL hideNativeBlurs = !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+        BOOL hideNativeBlurs = NO; // 💡 修复 Safari/电话 背景穿透：不再隐藏原生遮罩 // !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
 
         if (bgVC && bgVC.view) {
             if (portalView.superview != bgVC.view) {
@@ -2546,6 +2557,8 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
     }
 }
 
@@ -2554,6 +2567,8 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isUnlocked = YES;
         g_lastTickProgress = -1; 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
     }
 }
 
@@ -2608,6 +2623,18 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+%hook SBWallpaperController
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    /* 💡 修复 Safari/电话 背景穿透：恢复系统快照
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
+    */
+    %orig;
+}
+%end
+
 %end // 结束 iOS14_15
 
 
@@ -2625,6 +2652,7 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+/* 💡 修复 Safari/电话 背景穿透：保留系统效果图层
 %hook SBWallpaperEffectView
 - (void)didMoveToSuperview {
     %orig;
@@ -2685,10 +2713,12 @@ static void EnsureEngineViewIsMounted() {
     %orig;
 }
 %end
+*/
 
 %hook CSCoverSheetViewController
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
+    /* 💡 修复 Safari/电话 背景穿透
     if (g_enabled && !g_isVideoMode) {
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
@@ -2696,10 +2726,12 @@ static void EnsureEngineViewIsMounted() {
             floatingLayer.alpha = 0.0;
         }
     }
+    */
 }
 
 - (void)_updateFloatingLayerOrdering {
     %orig;
+    /* 💡 修复 Safari/电话 背景穿透
     if (g_enabled && !g_isVideoMode) {
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
@@ -2707,6 +2739,7 @@ static void EnsureEngineViewIsMounted() {
             floatingLayer.alpha = 0.0;
         }
     }
+    */
 }
 
 - (void)viewDidLayoutSubviews { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
@@ -2719,6 +2752,7 @@ static void EnsureEngineViewIsMounted() {
 %hook CSBackgroundContentView
 - (void)layoutSubviews {
     %orig;
+    /* 💡 修复 Safari/电话 背景穿透：保留 presentationView
     UIView *presentationView = safelyGetIvarAsView(self, "presentationView"); 
     if (!presentationView && [self respondsToSelector:@selector(presentationView)]) {
         presentationView = [self performSelector:@selector(presentationView)];
@@ -2736,6 +2770,7 @@ static void EnsureEngineViewIsMounted() {
             presentationView.alpha = 1.0;
         }
     }
+    */
 }
 %end
 
@@ -2761,6 +2796,58 @@ static void EnsureEngineViewIsMounted() {
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceIconRefresh" object:nil];
     %orig;
+}
+
+// 💡 核心新增：桌面层传送门投射
+- (void)viewWillLayoutSubviews {
+    %orig;
+    
+    id wallpaperController = [%c(SBWallpaperController) sharedInstance];
+    UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
+    if (!engineView) return;
+    
+    UIView *sourceForPortal = engineView;
+    
+    if (g_isVideoMode) {
+        if (IsSingleVideoMode()) {
+            if ([engineView respondsToSelector:@selector(homeVideoView)]) {
+                UIView *homeView = [engineView performSelector:@selector(homeVideoView)];
+                if (homeView) sourceForPortal = homeView;
+            }
+        } else {
+            if ([engineView respondsToSelector:@selector(homeVideoView)]) {
+                UIView *homeView = [engineView performSelector:@selector(homeVideoView)];
+                if (homeView) sourceForPortal = homeView;
+                else sourceForPortal = nil;
+            }
+        }
+    }
+    
+    if (sourceForPortal) {
+        _UIPortalView *portal = objc_getAssociatedObject(self, "ZoneHomePortal");
+        if (!portal) {
+            portal = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
+            portal.hidesSourceView = YES; // 隐藏全局底层真实引擎，防止被 Safari 抓取
+            portal.matchesAlpha = NO;
+            portal.alpha = 1.0;
+            portal.matchesPosition = YES;
+            portal.matchesTransform = YES;
+            portal.clipsToBounds = YES;
+            portal.userInteractionEnabled = NO;
+            objc_setAssociatedObject(self, "ZoneHomePortal", portal, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        
+        portal.sourceView = sourceForPortal;
+        portal.hidden = NO;
+        
+        if (portal.superview != self.view) {
+            [self.view insertSubview:portal atIndex:0]; 
+        }
+        portal.frame = self.view.bounds;
+    } else {
+        _UIPortalView *portal = objc_getAssociatedObject(self, "ZoneHomePortal");
+        if (portal) portal.hidden = YES;
+    }
 }
 
 %new
