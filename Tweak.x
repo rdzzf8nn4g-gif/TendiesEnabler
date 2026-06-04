@@ -356,15 +356,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     });
 }
 
+
 // =========================================================================
 // ==================== 【全新模块】: 极致工业级视频引擎 ===================
 // =========================================================================
 @interface ZoneVideoPlayerView : UIView
-@property (nonatomic, strong) AVQueuePlayer *player;
-@property (nonatomic, strong) AVPlayerLooper *looper;
+@property (nonatomic, strong) AVPlayer *player;
 @property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, copy) NSString *currentPath;
-@property (nonatomic, assign) BOOL isManuallyPaused; 
+@property (nonatomic, assign) BOOL isManuallyPaused;
 - (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path;
 - (void)playVideo;
 - (void)pauseVideo;
@@ -380,64 +380,58 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.currentPath = path;
 
         @try {
-            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
-                                             withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient
+                                             withOptions:AVAudioSessionCategoryOptionMixWithOthers
                                                    error:nil];
             [[AVAudioSession sharedInstance] setActive:YES error:nil];
         } @catch (NSException *e) {}
 
         if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
             NSURL *url = [NSURL fileURLWithPath:path];
-            AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
-            AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
             
-            if ([item respondsToSelector:@selector(setPreferredForwardBufferDuration:)]) {
-                item.preferredForwardBufferDuration = 1.0;
-            }
-            
-            self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
+            // 🚨 彻底抛弃易泄露、会死锁的 AVQueuePlayer 和 AVPlayerLooper
+            self.player = [AVPlayer playerWithPlayerItem:item];
             self.player.muted = YES;
-            self.player.allowsExternalPlayback = NO; 
-            self.player.automaticallyWaitsToMinimizeStalling = NO; 
-            self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
+            self.player.allowsExternalPlayback = NO;
+            self.player.automaticallyWaitsToMinimizeStalling = NO;
+            self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone; // 防止系统自动暂停
             
             if (@available(iOS 12.0, *)) {
                 self.player.preventsDisplaySleepDuringVideoPlayback = NO;
             }
-            
-            self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
             
             self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
             self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
             self.playerLayer.frame = self.bounds;
             [self.layer addSublayer:self.playerLayer];
             
-            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:UIApplicationDidBecomeActiveNotification object:nil];
-            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:AVPlayerItemPlaybackStalledNotification object:nil];
-            
-            [self.player addObserver:self forKeyPath:@"rate" options:NSKeyValueObservingOptionNew context:nil];
+            // 纯手工轻量级循环，彻底删掉会导致 CPU 发热的 rate KVO 监听
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemDidFinishPlaying:) name:AVPlayerItemDidPlayToEndTimeNotification object:item];
         }
     }
     return self;
 }
 
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    if (self.playerLayer) {
-        self.playerLayer.frame = self.bounds;
-    }
-    if (g_isScreenOn && g_enabled && g_isVideoMode) {
-        [self playVideo];
+- (void)itemDidFinishPlaying:(NSNotification *)notification {
+    if (!self.player) return;
+    // 轻量级手工循环：回到起点继续播放
+    [self.player seekToTime:kCMTimeZero toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
+        [self.player play];
     }
 }
 
-- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
-    if ([keyPath isEqualToString:@"rate"]) {
-        if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
-            if (self.player.rate == 0.0) {
-                [self.player play];
-            }
-        }
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.playerLayer) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.playerLayer.frame = self.bounds;
+        [CATransaction commit];
+    }
+    if (g_isScreenOn && g_enabled && g_isVideoMode && !self.isManuallyPaused) {
+        [self playVideo];
     }
 }
 
@@ -448,36 +442,65 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     self.isManuallyPaused = NO;
-    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
-        [self.player play];
+    
+    @try {
+        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
+                                         withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                               error:nil];
+        [[AVAudioSession sharedInstance] setActive:YES error:nil];
+    } @catch (NSException *e) {}
+
+    // 【iOS 16/17 终极防卡死 1】：亮屏时必须重新将图层加入渲染树，恢复 GPU 上下文
+    if (self.playerLayer && self.playerLayer.superlayer == nil) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.playerLayer.frame = self.bounds;
+        [self.layer addSublayer:self.playerLayer];
+        [CATransaction commit];
     }
+    
+    // 【iOS 16/17 终极防卡死 2】：检查媒体资源是否在息屏期间因内存不足被系统强杀 (Status Failed)
+    if (self.player.currentItem.status == AVPlayerItemStatusFailed) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.player.currentItem];
+        AVPlayerItem *newItem = [AVPlayerItem playerItemWithURL:[NSURL fileURLWithPath:self.currentPath]];
+        [self.player replaceCurrentItemWithPlayerItem:newItem];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemDidFinishPlaying:) name:AVPlayerItemDidPlayToEndTimeNotification object:newItem];
+    }
+
+    // 强行刷新硬件解码器，利用回调安全下达异步播放指令，绝对不卡主线程
+    [self.player seekToTime:[self.player currentTime] toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
+        if (!self.isManuallyPaused && g_isScreenOn) {
+            [self.player play];
+        }
+    }];
 }
 
 - (void)pauseVideo {
     self.isManuallyPaused = YES;
-    if (self.player && self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+    if (self.player) {
         [self.player pause];
+    }
+    // 【防发热/防泄漏核心】：息屏时强制把图层从渲染树剥离，彻底清空 GPU 显存，防止后台偷偷渲染掉电
+    if (self.playerLayer && self.playerLayer.superlayer != nil) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [self.playerLayer removeFromSuperlayer];
+        [CATransaction commit];
     }
 }
 
 - (void)cleanUpEngineSafely {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    @try {
-        [self.player removeObserver:self forKeyPath:@"rate"];
-    } @catch (NSException *e) {}
-    
     [self pauseVideo];
-    if (self.looper) {
-        [self.looper disableLooping];
-        self.looper = nil;
-    }
-    if (self.player) {
-        [self.player removeAllItems];
-        self.player = nil;
-    }
+    
     if (self.playerLayer) {
+        self.playerLayer.player = nil; 
         [self.playerLayer removeFromSuperlayer];
         self.playerLayer = nil;
+    }
+    if (self.player) {
+        [self.player replaceCurrentItemWithPlayerItem:nil];
+        self.player = nil;
     }
 }
 
@@ -485,7 +508,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self cleanUpEngineSafely];
 }
 @end
-
 
 @interface ZoneVideoEngine : UIView
 @property (nonatomic, strong) ZoneVideoPlayerView *lockVideoView;
@@ -2226,10 +2248,6 @@ static void EnsureEngineViewIsMounted() {
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 0.0; // 重置过滤器
         
-        // ✅ 保留这句作为边缘场景的安全网
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
-        // ❌ 彻底删除下面这句 Progress 广播（杀死动画的真正凶手）
-        // [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
     }
 }
 
@@ -2240,10 +2258,6 @@ static void EnsureEngineViewIsMounted() {
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 1.0; // 重置过滤器
         
-        // ✅ 保留这句作为边缘场景的安全网
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
-        // ❌ 彻底删除下面这句 Progress 广播
-        // [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
     }
 }
 %end
@@ -2928,6 +2942,32 @@ static void EnsureEngineViewIsMounted() {
 
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+    
+    // 【🚨 终极防漏检测：硬件级底层屏幕亮灭事件监听】
+    // 彻底抛弃 Objective-C 的 Hook (完美免疫 iOS 16/17 的 AOD 显示和各类状态丢失 BUG)
+    int notify_token;
+    notify_register_dispatch("com.apple.springboard.hasBlankedScreen", &notify_token, dispatch_get_main_queue(), ^(int t) {
+        uint64_t state;
+        notify_get_state(t, &state);
+        
+        // state 0 = 屏幕亮起 (Backlight ON), state 1 = 屏幕关闭 (Backlight OFF)
+        BOOL screenOn = (state == 0);
+        
+        if (screenOn != g_isScreenOn) {
+            g_isScreenOn = screenOn;
+            g_lastTickProgress = -1; 
+            
+            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            
+            if (screenOn) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            } else {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+            }
+            
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
+        }
+    });
     
     if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
         %init(iOS16Plus);
