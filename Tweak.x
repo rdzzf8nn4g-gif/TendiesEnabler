@@ -426,7 +426,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
-    if (g_isScreenOn && g_enabled && g_isVideoMode && !self.isManuallyPaused) {
+    if (g_isScreenOn && g_enabled && g_isVideoMode) {
         [self playVideo];
     }
 }
@@ -435,13 +435,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
-                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
-                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
-                        [self playVideo];
-                    }
-                });
+                [self.player play];
             }
         }
     }
@@ -454,54 +448,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     self.isManuallyPaused = NO;
-    
-    // 【防定格修复1：激活静默环境底层 AudioSession 权限】
-    @try {
-        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
-                                         withOptions:AVAudioSessionCategoryOptionMixWithOthers 
-                                               error:nil];
-        [[AVAudioSession sharedInstance] setActive:YES error:nil];
-    } @catch (NSException *e) {}
-
-    // 【🚨终极防定格修复2：暴力切断并重建 GPU 渲染树】
-    // 应对 iOS 16+ 息屏回收图层资源问题
-    if (self.playerLayer) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        
-        // 必须先置空并移除，彻底切断与死掉的旧管线的联系
-        self.playerLayer.player = nil;
-        [self.playerLayer removeFromSuperlayer];
-        
-        // 重新挂载，强迫 CoreAnimation 再次接管
-        self.playerLayer.player = self.player;
-        self.playerLayer.frame = self.bounds;
-        [self.layer addSublayer:self.playerLayer];
-        
-        [CATransaction commit];
-    }
-
-    // 【🚨终极防定格修复3：Kickstart 唤醒硬件视频解码器】
-    // 应对 iOS 16+ mediaserverd 息屏休眠策略
-    if (self.player.rate == 0.0) {
-        // 获取当前时间，原地进行一次零容差的 seek 操作
-        CMTime currentTime = [self.player currentTime];
-        
-        // seek 操作会像电击一样强行唤醒底层的硬件解码器吐出参考帧
-        [self.player seekToTime:currentTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
-            // 解码器被激活后，再下达播放指令
-            if (!self.isManuallyPaused) {
-                [self.player play];
-            }
-        }];
-    } else {
+    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
         [self.player play];
     }
 }
 
 - (void)pauseVideo {
     self.isManuallyPaused = YES;
-    if (self.player) {
+    if (self.player && self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
         [self.player pause];
     }
 }
@@ -513,20 +467,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } @catch (NSException *e) {}
     
     [self pauseVideo];
-    
-    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
     if (self.looper) {
         [self.looper disableLooping];
         self.looper = nil;
     }
-    if (self.playerLayer) {
-        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation 引用
-        [self.playerLayer removeFromSuperlayer];
-        self.playerLayer = nil;
-    }
     if (self.player) {
         [self.player removeAllItems];
         self.player = nil;
+    }
+    if (self.playerLayer) {
+        [self.playerLayer removeFromSuperlayer];
+        self.playerLayer = nil;
     }
 }
 
@@ -2244,16 +2195,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
-        BOOL wasScreenOn = g_isScreenOn;
         g_isScreenOn = !mode;
-        
-        // 🚨 补全丢失的唤醒和休眠广播，取代失效的 SBBacklightController
-        if (g_isScreenOn && !wasScreenOn) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        } else if (!g_isScreenOn && wasScreenOn) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        }
-
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
@@ -2263,10 +2205,6 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled) {
         g_isScreenOn = YES;
-        
-        // 🚨 锁屏真正开始亮屏动画时，强制唤醒视频引擎
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
@@ -2288,6 +2226,10 @@ static void EnsureEngineViewIsMounted() {
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 0.0; // 重置过滤器
         
+        // ✅ 保留这句作为边缘场景的安全网
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked"}];
+        // ❌ 彻底删除下面这句 Progress 广播（杀死动画的真正凶手）
+        // [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(0.0)}];
     }
 }
 
@@ -2298,6 +2240,10 @@ static void EnsureEngineViewIsMounted() {
         g_lastTickProgress = -1; 
         g_lastSystemProgress = 1.0; // 重置过滤器
         
+        // ✅ 保留这句作为边缘场景的安全网
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock"}];
+        // ❌ 彻底删除下面这句 Progress 广播
+        // [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(1.0)}];
     }
 }
 %end
