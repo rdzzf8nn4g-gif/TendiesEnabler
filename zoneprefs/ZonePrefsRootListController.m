@@ -666,9 +666,11 @@ static NSString * GetPrefsPlistPath() {
         btnLockImport->action = @selector(importLockMaterial);
         [_specifiers addObject:btnLockImport];
         
-        for (NSString *name in lockContents) {
+for (NSString *name in lockContents) {
             if ([name hasPrefix:@"."]) continue;
-            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
+            // UI 显示专用名称（去后缀），底层依然保存带后缀的 name
+            NSString *displayName = [name stringByDeletingPathExtension];
+            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
             spec->action = @selector(selectVideoWallpaper:);
             [spec setProperty:name forKey:@"VideoName"];
             [spec setProperty:@1 forKey:@"VideoTarget"]; 
@@ -691,7 +693,9 @@ static NSString * GetPrefsPlistPath() {
         
         for (NSString *name in homeContents) {
             if ([name hasPrefix:@"."]) continue;
-            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:name target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
+            // UI 显示专用名称（去后缀）
+            NSString *displayName = [name stringByDeletingPathExtension];
+            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:displayName target:self set:nil get:@selector(getDummyValue:) detail:nil cell:PSTitleValueCell edit:nil];
             spec->action = @selector(selectVideoWallpaper:);
             [spec setProperty:name forKey:@"VideoName"];
             [spec setProperty:@2 forKey:@"VideoTarget"]; 
@@ -773,7 +777,9 @@ static NSString * GetPrefsPlistPath() {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
     NSString *path = prefs[@"LockVideoPath"];
     if (path && path.length > 0) {
-        return [NSString stringWithFormat:@"已选中%@", [path lastPathComponent]];
+        // [核心修改] 截取最后的文件名，并自动抹去 .mp4/.mov 后缀
+        NSString *cleanName = [[path lastPathComponent] stringByDeletingPathExtension];
+        return [NSString stringWithFormat:@"已选中%@", cleanName];
     }
     return @"未选择";
 }
@@ -783,7 +789,9 @@ static NSString * GetPrefsPlistPath() {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:plistPath];
     NSString *path = prefs[@"HomeVideoPath"];
     if (path && path.length > 0) {
-        return [NSString stringWithFormat:@"已选中%@", [path lastPathComponent]];
+        // [核心修改] 截取最后的文件名，并自动抹去 .mp4/.mov 后缀
+        NSString *cleanName = [[path lastPathComponent] stringByDeletingPathExtension];
+        return [NSString stringWithFormat:@"已选中%@", cleanName];
     }
     return @"未选择";
 }
