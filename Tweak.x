@@ -453,13 +453,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self pauseVideo];
         return;
     }
+    
     self.isManuallyPaused = NO;
+    
+    // 【🚨 终极防假死 & 防指令打架修复】
+    // 1. 如果视频因为息屏被系统切断了渲染管线，我们通过重新挂载 Layer 来瞬间接上管线。
+    // 绝对不要再用 [self.player pause] 去踢醒它，那会引发底层的跨进程指令风暴！
+    if (self.playerLayer && self.playerLayer.player != self.player) {
+        self.playerLayer.player = self.player;
+    }
+    
+    // 2. 只有在真正没有播放时，才下达一次纯净的 play 指令
     if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
-        [self.player play];
-    } else {
-        // ✅ 核心修复：解决 SpringBoard 息屏后渲染管线断开导致的画面定格假死
-        // 如果系统以为正在播放但画面卡住，强行 pause 再 play 踢醒它
-        [self.player pause];
         [self.player play];
     }
 }
