@@ -390,12 +390,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             NSURL *url = [NSURL fileURLWithPath:path];
             AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
             
-            // 🚨 彻底抛弃易泄露、会死锁的 AVQueuePlayer 和 AVPlayerLooper
             self.player = [AVPlayer playerWithPlayerItem:item];
             self.player.muted = YES;
             self.player.allowsExternalPlayback = NO;
             self.player.automaticallyWaitsToMinimizeStalling = NO;
-            self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone; // 防止系统自动暂停
+            self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
             
             if (@available(iOS 12.0, *)) {
                 self.player.preventsDisplaySleepDuringVideoPlayback = NO;
@@ -406,7 +405,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.playerLayer.frame = self.bounds;
             [self.layer addSublayer:self.playerLayer];
             
-            // 纯手工轻量级循环，彻底删掉会导致 CPU 发热的 rate KVO 监听
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemDidFinishPlaying:) name:AVPlayerItemDidPlayToEndTimeNotification object:item];
         }
     }
@@ -415,7 +413,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)itemDidFinishPlaying:(NSNotification *)notification {
     if (!self.player) return;
-    // 轻量级手工循环：回到起点继续播放
     [self.player seekToTime:kCMTimeZero toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
         [self.player play];
@@ -450,7 +447,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[AVAudioSession sharedInstance] setActive:YES error:nil];
     } @catch (NSException *e) {}
 
-    // 【iOS 16/17 终极防卡死 1】：亮屏时必须重新将图层加入渲染树，恢复 GPU 上下文
     if (self.playerLayer && self.playerLayer.superlayer == nil) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -459,7 +455,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [CATransaction commit];
     }
     
-    // 【iOS 16/17 终极防卡死 2】：检查媒体资源是否在息屏期间因内存不足被系统强杀 (Status Failed)
     if (self.player.currentItem.status == AVPlayerItemStatusFailed) {
         [[NSNotificationCenter defaultCenter] removeObserver:self name:AVPlayerItemDidPlayToEndTimeNotification object:self.player.currentItem];
         AVPlayerItem *newItem = [AVPlayerItem playerItemWithURL:[NSURL fileURLWithPath:self.currentPath]];
@@ -467,7 +462,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemDidFinishPlaying:) name:AVPlayerItemDidPlayToEndTimeNotification object:newItem];
     }
 
-    // 强行刷新硬件解码器，利用回调安全下达异步播放指令，绝对不卡主线程
     [self.player seekToTime:[self.player currentTime] toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
         if (!self.isManuallyPaused && g_isScreenOn) {
             [self.player play];
@@ -480,7 +474,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.player) {
         [self.player pause];
     }
-    // 【防发热/防泄漏核心】：息屏时强制把图层从渲染树剥离，彻底清空 GPU 显存，防止后台偷偷渲染掉电
     if (self.playerLayer && self.playerLayer.superlayer != nil) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -2944,13 +2937,11 @@ static void EnsureEngineViewIsMounted() {
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
     
     // 【🚨 终极防漏检测：硬件级底层屏幕亮灭事件监听】
-    // 彻底抛弃 Objective-C 的 Hook (完美免疫 iOS 16/17 的 AOD 显示和各类状态丢失 BUG)
     int notify_token;
     notify_register_dispatch("com.apple.springboard.hasBlankedScreen", &notify_token, dispatch_get_main_queue(), ^(int t) {
         uint64_t state;
         notify_get_state(t, &state);
         
-        // state 0 = 屏幕亮起 (Backlight ON), state 1 = 屏幕关闭 (Backlight OFF)
         BOOL screenOn = (state == 0);
         
         if (screenOn != g_isScreenOn) {
