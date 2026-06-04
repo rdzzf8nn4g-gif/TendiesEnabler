@@ -1880,8 +1880,6 @@ static void EnsureEngineViewIsMounted() {
     }
     if (g_isVideoMode) {
         if (IsSingleVideoMode()) {
-            self.hidden = NO;
-            self.alpha = 1.0;
             return;
         }
         long long variant = 0;
@@ -1889,33 +1887,60 @@ static void EnsureEngineViewIsMounted() {
         BOOL hide = NO;
         if (variant == 0) hide = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         else if (variant == 1) hide = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        self.hidden = hide;
-        self.alpha = hide ? 0.0 : 1.0;
+        
+        if (hide) {
+            self.hidden = YES;
+            self.alpha = 0.0;
+        }
     } else {
         self.hidden = YES;
         self.alpha = 0.0;
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) {
-        if (!g_isVideoMode) { %orig(0.0); return; }
-        if (IsSingleVideoMode()) { %orig(1.0); return; }
-        long long variant = 0;
-        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
-        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
+    if (!g_enabled) {
+        %orig;
+        return;
     }
+    if (alpha <= 0.01) {
+        %orig(alpha);
+        return;
+    }
+    if (!g_isVideoMode) { 
+        %orig(0.0); 
+        return; 
+    }
+    if (IsSingleVideoMode()) { 
+        %orig(alpha); 
+        return; 
+    }
+    long long variant = 0;
+    if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+    if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
+    if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
     %orig;
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
-        if (!g_isVideoMode) { %orig(YES); return; }
-        if (IsSingleVideoMode()) { %orig(NO); return; }
-        long long variant = 0;
-        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
-        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
+    if (!g_enabled) {
+        %orig;
+        return;
     }
+    if (hidden == YES) {
+        %orig(YES);
+        return;
+    }
+    if (!g_isVideoMode) { 
+        %orig(YES); 
+        return; 
+    }
+    if (IsSingleVideoMode()) { 
+        %orig(hidden); 
+        return; 
+    }
+    long long variant = 0;
+    if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+    if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
+    if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
     %orig;
 }
 %end
@@ -2303,8 +2328,6 @@ static void EnsureEngineViewIsMounted() {
     }
     if (g_isVideoMode) {
         if (IsSingleVideoMode()) {
-            self.hidden = NO;
-            self.alpha = 1.0;
             return;
         }
         long long variant = 0;
@@ -2312,33 +2335,60 @@ static void EnsureEngineViewIsMounted() {
         BOOL hide = NO;
         if (variant == 0) hide = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         else if (variant == 1) hide = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        self.hidden = hide;
-        self.alpha = hide ? 0.0 : 1.0;
+        
+        if (hide) {
+            self.hidden = YES;
+            self.alpha = 0.0;
+        }
     } else {
         self.hidden = YES;
         self.alpha = 0.0;
     }
 }
 - (void)setAlpha:(double)alpha {
-    if (g_enabled) {
-        if (!g_isVideoMode) { %orig(0.0); return; }
-        if (IsSingleVideoMode()) { %orig(1.0); return; }
-        long long variant = 0;
-        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
-        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
+    if (!g_enabled) {
+        %orig;
+        return;
     }
+    if (alpha <= 0.01) {
+        %orig(alpha);
+        return;
+    }
+    if (!g_isVideoMode) { 
+        %orig(0.0); 
+        return; 
+    }
+    if (IsSingleVideoMode()) { 
+        %orig(alpha); 
+        return; 
+    }
+    long long variant = 0;
+    if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+    if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
+    if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
     %orig;
 }
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled) {
-        if (!g_isVideoMode) { %orig(YES); return; }
-        if (IsSingleVideoMode()) { %orig(NO); return; }
-        long long variant = 0;
-        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
-        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
+    if (!g_enabled) {
+        %orig;
+        return;
     }
+    if (hidden == YES) {
+        %orig(YES);
+        return;
+    }
+    if (!g_isVideoMode) { 
+        %orig(YES); 
+        return; 
+    }
+    if (IsSingleVideoMode()) { 
+        %orig(hidden); 
+        return; 
+    }
+    long long variant = 0;
+    if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+    if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
+    if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
     %orig;
 }
 %end
@@ -2629,19 +2679,9 @@ static void EnsureEngineViewIsMounted() {
 - (void)didMoveToSuperview {
     %orig;
     if (g_enabled && !g_isVideoMode && self.superview) {
-        UIView *view = self;
-        BOOL isCoverSheetRelated = NO;
-        while (view) {
-            NSString *name = NSStringFromClass([view class]);
-            if ([name containsString:@"Wallpaper"] || 
-                [name containsString:@"CoverSheet"] || 
-                [name containsString:@"CS"]) {
-                isCoverSheetRelated = YES;
-                break;
-            }
-            view = view.superview;
-        }
-        if (isCoverSheetRelated) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName isEqualToString:@"SBWallpaperContainerView"] || 
+            [superviewName isEqualToString:@"CSCoverSheetView"]) {
             self.hidden = YES;
             self.alpha = 0.0;
         }
@@ -2652,9 +2692,8 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled && !g_isVideoMode) {
         NSString *superviewName = NSStringFromClass([self.superview class]);
-        if ([superviewName containsString:@"Wallpaper"] || 
-            [superviewName containsString:@"CoverSheet"] ||
-            [superviewName containsString:@"CS"]) {
+        if ([superviewName isEqualToString:@"SBWallpaperContainerView"] || 
+            [superviewName isEqualToString:@"CSCoverSheetView"]) {
             self.hidden = YES;
             self.alpha = 0.0;
         }
@@ -2663,9 +2702,8 @@ static void EnsureEngineViewIsMounted() {
 - (void)setAlpha:(double)alpha {
     if (g_enabled && !g_isVideoMode) {
         NSString *superviewName = NSStringFromClass([self.superview class]);
-        if ([superviewName containsString:@"Wallpaper"] || 
-            [superviewName containsString:@"CoverSheet"] ||
-            [superviewName containsString:@"CS"]) {
+        if ([superviewName isEqualToString:@"SBWallpaperContainerView"] || 
+            [superviewName isEqualToString:@"CSCoverSheetView"]) {
             %orig(0.0);
             return;
         }
@@ -2675,9 +2713,8 @@ static void EnsureEngineViewIsMounted() {
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled && !g_isVideoMode) {
         NSString *superviewName = NSStringFromClass([self.superview class]);
-        if ([superviewName containsString:@"Wallpaper"] || 
-            [superviewName containsString:@"CoverSheet"] ||
-            [superviewName containsString:@"CS"]) {
+        if ([superviewName isEqualToString:@"SBWallpaperContainerView"] || 
+            [superviewName isEqualToString:@"CSCoverSheetView"]) {
             %orig(YES);
             return;
         }
@@ -2761,6 +2798,36 @@ static void EnsureEngineViewIsMounted() {
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceIconRefresh" object:nil];
     %orig;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+        Class wcClass = NSClassFromString(@"SBWallpaperController");
+        if ([wcClass respondsToSelector:@selector(sharedInstance)]) {
+            id wallpaperController = [wcClass sharedInstance];
+            if (wallpaperController) {
+                UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
+                if (engineView) engineView.hidden = NO;
+            }
+        }
+    }
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+        Class wcClass = NSClassFromString(@"SBWallpaperController");
+        if ([wcClass respondsToSelector:@selector(sharedInstance)]) {
+            id wallpaperController = [wcClass sharedInstance];
+            if (wallpaperController) {
+                UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
+                if (engineView) engineView.hidden = YES;
+            }
+        }
+    }
 }
 
 %new
