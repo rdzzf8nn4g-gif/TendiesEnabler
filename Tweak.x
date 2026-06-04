@@ -1881,17 +1881,14 @@ static void EnsureEngineViewIsMounted() {
     UIView *view = self;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        // 遇到系统级应用容器直接放行（如来电、Safari）
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) return NO;
-        // 只要是在核心壁纸控制器/视图下，才算是主壁纸
-        if ([className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"PBUIWallpaperViewController"] || 
-            [className containsString:@"CSCoverSheetView"]) {
-            return YES;
+        // 遇到电话、Safari相关的系统容器直接屏蔽（放行原生系统壁纸）
+        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) {
+            return NO;
         }
         view = view.superview;
     }
-    return NO;
+    // 其余情况统统默认放行（显示你的自定义壁纸）
+    return YES;
 }
 
 - (void)layoutSubviews {
@@ -2328,16 +2325,14 @@ static void EnsureEngineViewIsMounted() {
     UIView *view = self;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) return NO;
-        if ([className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"PBUIWallpaperViewController"] || 
-            [className containsString:@"SBWallpaperViewController"] || 
-            [className containsString:@"CSCoverSheetView"]) {
-            return YES;
+        // 遇到电话、Safari相关的系统容器直接屏蔽
+        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) {
+            return NO;
         }
         view = view.superview;
     }
-    return NO;
+    // 其余情况统统默认放行
+    return YES;
 }
 
 - (void)layoutSubviews {
@@ -2688,19 +2683,22 @@ static void EnsureEngineViewIsMounted() {
     UIView *view = self;
     while (view) {
         NSString *name = NSStringFromClass([view class]);
-        // 排除打扰：来电、Safari
+        
+        // 1. 如果在来电或Safari中，保留系统原生模糊，不隐藏
         if ([name containsString:@"Call"] || [name containsString:@"Safari"] || [name containsString:@"InCallService"]) {
             return NO;
         }
-        // 严格限定只在主壁纸控制器或锁屏封面下才隐藏
-        if ([name isEqualToString:@"PBUIWallpaperViewController"] || 
-            [name isEqualToString:@"SBWallpaperViewController"] || 
-            [name isEqualToString:@"CSCoverSheetViewController"] ||
-            [name isEqualToString:@"CSCoverSheetView"]) {
+        
+        // 2. 只要是在锁屏/桌面的壁纸容器中，隐藏原生模糊（让你的动态壁纸透出来）
+        if ([name containsString:@"WallpaperView"] || 
+            [name containsString:@"WallpaperWindow"] || 
+            [name containsString:@"CSCoverSheetView"]) {
             return YES;
         }
+        
         view = view.superview;
     }
+    // 3. 兜底策略：其他系统组件（如Dock栏、文件夹背景）都不隐藏，避免误伤
     return NO;
 }
 
