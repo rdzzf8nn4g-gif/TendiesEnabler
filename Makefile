@@ -16,5 +16,5 @@ Zone_FRAMEWORKS = Foundation UIKit AVFoundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 # 在文件末尾添加或者修改 SUBPROJECTS
-SUBPROJECTS += ZonePrefs ZoneCC
+SUBPROJECTS += zoneprefs ZoneCC
 include $(THEOS_MAKE_PATH)/aggregate.mk
