@@ -70,17 +70,18 @@
 
 // 未选中状态下的图标 (锁屏交互模式：手指点击图标)
 - (UIImage *)iconGlyph {
-    // 26pt 大小，中等粗细，这是最匹配苹果原生 CC 模块的尺寸配置
+    // 26pt 大小，中等粗细，最匹配苹果原生 CC 模块的尺寸配置
     UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium];
     UIImage *image = [UIImage systemImageNamed:@"hand.tap" withConfiguration:config];
-    // 必须强制渲染为模板，控制中心才能给它自动居中并上色
+    // 强制渲染为模板，让控制中心自动居中并上色
     return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
-// 选中状态下的图标 (视频模式：播放矩形图标)
+// 选中状态下的图标 (视频模式：已更换为质感更好的“电影胶片”图标)
 - (UIImage *)selectedIconGlyph {
     UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium];
-    UIImage *image = [UIImage systemImageNamed:@"play.rectangle.fill" withConfiguration:config];
+    // 使用 film.fill，视觉上更清晰地代表视频/媒体模式
+    UIImage *image = [UIImage systemImageNamed:@"film.fill" withConfiguration:config];
     return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
