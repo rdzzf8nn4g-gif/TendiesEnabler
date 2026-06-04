@@ -1,6 +1,5 @@
 #import "ZoneCCModule.h"
 #import <CoreFoundation/CoreFoundation.h>
-// 修复编译报错：引入 C 语言底层文件权限管理头文件
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -67,13 +66,14 @@
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), NOTIFY_KEY, NULL, NULL, YES);
 }
 
+// 注意：iOS 控制中心的 API 是 iconGlyph，不是 iconImage！
 // 未选中状态下的图标 (锁屏交互模式：手指点击图标)
-- (UIImage *)iconImage {
+- (UIImage *)iconGlyph {
     return [UIImage systemImageNamed:@"hand.tap"];
 }
 
 // 选中状态下的图标 (视频模式：播放矩形图标)
-- (UIImage *)selectedIconImage {
+- (UIImage *)selectedIconGlyph {
     return [UIImage systemImageNamed:@"play.rectangle.fill"];
 }
 
