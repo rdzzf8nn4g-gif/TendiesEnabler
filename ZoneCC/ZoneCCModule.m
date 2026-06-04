@@ -66,18 +66,25 @@
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), NOTIFY_KEY, NULL, NULL, YES);
 }
 
-// 注意：iOS 控制中心的 API 是 iconGlyph，不是 iconImage！
+// ==================== 苹果原生图标完美排版区域 ====================
+
 // 未选中状态下的图标 (锁屏交互模式：手指点击图标)
 - (UIImage *)iconGlyph {
-    return [UIImage systemImageNamed:@"hand.tap"];
+    // 26pt 大小，中等粗细，这是最匹配苹果原生 CC 模块的尺寸配置
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium];
+    UIImage *image = [UIImage systemImageNamed:@"hand.tap" withConfiguration:config];
+    // 必须强制渲染为模板，控制中心才能给它自动居中并上色
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
 // 选中状态下的图标 (视频模式：播放矩形图标)
 - (UIImage *)selectedIconGlyph {
-    return [UIImage systemImageNamed:@"play.rectangle.fill"];
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium];
+    UIImage *image = [UIImage systemImageNamed:@"play.rectangle.fill" withConfiguration:config];
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
-// 选中状态下的主题色 (跟随系统蓝色)
+// 选中状态下的底色 (跟随系统原生蓝色)
 - (UIColor *)selectedColor {
     return [UIColor systemBlueColor];
 }
