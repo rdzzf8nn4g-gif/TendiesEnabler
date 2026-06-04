@@ -1875,17 +1875,23 @@ static void EnsureEngineViewIsMounted() {
 
 %hook PBUIWallpaperView
 
+// 新增辅助方法：精准判断是否处于主壁纸容器中，排除系统的模糊副本
 %new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) {
-            return NO;
+        // 遇到系统级应用容器直接放行（如来电、Safari）
+        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) return NO;
+        // 只要是在核心壁纸控制器/视图下，才算是主壁纸
+        if ([className containsString:@"WallpaperWindow"] || 
+            [className containsString:@"PBUIWallpaperViewController"] || 
+            [className containsString:@"CSCoverSheetView"]) {
+            return YES;
         }
         view = view.superview;
     }
-    return YES;
+    return NO;
 }
 
 - (void)layoutSubviews {
@@ -1896,7 +1902,6 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
-    if (![self zone_isMainWallpaperContainer]) return;
 
     if (g_isVideoMode) {
         if (IsSingleVideoMode()) {
@@ -2314,17 +2319,22 @@ static void EnsureEngineViewIsMounted() {
 
 %hook SBFWallpaperView
 
+// 新增辅助方法
 %new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) {
-            return NO;
+        if ([className containsString:@"Call"] || [className containsString:@"InCallService"] || [className containsString:@"Safari"]) return NO;
+        if ([className containsString:@"WallpaperWindow"] || 
+            [className containsString:@"PBUIWallpaperViewController"] || 
+            [className containsString:@"SBWallpaperViewController"] || 
+            [className containsString:@"CSCoverSheetView"]) {
+            return YES;
         }
         view = view.superview;
     }
-    return YES;
+    return NO;
 }
 
 - (void)layoutSubviews {
@@ -2335,7 +2345,6 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
-    if (![self zone_isMainWallpaperContainer]) return;
 
     if (g_isVideoMode) {
         if (IsSingleVideoMode()) {
@@ -2669,17 +2678,26 @@ static void EnsureEngineViewIsMounted() {
 
 %hook SBWallpaperEffectView
 
+// 新增辅助方法：排除来电与 Safari 误伤，精准定位系统封面/壁纸
 %new
 - (BOOL)zone_shouldHideEffect {
     UIView *view = self;
     while (view) {
         NSString *name = NSStringFromClass([view class]);
+        // 排除打扰：来电、Safari
         if ([name containsString:@"Call"] || [name containsString:@"Safari"] || [name containsString:@"InCallService"]) {
             return NO;
         }
+        // 严格限定只在主壁纸控制器或锁屏封面下才隐藏
+        if ([name isEqualToString:@"PBUIWallpaperViewController"] || 
+            [name isEqualToString:@"SBWallpaperViewController"] || 
+            [name isEqualToString:@"CSCoverSheetViewController"] ||
+            [name isEqualToString:@"CSCoverSheetView"]) {
+            return YES;
+        }
         view = view.superview;
     }
-    return YES;
+    return NO;
 }
 
 - (void)didMoveToSuperview {
