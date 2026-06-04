@@ -455,7 +455,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.isManuallyPaused = NO;
     
-    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
+    // 【防定格修复1：激活静默环境底层 AudioSession 权限】
     @try {
         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
                                          withOptions:AVAudioSessionCategoryOptionMixWithOthers 
@@ -463,20 +463,40 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[AVAudioSession sharedInstance] setActive:YES error:nil];
     } @catch (NSException *e) {}
 
-// 【🚨防定格修复2：重新牵手硬件解码器🚨】
-    if (@available(iOS 16.0, *)) {
-        // iOS 16+ 渲染层假死，必须强行剥离再重新绑定，强制 CoreAnimation 重建上下文
+    // 【🚨终极防定格修复2：暴力切断并重建 GPU 渲染树】
+    // 应对 iOS 16+ 息屏回收图层资源问题
+    if (self.playerLayer) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        
+        // 必须先置空并移除，彻底切断与死掉的旧管线的联系
         self.playerLayer.player = nil;
+        [self.playerLayer removeFromSuperlayer];
+        
+        // 重新挂载，强迫 CoreAnimation 再次接管
         self.playerLayer.player = self.player;
-    } else {
-        // 兼容 iOS 14-15 极易脱落的问题
-        if (self.playerLayer.player == nil) {
-            self.playerLayer.player = self.player;
-        }
+        self.playerLayer.frame = self.bounds;
+        [self.layer addSublayer:self.playerLayer];
+        
+        [CATransaction commit];
     }
 
-    // 无视 status，暴力执行 play
-    [self.player play];
+    // 【🚨终极防定格修复3：Kickstart 唤醒硬件视频解码器】
+    // 应对 iOS 16+ mediaserverd 息屏休眠策略
+    if (self.player.rate == 0.0) {
+        // 获取当前时间，原地进行一次零容差的 seek 操作
+        CMTime currentTime = [self.player currentTime];
+        
+        // seek 操作会像电击一样强行唤醒底层的硬件解码器吐出参考帧
+        [self.player seekToTime:currentTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
+            // 解码器被激活后，再下达播放指令
+            if (!self.isManuallyPaused) {
+                [self.player play];
+            }
+        }];
+    } else {
+        [self.player play];
+    }
 }
 
 - (void)pauseVideo {
