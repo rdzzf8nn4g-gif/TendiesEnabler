@@ -1901,6 +1901,9 @@ static void EnsureEngineViewIsMounted() {
         self.alpha = 1.0;
         return;
     }
+
+    // 核心拦截：非主壁纸容器直接放行
+    if (![self zone_isMainWallpaperContainer]) return;
     
 
     if (g_isVideoMode) {
@@ -2345,6 +2348,7 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
+  if (![self zone_isMainWallpaperContainer]) return;
 
     if (g_isVideoMode) {
         if (IsSingleVideoMode()) {
