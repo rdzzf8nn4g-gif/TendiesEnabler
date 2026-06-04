@@ -426,7 +426,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
-    if (g_isScreenOn && g_enabled && g_isVideoMode && !self.isManuallyPaused) {
+    if (g_isScreenOn && g_enabled && g_isVideoMode) {
         [self playVideo];
     }
 }
@@ -435,13 +435,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
-                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
-                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
-                        [self playVideo];
-                    }
-                });
+                [self.player play];
             }
         }
     }
@@ -454,28 +448,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     self.isManuallyPaused = NO;
-    
-    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
-    @try {
-        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
-                                         withOptions:AVAudioSessionCategoryOptionMixWithOthers 
-                                               error:nil];
-        [[AVAudioSession sharedInstance] setActive:YES error:nil];
-    } @catch (NSException *e) {}
-
-    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
-    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
-    if (self.playerLayer.player == nil) {
-        self.playerLayer.player = self.player;
+    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
+        [self.player play];
     }
-
-    // 无视 status，暴力执行 play
-    [self.player play];
 }
 
 - (void)pauseVideo {
     self.isManuallyPaused = YES;
-    if (self.player) {
+    if (self.player && self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
         [self.player pause];
     }
 }
@@ -487,20 +467,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } @catch (NSException *e) {}
     
     [self pauseVideo];
-    
-    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
     if (self.looper) {
         [self.looper disableLooping];
         self.looper = nil;
     }
-    if (self.playerLayer) {
-        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation 引用
-        [self.playerLayer removeFromSuperlayer];
-        self.playerLayer = nil;
-    }
     if (self.player) {
         [self.player removeAllItems];
         self.player = nil;
+    }
+    if (self.playerLayer) {
+        [self.playerLayer removeFromSuperlayer];
+        self.playerLayer = nil;
     }
 }
 
@@ -2218,16 +2195,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
-        BOOL wasScreenOn = g_isScreenOn;
         g_isScreenOn = !mode;
-        
-        // 🚨 补全丢失的唤醒和休眠广播
-        if (g_isScreenOn && !wasScreenOn) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        } else if (!g_isScreenOn && wasScreenOn) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        }
-
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
@@ -2237,9 +2205,6 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled) {
         g_isScreenOn = YES;
-        // 🚨 锁屏真正开始亮屏动画时，强制唤醒视频引擎
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
