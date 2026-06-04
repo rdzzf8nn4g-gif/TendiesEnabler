@@ -241,7 +241,6 @@ static BOOL g_enabled = NO;
 static BOOL g_enhanced_engine = NO;
 static BOOL g_hideTextShadow = NO;
 static BOOL g_lowPowerPause = NO; 
-static BOOL g_doubleTapToSleep = NO;
 static NSString *g_zonePath = nil;
 
 // 视觉状态标识
@@ -278,7 +277,6 @@ static void reloadPrefs() {
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
     g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
     g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO;
-g_doubleTapToSleep = CFPreferencesGetAppBooleanValue(CFSTR("DoubleTapToSleep"), appID, &valid) ? valid : NO;
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
     g_enableAnimSpeed = CFPreferencesGetAppBooleanValue(CFSTR("EnableAnimSpeed"), appID, &valid) ? valid : YES;
     
@@ -2908,23 +2906,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidLoad {
     %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_forceIconRefresh) name:@"ZoneForceIconRefresh" object:nil];
-    
-    // --- 注入桌面双击手势 ---
-    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_doubleTapToSleep:)];
-    doubleTap.numberOfTapsRequired = 2;
-    doubleTap.cancelsTouchesInView = NO; // 极其重要：防止拦截系统正常点击 APP 图标的手势
-    [self.view addGestureRecognizer:doubleTap];
-}
-
-%new
-- (void)zone_doubleTapToSleep:(UITapGestureRecognizer *)gesture {
-    if (!g_enabled || !g_isVideoMode || !g_doubleTapToSleep) return;
-    
-    // 调用系统 SpringBoard 锁屏/息屏接口
-    id lockManager = [%c(SBLockScreenManager) sharedInstance];
-    if ([lockManager respondsToSelector:@selector(lockUIFromSource:withOptions:)]) {
-        [lockManager lockUIFromSource:1 withOptions:nil];
-    }
 }
 
 - (void)dealloc {
@@ -2967,38 +2948,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 %end
-
-// ==================== 锁屏双击息屏补丁 ====================
-%hook CSCoverSheetViewController
-- (void)viewDidLoad {
-    %orig;
-    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_doubleTapToSleep:)];
-    doubleTap.numberOfTapsRequired = 2;
-    doubleTap.cancelsTouchesInView = NO;
-    [self.view addGestureRecognizer:doubleTap];
-}
-
-%new
-- (void)zone_doubleTapToSleep:(UITapGestureRecognizer *)gesture {
-    if (!g_enabled || !g_isVideoMode || !g_doubleTapToSleep) return;
-    
-    // 1. 真正的物理息屏 API：直接切断屏幕背光，进入纯黑睡眠状态
-    id backlightController = [%c(SBBacklightController) sharedInstance];
-    if ([backlightController respondsToSelector:@selector(setBacklightState:source:animated:completion:)]) {
-        // state:0 代表屏幕彻底关闭
-        [backlightController setBacklightState:0 source:0 animated:YES completion:nil];
-    } else if ([backlightController respondsToSelector:@selector(setBacklightState:source:)]) {
-        [backlightController setBacklightState:0 source:0];
-    }
-    
-    // 2. 双保险：黑屏的同时通知系统上锁，确保安全性 (防止唤醒后直接进桌面)
-    id lockManager = [%c(SBLockScreenManager) sharedInstance];
-    if ([lockManager respondsToSelector:@selector(lockUIFromSource:withOptions:)]) {
-        [lockManager lockUIFromSource:1 withOptions:nil];
-    }
-}
-%end
-// ==========================================================
 
 %ctor {
     NSString *processName = [[NSProcessInfo processInfo] processName];
