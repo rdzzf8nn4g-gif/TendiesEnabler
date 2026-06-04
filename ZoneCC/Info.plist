@@ -2,30 +2,56 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>ZoneCC</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
     <string>Zone壁纸模式</string>
     <key>CFBundleExecutable</key>
     <string>ZoneCC</string>
     <key>CFBundleIdentifier</key>
     <string>com.iosdump.zonecc</string>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>ZoneCC</string>
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>iPhoneOS</string>
+        <string>iPadOS</string>
+    </array>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>GetModuleSizeAtRuntime</key>
+    <false/>
+    <key>MinimumOSVersion</key>
+    <string>14.0</string>
+    <key>ModuleSize</key>
+    <dict>
+        <key>Landscape</key>
+        <dict>
+            <key>Height</key>
+            <integer>1</integer>
+            <key>Width</key>
+            <integer>1</integer>
+        </dict>
+        <key>Portrait</key>
+        <dict>
+            <key>Height</key>
+            <integer>1</integer>
+            <key>Width</key>
+            <integer>1</integer>
+        </dict>
+    </dict>
     <key>NSPrincipalClass</key>
     <string>ZoneCCModule</string>
-    <key>CCSModulePresentationOptions</key>
-    <dict>
-        <key>supportedInterfaceOrientations</key>
-        <integer>30</integer>
-    </dict>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
 </dict>
 </plist>
