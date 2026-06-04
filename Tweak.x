@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h> 
+#import <notify.h> // 🚨 新增：导入底层通知系统头文件 
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
