@@ -2185,7 +2185,13 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBWallpaperController
-
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
+    %orig;
+}
 
 - (void)updatePosterSwitcherSnapshots {
     if (g_enabled) return;
