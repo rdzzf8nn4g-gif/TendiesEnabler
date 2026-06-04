@@ -1879,28 +1879,28 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
+    BOOL hasWhitelist = NO;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 明确排除来电相关
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"]) {
-            return NO;
+        // 1. 绝对黑名单：遇到 App 场景(Safari等)、来电界面，直接拦截，恢复原生壁纸
+        if ([className containsString:@"Scene"] || 
+            [className containsString:@"Call"] || 
+            [className containsString:@"InCallService"] || 
+            [className containsString:@"Telephony"]) {
+            return NO; 
         }
         
-        // 2. 扩充核心白名单：包括壁纸主容器、锁屏、多任务后台(Switcher)、文件夹(Folder)、Dock栏
-        if ([className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"CSCoverSheetView"] ||
-            [className containsString:@"Switcher"] || 
-            [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"]) {
-            return YES; // 这些正常界面，放行显示自定义壁纸
+        // 2. 核心白名单：只要是壁纸、锁屏(涵盖下拉过渡)、多任务后台，就标记为通过
+        if ([className containsString:@"Wallpaper"] || 
+            [className containsString:@"CoverSheet"] || 
+            [className containsString:@"Switcher"]) {
+            hasWhitelist = YES;
         }
         
         view = view.superview;
     }
-    // 3. 只要不在上述白名单中（例如 Safari 等普通APP容器内），直接屏蔽恢复系统原生
-    return NO;
+    return hasWhitelist;
 }
 
 - (void)layoutSubviews {
@@ -2335,27 +2335,28 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
+    BOOL hasWhitelist = NO;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        if ([className containsString:@"Call"] || [className containsString:@"InCallService"]) {
+        // 1. 绝对黑名单：拦截应用内(Safari等)和来电界面
+        if ([className containsString:@"Scene"] || 
+            [className containsString:@"Call"] || 
+            [className containsString:@"InCallService"] || 
+            [className containsString:@"Telephony"]) {
             return NO;
         }
         
-        // 扩充白名单，保护多任务和文件夹不被误杀
-        if ([className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"CSCoverSheetView"] ||
-            [className containsString:@"Switcher"] || 
-            [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"]) {
-            return YES;
+        // 2. 核心白名单
+        if ([className containsString:@"Wallpaper"] || 
+            [className containsString:@"CoverSheet"] || 
+            [className containsString:@"Switcher"]) {
+            hasWhitelist = YES;
         }
         
         view = view.superview;
     }
-    // 其他所有APP内（包含 Safari 和 电话）直接屏蔽
-    return NO;
+    return hasWhitelist;
 }
 
 - (void)layoutSubviews {
@@ -2704,25 +2705,31 @@ static void EnsureEngineViewIsMounted() {
 %new
 - (BOOL)zone_shouldHideEffect {
     UIView *view = self;
+    BOOL hasWhitelist = NO;
     while (view) {
         NSString *name = NSStringFromClass([view class]);
         
-        if ([name containsString:@"Call"] || [name containsString:@"InCallService"]) {
+        // 1. 黑名单：拦截应用内(Safari等)、来电界面
+        // 额外保护：文件夹(Folder)和底栏(Dock)，保留它们的系统模糊，避免变全透明
+        if ([name containsString:@"Scene"] || 
+            [name containsString:@"Call"] || 
+            [name containsString:@"InCallService"] || 
+            [name containsString:@"Telephony"] ||
+            [name containsString:@"Folder"] || 
+            [name containsString:@"Dock"]) {
             return NO;
         }
         
-        // 只有在最底层的壁纸主界面、锁屏、多任务界面，才隐藏原生模糊，让动态壁纸透出来
-        if ([name containsString:@"WallpaperView"] || 
-            [name containsString:@"WallpaperWindow"] || 
-            [name containsString:@"CSCoverSheetView"] ||
+        // 2. 白名单：锁屏、桌面、多任务才隐藏原生模糊，把你的动态壁纸透出来
+        if ([name containsString:@"Wallpaper"] || 
+            [name containsString:@"CoverSheet"] || 
             [name containsString:@"Switcher"]) {
-            return YES;
+            hasWhitelist = YES;
         }
         
         view = view.superview;
     }
-    // Safari等应用内、文件夹内保留系统原生模糊背景，避免穿帮
-    return NO;
+    return hasWhitelist;
 }
 
 - (void)didMoveToSuperview {
