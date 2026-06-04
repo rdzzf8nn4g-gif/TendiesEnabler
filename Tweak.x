@@ -2982,6 +2982,16 @@ static void EnsureEngineViewIsMounted() {
 - (void)zone_doubleTapToSleep:(UITapGestureRecognizer *)gesture {
     if (!g_enabled || !g_isVideoMode || !g_doubleTapToSleep) return;
     
+    // 1. 真正的物理息屏 API：直接切断屏幕背光，进入纯黑睡眠状态
+    id backlightController = [%c(SBBacklightController) sharedInstance];
+    if ([backlightController respondsToSelector:@selector(setBacklightState:source:animated:completion:)]) {
+        // state:0 代表屏幕彻底关闭
+        [backlightController setBacklightState:0 source:0 animated:YES completion:nil];
+    } else if ([backlightController respondsToSelector:@selector(setBacklightState:source:)]) {
+        [backlightController setBacklightState:0 source:0];
+    }
+    
+    // 2. 双保险：黑屏的同时通知系统上锁，确保安全性 (防止唤醒后直接进桌面)
     id lockManager = [%c(SBLockScreenManager) sharedInstance];
     if ([lockManager respondsToSelector:@selector(lockUIFromSource:withOptions:)]) {
         [lockManager lockUIFromSource:1 withOptions:nil];
