@@ -28,7 +28,6 @@ typedef struct {
 @end
 
 @interface PBUIWallpaperView : UIView
-- (BOOL)zone_isMainWallpaperContainer;
 @end
 
 @interface BSUICAPackageView : UIView
@@ -55,7 +54,6 @@ typedef struct {
 
 @interface SBWallpaperEffectView : UIView
 @property (nonatomic) long long wallpaperStyle;
-- (BOOL)zone_shouldHideEffect;
 @end
 
 @interface _UIPortalView : UIView
@@ -81,7 +79,6 @@ typedef struct {
 @end
 
 @interface SBFWallpaperView : UIView
-- (BOOL)zone_isMainWallpaperContainer;
 @end
 
 // =========================================================================
@@ -426,7 +423,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
-    if (g_isScreenOn && g_enabled && g_isVideoMode && !self.isManuallyPaused) {
+    if (g_isScreenOn && g_enabled && g_isVideoMode) {
         [self playVideo];
     }
 }
@@ -435,13 +432,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
-                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
-                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
-                        [self playVideo];
-                    }
-                });
+                [self.player play];
             }
         }
     }
@@ -454,32 +445,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     self.isManuallyPaused = NO;
-    
-    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
-    @try {
-        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
-                                         withOptions:AVAudioSessionCategoryOptionMixWithOthers 
-                                               error:nil];
-        [[AVAudioSession sharedInstance] setActive:YES error:nil];
-    } @catch (NSException *e) {}
-
-    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
-    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
-    // 【🚨防定格修复2：重新牵手硬件解码器 (iOS16+核心修复)🚨】
-    // 息屏会导致系统切断 AVPlayerLayer 的底层渲染管线。
-    // 不能只判断 nil，必须强制剥离再重新绑定，才能唤醒 CoreAnimation 重建渲染节点。
-    if (self.playerLayer) {
-        self.playerLayer.player = nil;
-        self.playerLayer.player = self.player;
+    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
+        [self.player play];
     }
-
-    // 无视 status，暴力执行 play
-    [self.player play];
 }
 
 - (void)pauseVideo {
     self.isManuallyPaused = YES;
-    if (self.player) {
+    if (self.player && self.player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
         [self.player pause];
     }
 }
@@ -491,20 +464,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } @catch (NSException *e) {}
     
     [self pauseVideo];
-    
-    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
     if (self.looper) {
         [self.looper disableLooping];
         self.looper = nil;
     }
-    if (self.playerLayer) {
-        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation 引用
-        [self.playerLayer removeFromSuperlayer];
-        self.playerLayer = nil;
-    }
     if (self.player) {
         [self.player removeAllItems];
         self.player = nil;
+    }
+    if (self.playerLayer) {
+        [self.playerLayer removeFromSuperlayer];
+        self.playerLayer = nil;
     }
 }
 
@@ -1901,35 +1871,6 @@ static void EnsureEngineViewIsMounted() {
 %group iOS16Plus
 
 %hook PBUIWallpaperView
-
-%new
-- (BOOL)zone_isMainWallpaperContainer {
-    UIView *view = self;
-    BOOL isMain = NO;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        
-        // 1. 绝对黑名单：增加 Reachability，只要触发降半屏，立刻拦截并恢复系统原生壁纸
-        if ([className containsString:@"SceneView"] || 
-            [className containsString:@"AppContainer"] ||
-            [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"] ||
-            [className containsString:@"Reachability"]) {
-            return NO; 
-        }
-        
-        // 2. 核心白名单：去掉 Reachability，保持桌面、锁屏、多任务的自定义壁纸显示
-        if ([className containsString:@"CoverSheet"] || 
-            [className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"]) {
-            isMain = YES;
-        }
-        view = view.superview;
-    }
-    return isMain;
-}
-
 - (void)layoutSubviews {
     %orig;
     if (!g_enabled) {
@@ -1937,29 +1878,17 @@ static void EnsureEngineViewIsMounted() {
         self.alpha = 1.0;
         return;
     }
-
-    if (![self zone_isMainWallpaperContainer]) return;
-
     if (g_isVideoMode) {
-        BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-        BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        BOOL hide = NO;
-        
-        // 如果锁屏和桌面都有视频，全局隐藏原生壁纸
-        if (IsSingleVideoMode() || (hasLock && hasHome)) {
-            hide = YES;
-        } else {
-            long long variant = 1; 
-            if ([self respondsToSelector:@selector(variant)]) {
-                variant = (long long)[self performSelector:@selector(variant)];
-            }
-            // 解决降半屏、左滑负一屏闪烁原壁纸问题：0是锁屏，其他(1, 2等)全部判定为桌面！
-            if (variant == 0) {
-                hide = hasLock;
-            } else {
-                hide = hasHome;
-            }
+        if (IsSingleVideoMode()) {
+            self.hidden = NO;
+            self.alpha = 1.0;
+            return;
         }
+        long long variant = 0;
+        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+        BOOL hide = NO;
+        if (variant == 0) hide = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+        else if (variant == 1) hide = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
         self.hidden = hide;
         self.alpha = hide ? 0.0 : 1.0;
     } else {
@@ -1967,37 +1896,25 @@ static void EnsureEngineViewIsMounted() {
         self.alpha = 0.0;
     }
 }
-
 - (void)setAlpha:(double)alpha {
-    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
+    if (g_enabled) {
         if (!g_isVideoMode) { %orig(0.0); return; }
-        
-        BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-        BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(0.0); return; }
-        
-        long long variant = 1;
+        if (IsSingleVideoMode()) { %orig(1.0); return; }
+        long long variant = 0;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        
-        if (variant == 0 && hasLock) { %orig(0.0); return; }
-        if (variant != 0 && hasHome) { %orig(0.0); return; }
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
     }
     %orig;
 }
-
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
+    if (g_enabled) {
         if (!g_isVideoMode) { %orig(YES); return; }
-        
-        BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-        BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(YES); return; }
-        
-        long long variant = 1;
+        if (IsSingleVideoMode()) { %orig(NO); return; }
+        long long variant = 0;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        
-        if (variant == 0 && hasLock) { %orig(YES); return; }
-        if (variant != 0 && hasHome) { %orig(YES); return; }
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
     }
     %orig;
 }
@@ -2222,16 +2139,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
-        BOOL screenOn = !mode;
-        if (g_isScreenOn != screenOn) {
-            g_isScreenOn = screenOn;
-            // 必须补发 Wake/Sleep 通知，否则视频引擎无法知道需要解除 pause
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-        }
+        g_isScreenOn = !mode;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
@@ -2277,6 +2185,13 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBWallpaperController
+- (void)_ingestPrimaryWallpaperLayersSnapshotIOSurface:(id)arg1 floatingWallpaperLayerSnapshotIOSurface:(id)arg2 snapshotScale:(double)arg3 traitCollection:(id)arg4 withCompletion:(id /* block */)arg5 {
+    if (g_enabled) {
+        if (arg5) { void (^completionBlock)(void) = arg5; completionBlock(); }
+        return; 
+    }
+    %orig;
+}
 
 - (void)updatePosterSwitcherSnapshots {
     if (g_enabled) return;
@@ -2333,8 +2248,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled) {
-        // iOS 16+ 兼容 AOD：只要不是 0(完全息屏) 和 3(准备息屏的暗化过渡)，都视为亮屏
-        BOOL screenOn = (state != 0 && state != 3);
+        BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1;
@@ -2354,8 +2268,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled) {
-        // iOS 16+ 兼容 AOD：只要不是 0(完全息屏) 和 3(准备息屏的暗化过渡)，都视为亮屏
-        BOOL screenOn = (state != 0 && state != 3);
+        BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1;
@@ -2381,34 +2294,6 @@ static void EnsureEngineViewIsMounted() {
 %group iOS14_15
 
 %hook SBFWallpaperView
-
-%new
-- (BOOL)zone_isMainWallpaperContainer {
-    UIView *view = self;
-    BOOL isMain = NO;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        
-        // 把 Reachability 调入黑名单，拦截插件隐藏逻辑
-        if ([className containsString:@"SceneView"] || 
-            [className containsString:@"AppContainer"] ||
-            [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"] ||
-            [className containsString:@"Reachability"]) {
-            return NO; 
-        }
-        
-        if ([className containsString:@"CoverSheet"] || 
-            [className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"]) {
-            isMain = YES;
-        }
-        view = view.superview;
-    }
-    return isMain;
-}
-
 - (void)layoutSubviews {
     %orig;
     if (!g_enabled) {
@@ -2416,27 +2301,17 @@ static void EnsureEngineViewIsMounted() {
         self.alpha = 1.0;
         return;
     }
-    
-    if (![self zone_isMainWallpaperContainer]) return;
-
     if (g_isVideoMode) {
-        BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-        BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        BOOL hide = NO;
-        
-        if (IsSingleVideoMode() || (hasLock && hasHome)) {
-            hide = YES;
-        } else {
-            long long variant = 1; 
-            if ([self respondsToSelector:@selector(variant)]) {
-                variant = (long long)[self performSelector:@selector(variant)];
-            }
-            if (variant == 0) {
-                hide = hasLock;
-            } else {
-                hide = hasHome;
-            }
+        if (IsSingleVideoMode()) {
+            self.hidden = NO;
+            self.alpha = 1.0;
+            return;
         }
+        long long variant = 0;
+        if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
+        BOOL hide = NO;
+        if (variant == 0) hide = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+        else if (variant == 1) hide = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
         self.hidden = hide;
         self.alpha = hide ? 0.0 : 1.0;
     } else {
@@ -2444,37 +2319,25 @@ static void EnsureEngineViewIsMounted() {
         self.alpha = 0.0;
     }
 }
-
 - (void)setAlpha:(double)alpha {
-    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
+    if (g_enabled) {
         if (!g_isVideoMode) { %orig(0.0); return; }
-        
-        BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-        BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(0.0); return; }
-        
-        long long variant = 1;
+        if (IsSingleVideoMode()) { %orig(1.0); return; }
+        long long variant = 0;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        
-        if (variant == 0 && hasLock) { %orig(0.0); return; }
-        if (variant != 0 && hasHome) { %orig(0.0); return; }
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(0.0); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(0.0); return; }
     }
     %orig;
 }
-
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
+    if (g_enabled) {
         if (!g_isVideoMode) { %orig(YES); return; }
-        
-        BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
-        BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(YES); return; }
-        
-        long long variant = 1;
+        if (IsSingleVideoMode()) { %orig(NO); return; }
+        long long variant = 0;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
-        
-        if (variant == 0 && hasLock) { %orig(YES); return; }
-        if (variant != 0 && hasHome) { %orig(YES); return; }
+        if (variant == 0 && (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath])) { %orig(YES); return; }
+        if (variant == 1 && (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath])) { %orig(YES); return; }
     }
     %orig;
 }
@@ -2763,41 +2626,22 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBWallpaperEffectView
-
-// 新增辅助方法：排除来电与 Safari 误伤，精准定位系统封面/壁纸
-%new
-- (BOOL)zone_shouldHideEffect {
-    UIView *view = self;
-    BOOL shouldHide = NO;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        
-        // 1. 绝对黑名单：增加 Reachability。这样降半屏时上半部分的系统高斯模糊也能被完美保留
-        if ([className containsString:@"SceneView"] || 
-            [className containsString:@"AppContainer"] || 
-            [className containsString:@"Folder"] || 
-            [className containsString:@"Dock"] ||
-            [className containsString:@"Reachability"]) {
-            return NO;
-        }
-        
-        // 2. 核心白名单：不再包含 Reachability
-        if ([className containsString:@"CoverSheet"] || 
-            [className containsString:@"WallpaperWindow"] || 
-            [className containsString:@"WallpaperViewController"] || 
-            [className containsString:@"Switcher"]) {
-            shouldHide = YES;
-        }
-        
-        view = view.superview;
-    }
-    return shouldHide;
-}
-
 - (void)didMoveToSuperview {
     %orig;
     if (g_enabled && !g_isVideoMode && self.superview) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        UIView *view = self;
+        BOOL isCoverSheetRelated = NO;
+        while (view) {
+            NSString *name = NSStringFromClass([view class]);
+            if ([name containsString:@"Wallpaper"] || 
+                [name containsString:@"CoverSheet"] || 
+                [name containsString:@"CS"]) {
+                isCoverSheetRelated = YES;
+                break;
+            }
+            view = view.superview;
+        }
+        if (isCoverSheetRelated) {
             self.hidden = YES;
             self.alpha = 0.0;
         }
@@ -2807,26 +2651,33 @@ static void EnsureEngineViewIsMounted() {
 - (void)layoutSubviews {
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
             self.hidden = YES;
             self.alpha = 0.0;
         }
     }
 }
-
 - (void)setAlpha:(double)alpha {
     if (g_enabled && !g_isVideoMode) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
             %orig(0.0);
             return;
         }
     }
     %orig;
 }
-
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled && !g_isVideoMode) {
-        if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
+        NSString *superviewName = NSStringFromClass([self.superview class]);
+        if ([superviewName containsString:@"Wallpaper"] || 
+            [superviewName containsString:@"CoverSheet"] ||
+            [superviewName containsString:@"CS"]) {
             %orig(YES);
             return;
         }
