@@ -453,20 +453,24 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self pauseVideo];
         return;
     }
-    
     self.isManuallyPaused = NO;
     
-    // 【🚨 终极防假死 & 防指令打架修复】
-    // 1. 如果视频因为息屏被系统切断了渲染管线，我们通过重新挂载 Layer 来瞬间接上管线。
-    // 绝对不要再用 [self.player pause] 去踢醒它，那会引发底层的跨进程指令风暴！
-    if (self.playerLayer && self.playerLayer.player != self.player) {
+    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
+    @try {
+        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
+                                         withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                               error:nil];
+        [[AVAudioSession sharedInstance] setActive:YES error:nil];
+    } @catch (NSException *e) {}
+
+    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
+    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
+    if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
     }
-    
-    // 2. 只有在真正没有播放时，才下达一次纯净的 play 指令
-    if (self.player.timeControlStatus != AVPlayerTimeControlStatusPlaying || self.player.rate == 0.0) {
-        [self.player play];
-    }
+
+    // 无视 status，暴力执行 play
+    [self.player play];
 }
 
 - (void)pauseVideo {
@@ -2211,47 +2215,88 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-- (void)setInScreenOffMode:(BOOL)mode {
+-  (void)setInScreenOffMode:(BOOL)mode {
+
     %orig;
+
     if (g_enabled) {
+
         g_isScreenOn = !mode;
-        // 完全信任 g_isUnlocked，去掉了所有多余的判断
+
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        
-        // 同步发送，解决发令枪延迟
-        if (g_isScreenOn) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        }
+
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+
+        
+
+        // 👉 [修复点 1：补全视频引擎所需的核心调度通知]
+
+        if (mode) {
+
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+
+        } else {
+
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+
+        }
+
     }
+
 }
+
 
 - (void)_startFadeInAnimationForSource:(int)source {
+
     %orig;
+
     if (g_enabled) {
+
         g_isScreenOn = YES;
+
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+
+        
+
+        // 👉 [修复点 2：应对系统强制动画淡入的唤醒补丁]
+
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+
     }
+
 }
 
+
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
+
     %orig;
+
     if (g_enabled) {
+
         g_isScreenOn = !inactive;
+
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        
-        if (g_isScreenOn) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        }
+
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+
+        
+
+        // 👉 [修复点 3：应对 iOS 16 AOD 息屏显示的唤醒补丁]
+
+        if (inactive) {
+
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+
+        } else {
+
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+
+        }
+
     }
+
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2328,47 +2373,6 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-%hook SBBacklightController
-- (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
-    %orig;
-    if (g_enabled) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_lastTickProgress = -1;
-            
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
-        }
-    }
-}
-
-- (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
-    %orig;
-    if (g_enabled) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_lastTickProgress = -1;
-            
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
-        }
-    }
-}
-%end
 %end // 结束 iOS16Plus
 
 
@@ -2696,12 +2700,6 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isScreenOn = !mode;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        
-        if (g_isScreenOn) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        }
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
 }
