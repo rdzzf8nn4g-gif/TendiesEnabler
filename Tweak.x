@@ -1876,7 +1876,7 @@ static void EnsureEngineViewIsMounted() {
 %hook PBUIWallpaperView
 
 // 新增辅助方法：精准判断是否处于主壁纸容器中，排除系统的模糊副本
-%new%new
+%new
 - (BOOL)zone_isMainWallpaperContainer {
     UIView *view = self;
     while (view) {
