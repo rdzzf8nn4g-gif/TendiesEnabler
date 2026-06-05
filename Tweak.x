@@ -435,6 +435,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
+                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
+                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
                         [self playVideo];
@@ -453,6 +455,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.isManuallyPaused = NO;
     
+    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
     @try {
         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
                                          withOptions:AVAudioSessionCategoryOptionMixWithOthers 
@@ -460,10 +463,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[AVAudioSession sharedInstance] setActive:YES error:nil];
     } @catch (NSException *e) {}
 
+    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
+    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
     if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
     }
 
+    // 无视 status，暴力执行 play
     [self.player play];
 }
 
@@ -482,12 +488,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     [self pauseVideo];
     
+    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
     if (self.looper) {
         [self.looper disableLooping];
         self.looper = nil;
     }
     if (self.playerLayer) {
-        self.playerLayer.player = nil; 
+        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation 引用
         [self.playerLayer removeFromSuperlayer];
         self.playerLayer = nil;
     }
@@ -915,9 +922,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【核心修复：分离与锁死状态机】
-    // 只有当屏幕点亮 (g_isScreenOn == YES) 时，才响应手指滑动的进度
-    if (!g_isScreenOn) return; 
+    // 【🚨新增防御】：如果当前不是亮屏状态（即处于息屏或AOD），彻底屏蔽系统发来的假进度！
+    if (!g_isScreenOn) return;
+
+    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -1551,9 +1559,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【核心修复：分离与锁死状态机】
-    // 只有当屏幕点亮 (g_isScreenOn == YES) 时，才响应手指滑动的进度
-    if (!g_isScreenOn) return; 
+    // 【🚨新增防御】：如果当前不是亮屏状态（即处于息屏或AOD），彻底屏蔽系统发来的假进度！
+    if (!g_isScreenOn) return;
+
+    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -2216,49 +2225,17 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = !mode;
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
-        if (mode) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        }
-    }
+    // 🚨 废弃原有插件逻辑：iOS16+的开关屏与AOD切换，统一交给底层 SBBacklightController 处理
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = YES;
-        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-    }
+    // 🚨 废弃原有插件逻辑，防止与 Backlight 打架
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = !inactive;
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        
-        // 🚨 AOD 专杀：息屏瞬间图层被系统挂起，如果有动画会导致死锁，必须设为 NO。
-        NSNumber *shouldAnimate = inactive ? @NO : @YES;
-        
-        if (inactive) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": shouldAnimate}];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            // 🚨 唤醒时延迟 0.05 秒，避开图层解冻的拥堵风暴
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": shouldAnimate}];
-            });
-        }
-    }
+    // 🚨 废弃原有插件逻辑，防止AOD唤醒瞬间状态反转卡死
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2338,58 +2315,49 @@ static void EnsureEngineViewIsMounted() {
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
+        // 🚨 核心逻辑：iOS16/17中，1是正常亮屏，0是完全黑屏，2是全天候AOD。
+        // 我们只认 1 为亮屏，其余全视为息屏状态
+        BOOL isNowOn = (state == 1);
+        
+        if (isNowOn != g_isScreenOn) {
+            g_isScreenOn = isNowOn;
             g_lastTickProgress = -1; 
             
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            NSString *zoneState = isNowOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
-            // 🚨 核心逻辑：state 2 和 3 是 AOD 挂起状态，state 0 是正常黑屏
-            // AOD瞬间冻结图层必须硬切NO；普通黑屏可保留过渡动画 YES
-            NSNumber *shouldAnimate = (state == 2 || state == 3) ? @NO : @YES;
-            
-            if (screenOn) {
+            if (isNowOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
-                });
             } else {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
             }
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
     }
 }
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
+        // 同上，双重保险
+        BOOL isNowOn = (state == 1);
+        
+        if (isNowOn != g_isScreenOn) {
+            g_isScreenOn = isNowOn;
             g_lastTickProgress = -1; 
             
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            NSString *zoneState = isNowOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
-            // 🚨 核心逻辑：state 2 和 3 是 AOD 挂起状态，state 0 是正常黑屏
-            NSNumber *shouldAnimate = (state == 2 || state == 3) ? @NO : @YES;
-            
-            if (screenOn) {
+            if (isNowOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
-                });
             } else {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
             }
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
     }
 }
+
 %end
 
 %end // 结束 iOS16Plus
