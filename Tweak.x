@@ -1174,6 +1174,7 @@ typedef struct {
 } ZoneCAColorMatrix;
 
 @interface ZoneCAMLParserEnhanced : NSObject <NSXMLParserDelegate>
+@property (nonatomic, assign) CGSize rootBoundsSize;
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
 @property (nonatomic, strong) NSMutableSet *availableStates;
@@ -1216,10 +1217,17 @@ typedef struct {
     return nil;
 }
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
-    if ([elementName isEqualToString:@"CALayer"]) {
+    if ([elementName containsString:@"Layer"]) { // 核心修复：捕获 CAShapeLayer, CATransformLayer 等所有异形图层
         if (!self.rootParsed) {
             self.rootParsed = YES;
             if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
+            NSString *boundsStr = attributeDict[@"bounds"];
+            if (boundsStr) {
+                NSArray *bComps = [boundsStr componentsSeparatedByString:@" "];
+                if (bComps.count >= 4) {
+                    self.rootBoundsSize = CGSizeMake([bComps[2] doubleValue], [bComps[3] doubleValue]);
+                }
+            }
         }
         if (attributeDict[@"backgroundColor"] && !self.fallbackBackgroundColor) {
             UIColor *c = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
@@ -1462,35 +1470,21 @@ typedef struct {
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
-            if (@available(iOS 16.0, *)) {
-                // 解除 logicalScreenSize 锁定，回归真实绝对渲染宽高保护
-                CGSize realSize = rootLayer.bounds.size;
-                if (realSize.width <= 0 || realSize.height <= 0) realSize = self.logicalScreenSize;
-                if (realSize.width <= 0 || realSize.height <= 0) realSize = bounds.size;
-                
-                CGFloat scaleX = bounds.size.width / realSize.width;
-                CGFloat scaleY = bounds.size.height / realSize.height;
-                CGFloat scale = MAX(scaleX, scaleY);
-                
-                v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
-                rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
-                rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
-            } else {
-                BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
-                v.layer.geometryFlipped = !camlFlipped;
-                
-                CGSize realSize = rootLayer.bounds.size;
-                if (realSize.width > 0 && realSize.height > 0) {
-                    CGFloat realScaleX = bounds.size.width / realSize.width;
-                    CGFloat realScaleY = bounds.size.height / realSize.height;
-                    CGFloat realScale = MAX(realScaleX, realScaleY); 
-                    
-                    rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
-                    rootLayer.transform = CATransform3DMakeScale(realScale, realScale, 1.0);
-                } else {
-                    rootLayer.frame = bounds;
-                }
-            }
+            // 核心修复1：拉平 iOS 全版本坐标系翻转逻辑，拒绝过度倒置 (解决 LUVTW 上下错位)
+            BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
+            v.layer.geometryFlipped = !camlFlipped;
+            
+            // 核心修复2：优先从 XML 强读真实 Bounds，彻底解决 Mario 3462x3462 巨屏缩放爆炸
+            CGSize realSize = (p && p.rootBoundsSize.width > 0) ? p.rootBoundsSize : rootLayer.bounds.size;
+            if (realSize.width <= 0 || realSize.height <= 0) realSize = self.logicalScreenSize;
+            if (realSize.width <= 0 || realSize.height <= 0) realSize = bounds.size;
+            
+            CGFloat scaleX = bounds.size.width / realSize.width;
+            CGFloat scaleY = bounds.size.height / realSize.height;
+            CGFloat scale = MAX(scaleX, scaleY);
+            
+            rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
         }
     }
 }
