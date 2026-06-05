@@ -494,7 +494,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.looper = nil;
     }
     if (self.playerLayer) {
-        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation 引用
+        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation引用
         [self.playerLayer removeFromSuperlayer];
         self.playerLayer = nil;
     }
@@ -2244,13 +2244,17 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled) {
         g_isScreenOn = !inactive;
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
         
         if (inactive) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+            // 修复全天候(AOD)息屏死锁：不再重复发状态改变指令，让底层 SBBacklightController 的提前量动画完美过渡
         } else {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            // 修复全天候(AOD)亮屏消失/延迟：给底层图层解冻预留 0.05 秒时间，避开动画冲突风暴
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+            });
         }
     }
 }
