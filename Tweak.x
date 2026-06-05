@@ -436,7 +436,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
                 // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
-                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
                         [self playVideo];
@@ -464,7 +463,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } @catch (NSException *e) {}
 
     // 【🚨防定格修复2：重新牵手硬件解码器🚨】
-    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
     if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
     }
@@ -494,7 +492,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.looper = nil;
     }
     if (self.playerLayer) {
-        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation引用
+        self.playerLayer.player = nil; 
         [self.playerLayer removeFromSuperlayer];
         self.playerLayer = nil;
     }
@@ -921,6 +919,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    
+    // 【核心修复：分离与锁死状态机】
+    // 防止全天候(AOD)和息屏期间，系统发出的假进度导致状态机被强行复位篡改
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return;
+    
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -1554,6 +1557,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    
+    // 【核心修复：分离与锁死状态机】
+    // 防止全天候(AOD)和息屏期间，系统发出的假进度导致状态机被强行复位篡改
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return;
+    
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -2240,21 +2248,18 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
+// 完全恢复原有逻辑，确保状态顺利过渡
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
     if (g_enabled) {
         g_isScreenOn = !inactive;
+        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
         
         if (inactive) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            // 修复全天候(AOD)息屏死锁：不再重复发状态改变指令，让底层 SBBacklightController 的提前量动画完美过渡
         } else {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            // 修复全天候(AOD)亮屏消失/延迟：给底层图层解冻预留 0.05 秒时间，避开动画冲突风暴
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-            });
         }
     }
 }
