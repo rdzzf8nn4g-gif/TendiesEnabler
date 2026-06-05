@@ -207,6 +207,37 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
     return nil;
 }
 
+// =========================================================================
+// 核心：智能包围盒测算 (自动过滤透明画布，带 Block 防漏机制)
+// =========================================================================
+static CGRect ZoneCalculateTrueContentFrame(CALayer *rootLayer) {
+    __block CGRect totalRect = CGRectNull;
+    __block void (^traverse)(CALayer *);
+    
+    traverse = ^(CALayer *layer) {
+        // 只抓取真正带有图像素材的有效图层，过滤掉 3462x3462 的透明画框
+        if (layer.contents != nil) {
+            CGRect rectInRoot = [rootLayer convertRect:layer.bounds fromLayer:layer];
+            if (CGRectIsNull(totalRect)) {
+                totalRect = rectInRoot;
+            } else {
+                totalRect = CGRectUnion(totalRect, rectInRoot);
+            }
+        }
+        for (CALayer *sub in layer.sublayers) {
+            traverse(sub);
+        }
+    };
+    
+    traverse(rootLayer);
+    traverse = nil; // 【绝对核心】打破递归 Block 的循环引用，保证内存零泄漏
+    
+    if (CGRectIsNull(totalRect) || CGRectGetWidth(totalRect) <= 1 || CGRectGetHeight(totalRect) <= 1) {
+        return rootLayer.bounds; // 兜底：如果没抓到，退回原大小
+    }
+    return totalRect;
+}
+
 // ==========================================
 // 绝对安全的底层变量获取函数 (防止 Safe Mode)
 // ==========================================
@@ -746,6 +777,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
+@property (nonatomic, assign) CGRect cachedContentFrame; // 缓存边界，防 CPU 飙升
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 - (void)lockSolidBackground;
@@ -764,6 +796,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.isAnimatingState = NO;
         self.animationGeneration = 0;
         
+self.cachedContentFrame = CGRectZero;
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
         self.fgLayerMap = [NSMutableDictionary dictionary];
@@ -815,7 +848,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.fgView.frame = bounds;
     }
 
-    if (@available(iOS 16.0, *)) {
+if (@available(iOS 16.0, *)) {
     } else {
         BSUICAPackageView *views[] = {self.bgView, self.floatingView, self.fgView};
         for (int i = 0; i < 3; i++) {
@@ -826,12 +859,23 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 BOOL camlFlipped = rootLayer.geometryFlipped; 
                 v.layer.geometryFlipped = !camlFlipped;
                 
-                CGSize realSize = rootLayer.bounds.size;
+                // 仅测算一次，避免滑动或动画时 CPU 飙升
+                if (CGRectEqualToRect(self.cachedContentFrame, CGRectZero)) {
+                    self.cachedContentFrame = ZoneCalculateTrueContentFrame(rootLayer);
+                }
+                CGRect contentFrame = self.cachedContentFrame;
+                CGSize realSize = contentFrame.size;
+                
                 if (realSize.width > 0 && realSize.height > 0) {
                     CGFloat scaleX = bounds.size.width / realSize.width;
                     CGFloat scaleY = bounds.size.height / realSize.height;
                     CGFloat scale = MAX(scaleX, scaleY);
-                    rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+                    
+                    CGFloat offsetX = CGRectGetMidX(contentFrame) - rootLayer.bounds.size.width / 2.0;
+                    CGFloat offsetY = CGRectGetMidY(contentFrame) - rootLayer.bounds.size.height / 2.0;
+                    
+                    rootLayer.position = CGPointMake(bounds.size.width / 2.0 - offsetX * scale, 
+                                                     bounds.size.height / 2.0 - offsetY * scale);
                     rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
                 }
             }
@@ -1001,6 +1045,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
     self.dynamicSolidColor = nil;
 }
+
+self.cachedContentFrame = CGRectZero;
 
 - (void)lockSolidBackground {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1324,6 +1370,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
+@property (nonatomic, assign) CGRect cachedContentFrame; // 缓存边界
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 - (void)lockSolidBackground;
@@ -1343,6 +1390,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.isAnimatingState = NO;
         self.animationGeneration = 0;
         
+self.cachedContentFrame = CGRectZero;
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
         self.fgLayerMap = [NSMutableDictionary dictionary];
@@ -1421,31 +1469,35 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
-            if (@available(iOS 16.0, *)) {
-                CGSize targetSize = self.logicalScreenSize;
-                if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
-                CGFloat scaleX = bounds.size.width / targetSize.width;
-                CGFloat scaleY = bounds.size.height / targetSize.height;
+            // 只测算一次，彻底规避滑动过程中的计算负担
+            if (CGRectEqualToRect(self.cachedContentFrame, CGRectZero)) {
+                self.cachedContentFrame = ZoneCalculateTrueContentFrame(rootLayer);
+            }
+            CGRect contentFrame = self.cachedContentFrame;
+            CGSize realSize = contentFrame.size;
+            
+            if (realSize.width > 0 && realSize.height > 0) {
+                // 不再信任 plist 里的虚假尺寸，直接按内容真实尺寸缩放
+                CGFloat scaleX = bounds.size.width / realSize.width;
+                CGFloat scaleY = bounds.size.height / realSize.height;
                 CGFloat scale = MAX(scaleX, scaleY);
                 
-                v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
-                rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+                CGFloat offsetX = CGRectGetMidX(contentFrame) - rootLayer.bounds.size.width / 2.0;
+                CGFloat offsetY = CGRectGetMidY(contentFrame) - rootLayer.bounds.size.height / 2.0;
+                
+                if (@available(iOS 16.0, *)) {
+                    v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
+                } else {
+                    BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
+                    v.layer.geometryFlipped = !camlFlipped;
+                }
+                
+                // 将内容严格锁定在物理屏幕中心
+                rootLayer.position = CGPointMake(bounds.size.width / 2.0 - offsetX * scale, 
+                                                 bounds.size.height / 2.0 - offsetY * scale);
                 rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
             } else {
-                BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
-                v.layer.geometryFlipped = !camlFlipped;
-                
-                CGSize realSize = rootLayer.bounds.size;
-                if (realSize.width > 0 && realSize.height > 0) {
-                    CGFloat realScaleX = bounds.size.width / realSize.width;
-                    CGFloat realScaleY = bounds.size.height / realSize.height;
-                    CGFloat realScale = MAX(realScaleX, realScaleY); 
-                    
-                    rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
-                    rootLayer.transform = CATransform3DMakeScale(realScale, realScale, 1.0);
-                } else {
-                    rootLayer.frame = bounds;
-                }
+                rootLayer.frame = bounds;
             }
         }
     }
@@ -1640,6 +1692,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.dynamicSolidColor = nil;
     self.logicalScreenSize = CGSizeZero;
 }
+
+self.cachedContentFrame = CGRectZero;
 
 - (void)lockSolidBackground {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
