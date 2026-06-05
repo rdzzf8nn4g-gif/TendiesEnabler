@@ -208,32 +208,28 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // =========================================================================
-// 核心：智能包围盒测算 (自动过滤透明画布，带 Block 防漏机制)
+// 核心：智能包围盒测算 (纯 C 指针递归，零警告、零泄漏、最高性能)
 // =========================================================================
+static void ZoneRecursiveCalculateContentFrame(CALayer *layer, CALayer *rootLayer, CGRect *totalRect) {
+    if (layer.contents != nil) {
+        CGRect rectInRoot = [rootLayer convertRect:layer.bounds fromLayer:layer];
+        if (CGRectIsNull(*totalRect)) {
+            *totalRect = rectInRoot;
+        } else {
+            *totalRect = CGRectUnion(*totalRect, rectInRoot);
+        }
+    }
+    for (CALayer *sub in layer.sublayers) {
+        ZoneRecursiveCalculateContentFrame(sub, rootLayer, totalRect);
+    }
+}
+
 static CGRect ZoneCalculateTrueContentFrame(CALayer *rootLayer) {
-    __block CGRect totalRect = CGRectNull;
-    __block void (^traverse)(CALayer *);
-    
-    traverse = ^(CALayer *layer) {
-        // 只抓取真正带有图像素材的有效图层，过滤掉 3462x3462 的透明画框
-        if (layer.contents != nil) {
-            CGRect rectInRoot = [rootLayer convertRect:layer.bounds fromLayer:layer];
-            if (CGRectIsNull(totalRect)) {
-                totalRect = rectInRoot;
-            } else {
-                totalRect = CGRectUnion(totalRect, rectInRoot);
-            }
-        }
-        for (CALayer *sub in layer.sublayers) {
-            traverse(sub);
-        }
-    };
-    
-    traverse(rootLayer);
-    traverse = nil; // 【绝对核心】打破递归 Block 的循环引用，保证内存零泄漏
+    CGRect totalRect = CGRectNull;
+    ZoneRecursiveCalculateContentFrame(rootLayer, rootLayer, &totalRect);
     
     if (CGRectIsNull(totalRect) || CGRectGetWidth(totalRect) <= 1 || CGRectGetHeight(totalRect) <= 1) {
-        return rootLayer.bounds; // 兜底：如果没抓到，退回原大小
+        return rootLayer.bounds;
     }
     return totalRect;
 }
@@ -1044,9 +1040,8 @@ if (@available(iOS 16.0, *)) {
     [self.bgLayerMap removeAllObjects]; [self.floatLayerMap removeAllObjects]; [self.fgLayerMap removeAllObjects];
     self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
     self.dynamicSolidColor = nil;
-}
-
 self.cachedContentFrame = CGRectZero;
+}
 
 - (void)lockSolidBackground {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
