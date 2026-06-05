@@ -2816,7 +2816,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setAlpha:(double)alpha {
-    if (g_enabled && !g_isVideoMode) {
+    if (g_enabled) {
         if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
             %orig(0.0);
             return;
@@ -2826,7 +2826,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setHidden:(BOOL)hidden {
-    if (g_enabled && !g_isVideoMode) {
+    if (g_enabled) {
         if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
             %orig(YES);
             return;
@@ -2839,7 +2839,7 @@ static void EnsureEngineViewIsMounted() {
 %hook CSCoverSheetViewController
 - (void)_updateWallpaperFloatingLayerContainerView {
     %orig;
-    if (g_enabled && !g_isVideoMode) {
+    if (g_enabled) {
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
             floatingLayer.hidden = YES;
@@ -2850,7 +2850,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_updateFloatingLayerOrdering {
     %orig;
-    if (g_enabled && !g_isVideoMode) {
+    if (g_enabled) {
         UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
         if (floatingLayer) {
             floatingLayer.hidden = YES;
