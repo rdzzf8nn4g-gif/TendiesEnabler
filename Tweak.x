@@ -922,9 +922,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     // 【核心修复：分离与锁死状态机】
     // 防止全天候(AOD)和息屏期间，系统发出的假进度导致状态机被强行复位篡改
-    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return;
-    
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
+    // 只有当屏幕点亮 (g_isScreenOn == YES) 时，才响应手指滑动的进度
+    if (!g_isScreenOn) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -1560,9 +1559,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     // 【核心修复：分离与锁死状态机】
     // 防止全天候(AOD)和息屏期间，系统发出的假进度导致状态机被强行复位篡改
-    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return;
-    
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
+    // 只有当屏幕点亮 (g_isScreenOn == YES) 时，才响应手指滑动的进度
+    if (!g_isScreenOn) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -2248,7 +2246,6 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// 完全恢复原有逻辑，确保状态顺利过渡
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
     if (g_enabled) {
