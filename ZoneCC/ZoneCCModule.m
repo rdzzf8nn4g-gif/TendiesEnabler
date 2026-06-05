@@ -14,14 +14,10 @@
 #define NOTIFY_KEY CFSTR("com.iosdump.zoneprefs/ReloadPrefs")
 
 // ==================================================================
-// 控制中心专属：私有 API 声明 (ControlCenterUIKit)
+// 控制中心专属：强制声明 ControlCenterUIKit 私有 API 接口
 // ==================================================================
-@interface CCUIMenuModuleItem : NSObject
-@end
-
 @interface CCUIMenuModuleViewController : UIViewController
-- (void)addActionWithTitle:(NSString *)title glyph:(UIImage *)glyph handler:(void (^)(CCUIMenuModuleItem *action))handler;
-- (void)addActionWithTitle:(NSString *)title subtitle:(NSString *)subtitle glyph:(UIImage *)glyph handler:(void (^)(CCUIMenuModuleItem *action))handler;
+- (void)addActionWithTitle:(NSString *)title subtitle:(NSString *)subtitle glyph:(UIImage *)glyph handler:(void (^)(id action))handler;
 - (void)removeAllActions;
 @end
 
@@ -82,7 +78,6 @@ static void UpdateZonePreference(NSDictionary *updates) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), NOTIFY_KEY, NULL, NULL, YES);
 }
 
-
 // ==================================================================
 // 核心：长按弹出的多态菜单视图控制器
 // ==================================================================
@@ -98,26 +93,22 @@ static void UpdateZonePreference(NSDictionary *updates) {
 
 // 每次呼出菜单时动态构建内容
 - (void)buildDynamicMenu {
-    [self removeAllActions]; // 清空旧菜单
-    
     NSString *prefsPath = GetRealPrefsPath();
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:prefsPath];
     BOOL isVideoMode = [prefs[@"VideoModeEnabled"] boolValue];
+    BOOL isEnabled = [prefs[@"Enabled"] boolValue];
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // 1. 【通用操作】：关闭引擎
-    [self addActionWithTitle:@"关闭引擎" subtitle:@"停止渲染并释放内存" glyph:[UIImage systemImageNamed:@"power"] handler:^(CCUIMenuModuleItem *action) {
-        UpdateZonePreference(@{@"Enabled": @NO});
+    // 1. 【通用操作】：插件总开关 (开启/关闭引擎)
+    NSString *toggleTitle = isEnabled ? @"关闭插件引擎" : @"开启插件引擎";
+    NSString *toggleSubtitle = isEnabled ? @"当前状态: 运行中" : @"当前状态: 已休眠";
+    UIImage *toggleIcon = [UIImage systemImageNamed:isEnabled ? @"power.circle.fill" : @"power.circle"];
+    
+    [self addActionWithTitle:toggleTitle subtitle:toggleSubtitle glyph:toggleIcon handler:^(id action) {
+        UpdateZonePreference(@{@"Enabled": @(!isEnabled)});
     }];
 
-    // 2. 【通用操作】：一键模式切换
-    NSString *switchTitle = isVideoMode ? @"切换至: 交互壁纸模式" : @"切换至: 视频壁纸模式";
-    UIImage *switchIcon = [UIImage systemImageNamed:@"arrow.left.arrow.right"];
-    [self addActionWithTitle:switchTitle glyph:switchIcon handler:^(CCUIMenuModuleItem *action) {
-        UpdateZonePreference(@{@"VideoModeEnabled": @(!isVideoMode)});
-    }];
-
-    // 3. 【多态素材列表】：根据模式渲染不同的壁纸选择器
+    // 2. 【多态素材列表】：根据当前模式渲染不同的壁纸选择器
     if (isVideoMode) {
         // --- 加载锁屏视频 ---
         NSArray *lockFiles = [fm contentsOfDirectoryAtPath:GetVideoWallpapersLockDir() error:nil];
@@ -126,8 +117,9 @@ static void UpdateZonePreference(NSDictionary *updates) {
             NSString *cleanName = [file stringByDeletingPathExtension];
             NSString *title = [NSString stringWithFormat:@"锁屏: %@", cleanName];
             
-            [self addActionWithTitle:title glyph:[UIImage systemImageNamed:@"lock.fill"] handler:^(CCUIMenuModuleItem *action) {
+            [self addActionWithTitle:title subtitle:nil glyph:[UIImage systemImageNamed:@"lock.fill"] handler:^(id action) {
                 NSString *fullPath = [GetVideoWallpapersLockDir() stringByAppendingPathComponent:file];
+                // 切换壁纸时，强制把插件总开关打开，让用户立刻看到效果
                 UpdateZonePreference(@{@"LockVideoPath": fullPath, @"Enabled": @YES});
             }];
         }
@@ -139,8 +131,9 @@ static void UpdateZonePreference(NSDictionary *updates) {
             NSString *cleanName = [file stringByDeletingPathExtension];
             NSString *title = [NSString stringWithFormat:@"桌面: %@", cleanName];
             
-            [self addActionWithTitle:title glyph:[UIImage systemImageNamed:@"house.fill"] handler:^(CCUIMenuModuleItem *action) {
+            [self addActionWithTitle:title subtitle:nil glyph:[UIImage systemImageNamed:@"house.fill"] handler:^(id action) {
                 NSString *fullPath = [GetVideoWallpapersHomeDir() stringByAppendingPathComponent:file];
+                // 切换壁纸时，强制把插件总开关打开
                 UpdateZonePreference(@{@"HomeVideoPath": fullPath, @"Enabled": @YES});
             }];
         }
@@ -154,12 +147,18 @@ static void UpdateZonePreference(NSDictionary *updates) {
             
             BOOL isDir = NO;
             if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
-                [self addActionWithTitle:file glyph:[UIImage systemImageNamed:@"livephoto.play"] handler:^(CCUIMenuModuleItem *action) {
+                [self addActionWithTitle:file subtitle:nil glyph:[UIImage systemImageNamed:@"livephoto.play"] handler:^(id action) {
+                    // 切换壁纸时，强制把插件总开关打开
                     UpdateZonePreference(@{@"ZonePath": fullPath, @"Enabled": @YES});
                 }];
             }
         }
     }
+}
+
+// 保证在锁屏界面的控制中心也能呼出菜单
+- (BOOL)_canShowWhileLocked {
+    return YES;
 }
 @end
 
@@ -174,24 +173,24 @@ static void UpdateZonePreference(NSDictionary *updates) {
     return [[ZoneCCMenuViewController alloc] init];
 }
 
-// 返回按钮当前的全局开关状态
+// 单击时按钮的高亮状态：代表当前是否处于【视频模式】
 - (BOOL)isSelected {
     Boolean valid;
-    BOOL isEnabled = CFPreferencesGetAppBooleanValue(CFSTR("Enabled"), APP_ID, &valid);
-    if (valid) return isEnabled;
+    BOOL isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), APP_ID, &valid);
+    if (valid) return isVideoMode;
     
     NSString *actualPath = GetRealPrefsPath();
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:actualPath];
-    if (prefs && prefs[@"Enabled"]) {
-        return [prefs[@"Enabled"] boolValue];
+    if (prefs && prefs[@"VideoModeEnabled"]) {
+        return [prefs[@"VideoModeEnabled"] boolValue];
     }
     return NO;
 }
 
-// 用户单次点击控制中心按钮时触发 (总开关切换)
+// 【单击事件】：在交互模式与视频模式之间无缝切换
 - (void)setSelected:(BOOL)selected {
     [super setSelected:selected];
-    UpdateZonePreference(@{@"Enabled": @(selected)});
+    UpdateZonePreference(@{@"VideoModeEnabled": @(selected)});
 }
 
 // ==================== 终极图标绝对居中渲染模块 ====================
@@ -214,25 +213,17 @@ static void UpdateZonePreference(NSDictionary *updates) {
     return [centeredImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
-// 未选中状态下的图标 (手指点击)
+// 【单击未高亮图标】：交互模式（星星）
 - (UIImage *)iconGlyph {
-    return [self centeredImageWithSymbolName:@"hand.tap"];
+    return [self centeredImageWithSymbolName:@"sparkles"];
 }
 
-// 选中状态下的图标 (动态感知：如果是视频模式就换成胶片，交互模式换成星星)
+// 【单击高亮图标】：视频模式（胶片）
 - (UIImage *)selectedIconGlyph {
-    NSString *actualPath = GetRealPrefsPath();
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:actualPath];
-    BOOL isVideoMode = [prefs[@"VideoModeEnabled"] boolValue];
-    
-    if (isVideoMode) {
-        return [self centeredImageWithSymbolName:@"film.fill"];
-    } else {
-        return [self centeredImageWithSymbolName:@"sparkles"];
-    }
+    return [self centeredImageWithSymbolName:@"film.fill"];
 }
 
-// 选中状态下的底色
+// 高亮时的底色：原生蓝
 - (UIColor *)selectedColor {
     return [UIColor systemBlueColor];
 }
