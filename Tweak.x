@@ -435,7 +435,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
-                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
                         [self playVideo];
@@ -454,7 +453,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.isManuallyPaused = NO;
     
-    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
     @try {
         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
                                          withOptions:AVAudioSessionCategoryOptionMixWithOthers 
@@ -462,12 +460,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[AVAudioSession sharedInstance] setActive:YES error:nil];
     } @catch (NSException *e) {}
 
-    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
     if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
     }
 
-    // 无视 status，暴力执行 play
     [self.player play];
 }
 
@@ -486,7 +482,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     [self pauseVideo];
     
-    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
     if (self.looper) {
         [self.looper disableLooping];
         self.looper = nil;
@@ -921,7 +916,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     
     // 【核心修复：分离与锁死状态机】
-    // 防止全天候(AOD)和息屏期间，系统发出的假进度导致状态机被强行复位篡改
     // 只有当屏幕点亮 (g_isScreenOn == YES) 时，才响应手指滑动的进度
     if (!g_isScreenOn) return; 
     
@@ -1558,7 +1552,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     
     // 【核心修复：分离与锁死状态机】
-    // 防止全天候(AOD)和息屏期间，系统发出的假进度导致状态机被强行复位篡改
     // 只有当屏幕点亮 (g_isScreenOn == YES) 时，才响应手指滑动的进度
     if (!g_isScreenOn) return; 
     
@@ -2251,12 +2244,19 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isScreenOn = !inactive;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+        
+        // 🚨 AOD 专杀：息屏瞬间图层被系统挂起，如果有动画会导致死锁，必须设为 NO。
+        NSNumber *shouldAnimate = inactive ? @NO : @YES;
         
         if (inactive) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": shouldAnimate}];
         } else {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            // 🚨 唤醒时延迟 0.05 秒，避开图层解冻的拥堵风暴
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": shouldAnimate}];
+            });
         }
     }
 }
@@ -2347,12 +2347,19 @@ static void EnsureEngineViewIsMounted() {
             
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
+            // 🚨 核心逻辑：state 2 和 3 是 AOD 挂起状态，state 0 是正常黑屏
+            // AOD瞬间冻结图层必须硬切NO；普通黑屏可保留过渡动画 YES
+            NSNumber *shouldAnimate = (state == 2 || state == 3) ? @NO : @YES;
+            
             if (screenOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
+                });
             } else {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
             }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
     }
 }
@@ -2368,12 +2375,18 @@ static void EnsureEngineViewIsMounted() {
             
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
+            // 🚨 核心逻辑：state 2 和 3 是 AOD 挂起状态，state 0 是正常黑屏
+            NSNumber *shouldAnimate = (state == 2 || state == 3) ? @NO : @YES;
+            
             if (screenOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
+                });
             } else {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": shouldAnimate}];
             }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
     }
 }
