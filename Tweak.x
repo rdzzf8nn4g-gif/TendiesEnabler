@@ -2807,7 +2807,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)layoutSubviews {
     %orig;
-    if (g_enabled && !g_isVideoMode) {
+    if (g_enabled) {
         if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
             self.hidden = YES;
             self.alpha = 0.0;
