@@ -2797,7 +2797,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)didMoveToSuperview {
     %orig;
-    if (g_enabled && !g_isVideoMode && self.superview) {
+    if (g_enabled && self.superview) {
         if ([self respondsToSelector:@selector(zone_shouldHideEffect)] && [self zone_shouldHideEffect]) {
             self.hidden = YES;
             self.alpha = 0.0;
