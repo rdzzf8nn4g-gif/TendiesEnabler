@@ -1166,15 +1166,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // =========================================================================
 // ==================== 【引擎 2】: 增强渲染引擎 (新逻辑) ====================
 // =========================================================================
-typedef struct {
-    float m11, m12, m13, m14, m15;
-    float m21, m22, m23, m24, m25;
-    float m31, m32, m33, m34, m35;
-    float m41, m42, m43, m44, m45;
-} ZoneCAColorMatrix;
-
 @interface ZoneCAMLParserEnhanced : NSObject <NSXMLParserDelegate>
-@property (nonatomic, assign) CGSize rootBoundsSize;
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
 @property (nonatomic, strong) NSMutableSet *availableStates;
@@ -1217,17 +1209,10 @@ typedef struct {
     return nil;
 }
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
-    if ([elementName containsString:@"Layer"]) { // 核心修复：捕获 CAShapeLayer, CATransformLayer 等所有异形图层
+    if ([elementName isEqualToString:@"CALayer"]) {
         if (!self.rootParsed) {
             self.rootParsed = YES;
             if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
-            NSString *boundsStr = attributeDict[@"bounds"];
-            if (boundsStr) {
-                NSArray *bComps = [boundsStr componentsSeparatedByString:@" "];
-                if (bComps.count >= 4) {
-                    self.rootBoundsSize = CGSizeMake([bComps[2] doubleValue], [bComps[3] doubleValue]);
-                }
-            }
         }
         if (attributeDict[@"backgroundColor"] && !self.fallbackBackgroundColor) {
             UIColor *c = [self parseColorString:attributeDict[@"backgroundColor"] opacity:attributeDict[@"opacity"]];
@@ -1259,54 +1244,20 @@ typedef struct {
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
         self.currentParsingTargetId = attributeDict[@"targetId"];
         self.currentParsingKeyPath = attributeDict[@"keyPath"];
-        // 兼容处理属性级内联值
-        if (attributeDict[@"value"]) {
-            if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
-                NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
-                if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
-                NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
-                if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[self.currentParsingState] = stateDict; }
-                stateDict[self.currentParsingKeyPath] = @([attributeDict[@"value"] doubleValue]);
-            }
-        }
-    } else if ([elementName isEqualToString:@"value"] || [elementName isEqualToString:@"integer"] || [elementName isEqualToString:@"real"] || [elementName isEqualToString:@"float"] || [elementName isEqualToString:@"double"] || [elementName isEqualToString:@"boolean"] || [elementName isEqualToString:@"CAColorMatrix"] || [elementName isEqualToString:@"CGPoint"]) {
+    } else if ([elementName isEqualToString:@"value"]) {
         if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
             NSString *valStr = attributeDict[@"value"];
-            if (!valStr && attributeDict[@"x"] && attributeDict[@"y"]) {
-                valStr = [NSString stringWithFormat:@"%@ %@", attributeDict[@"x"], attributeDict[@"y"]];
-            }
-            NSString *typeStr = attributeDict[@"type"] ?: elementName;
-            
+            NSString *typeStr = attributeDict[@"type"];
             if (valStr) {
                 id finalValue = nil;
-                if ([typeStr isEqualToString:@"CGPoint"] || [typeStr isEqualToString:@"value"]) {
+                if ([typeStr isEqualToString:@"CGPoint"]) {
                     NSArray *comps = [valStr componentsSeparatedByString:@" "];
-                    if (comps.count >= 2) {
+                    if (comps.count == 2) {
                         finalValue = [NSValue valueWithCGPoint:CGPointMake([comps[0] doubleValue], [comps[1] doubleValue])];
-                    } else {
-                        finalValue = @([valStr doubleValue]);
-                    }
-                } else if ([typeStr isEqualToString:@"CAColorMatrix"]) {
-                    if ([valStr hasPrefix:@"matrix("] && [valStr hasSuffix:@")"]) {
-                        NSString *content = [valStr substringWithRange:NSMakeRange(7, valStr.length - 8)];
-                        content = [content stringByReplacingOccurrencesOfString:@"," withString:@" "];
-                        NSArray *rawComps = [content componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                        NSMutableArray *comps = [NSMutableArray array];
-                        for (NSString *s in rawComps) { if (s.length > 0) [comps addObject:s]; }
-                        if (comps.count >= 20) {
-                            ZoneCAColorMatrix cm;
-                            float *p = (float *)&cm;
-                            for (int i=0; i<20; i++) p[i] = [comps[i] floatValue];
-                            // 使用标准的系统编码封包保证 KVC 认可
-                            finalValue = [NSValue valueWithBytes:&cm objCType:"{CAColorMatrix=ffffffffffffffffffff}"];
-                        } else {
-                            finalValue = @([valStr doubleValue]);
-                        }
                     }
                 } else {
                     finalValue = @([valStr doubleValue]);
                 }
-                
                 if (finalValue) {
                     NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
                     if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
@@ -1470,21 +1421,32 @@ typedef struct {
         
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
-            // 核心修复1：拉平 iOS 全版本坐标系翻转逻辑，拒绝过度倒置 (解决 LUVTW 上下错位)
-            BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
-            v.layer.geometryFlipped = !camlFlipped;
-            
-            // 核心修复2：优先从 XML 强读真实 Bounds，彻底解决 Mario 3462x3462 巨屏缩放爆炸
-            CGSize realSize = (p && p.rootBoundsSize.width > 0) ? p.rootBoundsSize : rootLayer.bounds.size;
-            if (realSize.width <= 0 || realSize.height <= 0) realSize = self.logicalScreenSize;
-            if (realSize.width <= 0 || realSize.height <= 0) realSize = bounds.size;
-            
-            CGFloat scaleX = bounds.size.width / realSize.width;
-            CGFloat scaleY = bounds.size.height / realSize.height;
-            CGFloat scale = MAX(scaleX, scaleY);
-            
-            rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
-            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+            if (@available(iOS 16.0, *)) {
+                CGSize targetSize = self.logicalScreenSize;
+                if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
+                CGFloat scaleX = bounds.size.width / targetSize.width;
+                CGFloat scaleY = bounds.size.height / targetSize.height;
+                CGFloat scale = MAX(scaleX, scaleY);
+                
+                v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
+                rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+                rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+            } else {
+                BOOL camlFlipped = p ? p.isGeometryFlipped : rootLayer.geometryFlipped;
+                v.layer.geometryFlipped = !camlFlipped;
+                
+                CGSize realSize = rootLayer.bounds.size;
+                if (realSize.width > 0 && realSize.height > 0) {
+                    CGFloat realScaleX = bounds.size.width / realSize.width;
+                    CGFloat realScaleY = bounds.size.height / realSize.height;
+                    CGFloat realScale = MAX(realScaleX, realScaleY); 
+                    
+                    rootLayer.position = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0);
+                    rootLayer.transform = CATransform3DMakeScale(realScale, realScale, 1.0);
+                } else {
+                    rootLayer.frame = bounds;
+                }
+            }
         }
     }
 }
@@ -1545,28 +1507,14 @@ typedef struct {
                 [layer removeAnimationForKey:keyPath];
                 if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
                     double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
-                    @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch(NSException *e) {}
+                    [layer setValue:@(currentVal) forKeyPath:keyPath];
                 } 
                 else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
-                    const char *objCType = [lockVal objCType];
-                    if (strcmp(objCType, @encode(CGPoint)) == 0) {
-                        CGPoint lockPt = [lockVal CGPointValue];
-                        CGPoint unlockPt = [unlockVal CGPointValue];
-                        CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
-                                                        lockPt.y + (unlockPt.y - lockPt.y) * progress);
-                        @try { [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath]; } @catch(NSException *e) {}
-                    } else if (strcmp(objCType, "{CAColorMatrix=ffffffffffffffffffff}") == 0 || strcmp(objCType, @encode(ZoneCAColorMatrix)) == 0) {
-                        ZoneCAColorMatrix mLock, mUnlock, mCurrent;
-                        [lockVal getValue:&mLock];
-                        [unlockVal getValue:&mUnlock];
-                        float p = (float)progress;
-                        float *pL = (float *)&mLock;
-                        float *pU = (float *)&mUnlock;
-                        float *pC = (float *)&mCurrent;
-                        // 20通道矩阵渐滑插值
-                        for (int i=0; i<20; i++) pC[i] = pL[i] + (pU[i] - pL[i]) * p;
-                        @try { [layer setValue:[NSValue valueWithBytes:&mCurrent objCType:"{CAColorMatrix=ffffffffffffffffffff}"] forKeyPath:keyPath]; } @catch(NSException *e) {}
-                    }
+                    CGPoint lockPt = [lockVal CGPointValue];
+                    CGPoint unlockPt = [unlockVal CGPointValue];
+                    CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
+                                                    lockPt.y + (unlockPt.y - lockPt.y) * progress);
+                    [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
                 }
             }
         }
