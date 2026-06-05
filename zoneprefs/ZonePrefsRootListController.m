@@ -725,7 +725,7 @@ for (NSString *name in lockContents) {
                 }
             }
             if (insertIndex != NSNotFound) {
-                PSSpecifier *animSpec = [PSSpecifier preferenceSpecifierNamed:@"壁纸动画" target:self set:@selector(setAnimEnableValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+                PSSpecifier *animSpec = [PSSpecifier preferenceSpecifierNamed:@"动画速度" target:self set:@selector(setAnimEnableValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
                 [animSpec setProperty:@"EnableAnimSpeed" forKey:@"key"];
                 [animSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
                 [animSpec setProperty:@YES forKey:@"default"];
@@ -981,7 +981,7 @@ for (NSString *name in lockContents) {
 // =============== 原版交互壁纸辅助保留逻辑 ===============
 // =======================================
 - (void)showEnhancedEngineInfo {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启增强引擎将提升识别复杂交互壁纸能力以及适配壁纸暗黑模式适配等。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启增强引擎将提升识别复杂交互壁纸能力以及适配壁纸暗黑模式等。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -993,7 +993,7 @@ for (NSString *name in lockContents) {
 }
 
 - (void)showAnimSpeedInfo {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后将加载壁纸自带的原生息屏跟关屏动画。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后可在壁纸素材绿色按钮调节壁纸息屏跟关屏动画速度。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
