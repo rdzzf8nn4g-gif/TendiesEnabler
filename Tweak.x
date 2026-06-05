@@ -1166,6 +1166,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 // =========================================================================
 // ==================== 【引擎 2】: 增强渲染引擎 (新逻辑) ====================
 // =========================================================================
+typedef struct {
+    float m11, m12, m13, m14, m15;
+    float m21, m22, m23, m24, m25;
+    float m31, m32, m33, m34, m35;
+    float m41, m42, m43, m44, m45;
+} ZoneCAColorMatrix;
+
 @interface ZoneCAMLParserEnhanced : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
 @property (nonatomic, strong) NSMutableDictionary *statesData;
@@ -1244,20 +1251,54 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
         self.currentParsingTargetId = attributeDict[@"targetId"];
         self.currentParsingKeyPath = attributeDict[@"keyPath"];
-    } else if ([elementName isEqualToString:@"value"]) {
+        // 兼容处理属性级内联值
+        if (attributeDict[@"value"]) {
+            if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
+                NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
+                if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
+                NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
+                if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[self.currentParsingState] = stateDict; }
+                stateDict[self.currentParsingKeyPath] = @([attributeDict[@"value"] doubleValue]);
+            }
+        }
+    } else if ([elementName isEqualToString:@"value"] || [elementName isEqualToString:@"integer"] || [elementName isEqualToString:@"real"] || [elementName isEqualToString:@"float"] || [elementName isEqualToString:@"double"] || [elementName isEqualToString:@"boolean"] || [elementName isEqualToString:@"CAColorMatrix"] || [elementName isEqualToString:@"CGPoint"]) {
         if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
             NSString *valStr = attributeDict[@"value"];
-            NSString *typeStr = attributeDict[@"type"];
+            if (!valStr && attributeDict[@"x"] && attributeDict[@"y"]) {
+                valStr = [NSString stringWithFormat:@"%@ %@", attributeDict[@"x"], attributeDict[@"y"]];
+            }
+            NSString *typeStr = attributeDict[@"type"] ?: elementName;
+            
             if (valStr) {
                 id finalValue = nil;
-                if ([typeStr isEqualToString:@"CGPoint"]) {
+                if ([typeStr isEqualToString:@"CGPoint"] || [typeStr isEqualToString:@"value"]) {
                     NSArray *comps = [valStr componentsSeparatedByString:@" "];
-                    if (comps.count == 2) {
+                    if (comps.count >= 2) {
                         finalValue = [NSValue valueWithCGPoint:CGPointMake([comps[0] doubleValue], [comps[1] doubleValue])];
+                    } else {
+                        finalValue = @([valStr doubleValue]);
+                    }
+                } else if ([typeStr isEqualToString:@"CAColorMatrix"]) {
+                    if ([valStr hasPrefix:@"matrix("] && [valStr hasSuffix:@")"]) {
+                        NSString *content = [valStr substringWithRange:NSMakeRange(7, valStr.length - 8)];
+                        content = [content stringByReplacingOccurrencesOfString:@"," withString:@" "];
+                        NSArray *rawComps = [content componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        NSMutableArray *comps = [NSMutableArray array];
+                        for (NSString *s in rawComps) { if (s.length > 0) [comps addObject:s]; }
+                        if (comps.count >= 20) {
+                            ZoneCAColorMatrix cm;
+                            float *p = (float *)&cm;
+                            for (int i=0; i<20; i++) p[i] = [comps[i] floatValue];
+                            // 使用标准的系统编码封包保证 KVC 认可
+                            finalValue = [NSValue valueWithBytes:&cm objCType:"{CAColorMatrix=ffffffffffffffffffff}"];
+                        } else {
+                            finalValue = @([valStr doubleValue]);
+                        }
                     }
                 } else {
                     finalValue = @([valStr doubleValue]);
                 }
+                
                 if (finalValue) {
                     NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
                     if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
@@ -1422,10 +1463,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         CALayer *rootLayer = [v.layer.sublayers firstObject];
         if (rootLayer) {
             if (@available(iOS 16.0, *)) {
-                CGSize targetSize = self.logicalScreenSize;
-                if (targetSize.width <= 0 || targetSize.height <= 0) targetSize = bounds.size;
-                CGFloat scaleX = bounds.size.width / targetSize.width;
-                CGFloat scaleY = bounds.size.height / targetSize.height;
+                // 解除 logicalScreenSize 锁定，回归真实绝对渲染宽高保护
+                CGSize realSize = rootLayer.bounds.size;
+                if (realSize.width <= 0 || realSize.height <= 0) realSize = self.logicalScreenSize;
+                if (realSize.width <= 0 || realSize.height <= 0) realSize = bounds.size;
+                
+                CGFloat scaleX = bounds.size.width / realSize.width;
+                CGFloat scaleY = bounds.size.height / realSize.height;
                 CGFloat scale = MAX(scaleX, scaleY);
                 
                 v.layer.geometryFlipped = p ? p.isGeometryFlipped : NO;
@@ -1507,14 +1551,28 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 [layer removeAnimationForKey:keyPath];
                 if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
                     double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
-                    [layer setValue:@(currentVal) forKeyPath:keyPath];
+                    @try { [layer setValue:@(currentVal) forKeyPath:keyPath]; } @catch(NSException *e) {}
                 } 
                 else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
-                    CGPoint lockPt = [lockVal CGPointValue];
-                    CGPoint unlockPt = [unlockVal CGPointValue];
-                    CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
-                                                    lockPt.y + (unlockPt.y - lockPt.y) * progress);
-                    [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
+                    const char *objCType = [lockVal objCType];
+                    if (strcmp(objCType, @encode(CGPoint)) == 0) {
+                        CGPoint lockPt = [lockVal CGPointValue];
+                        CGPoint unlockPt = [unlockVal CGPointValue];
+                        CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
+                                                        lockPt.y + (unlockPt.y - lockPt.y) * progress);
+                        @try { [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath]; } @catch(NSException *e) {}
+                    } else if (strcmp(objCType, "{CAColorMatrix=ffffffffffffffffffff}") == 0 || strcmp(objCType, @encode(ZoneCAColorMatrix)) == 0) {
+                        ZoneCAColorMatrix mLock, mUnlock, mCurrent;
+                        [lockVal getValue:&mLock];
+                        [unlockVal getValue:&mUnlock];
+                        float p = (float)progress;
+                        float *pL = (float *)&mLock;
+                        float *pU = (float *)&mUnlock;
+                        float *pC = (float *)&mCurrent;
+                        // 20通道矩阵渐滑插值
+                        for (int i=0; i<20; i++) pC[i] = pL[i] + (pU[i] - pL[i]) * p;
+                        @try { [layer setValue:[NSValue valueWithBytes:&mCurrent objCType:"{CAColorMatrix=ffffffffffffffffffff}"] forKeyPath:keyPath]; } @catch(NSException *e) {}
+                    }
                 }
             }
         }
