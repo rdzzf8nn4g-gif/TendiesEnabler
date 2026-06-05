@@ -1691,9 +1691,8 @@ self.cachedContentFrame = CGRectZero;
     self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
     self.dynamicSolidColor = nil;
     self.logicalScreenSize = CGSizeZero;
-}
-
 self.cachedContentFrame = CGRectZero;
+}
 
 - (void)lockSolidBackground {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
