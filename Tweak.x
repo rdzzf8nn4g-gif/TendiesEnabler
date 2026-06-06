@@ -1650,7 +1650,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     // 【核心修复 1】：在 iOS 16+ AOD 环境下，绝对不能调用系统的 setState:
     // 改为使用我们自己解析的 Parser 数据，强行把最终静态值钉死在 Layer 的 Model 层上。
-    // 这样 AOD 无论怎么重置 CAStateController，都无法撼动这些已经写死的属性，彻底解决回弹和反向动画问题！
+    // 删除了未使用的 realBgState 等多余变量，防止触发 -Werror 编译错误
     [self applyExplicitState:self.manualTargetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
@@ -1683,17 +1683,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    
+    // 注意：这里删除了引发编译错误的 unused variable (realBgState / realFloatState / realFgState)
     
     [self ensureAllLayerMaps];
     
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
-        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
-        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
+        // 启动纯手写逐帧渲染
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1706,9 +1704,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
         }
         
-        // 【核心修复 2】：无动画切换时同样完全抛弃系统的 setState:
-        // 直接通杀所有状态（包含 Sleep、Locked、Unlock），统一使用底层插值锁定 Layer 状态。
-        // 原有针对 Sleep 单独调用的逻辑被整合在此处，全天候保护 AOD 期间的稳定。
+        // 【核心修复 2】：无动画切换时完全抛弃系统的 setState:
+        // 直接通杀所有状态，统一使用底层插值锁定 Layer 状态
         [self applyExplicitState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
