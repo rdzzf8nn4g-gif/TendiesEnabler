@@ -1387,7 +1387,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
             NSString *savedState = [self.currentState copy];
             self.currentState = nil; 
-            [self transitionToState:savedState animated:YES]; 
+            // 【核心修复 1】：进入息屏触发暗黑模式时，绝对不能播放动画！
+            // 否则在 1Hz 刷新率下会引起逐帧引擎崩溃并导致状态闪回
+            [self transitionToState:savedState animated:NO]; 
         }
     }
 }
@@ -1658,7 +1660,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
+    
+    // 【核心修复 2】：如果正在播放亮屏/息屏的过渡动画，绝对不接受系统发来的假进度！
+    // 彻底防止系统在亮屏瞬间发送 progress=0.0 瞬间杀掉动画并错乱状态
+    if (self.isAnimatingState) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -1683,8 +1688,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    
-    // 注意：这里删除了引发编译错误的 unused variable (realBgState / realFloatState / realFgState)
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
     [self ensureAllLayerMaps];
     
@@ -1704,8 +1710,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
         }
         
-        // 【核心修复 2】：无动画切换时完全抛弃系统的 setState:
-        // 直接通杀所有状态，统一使用底层插值锁定 Layer 状态
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        // 无动画分支同样同步底层状态机
+        if ([self.bgView respondsToSelector:@selector(setState:)]) {
+            [self.bgView performSelector:@selector(setState:) withObject:realBgState]; 
+            [self.floatingView performSelector:@selector(setState:) withObject:realFloatState]; 
+            [self.fgView performSelector:@selector(setState:) withObject:realFgState];
+        } else if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+            [self.bgView setState:realBgState animated:NO]; 
+            [self.floatingView setState:realFloatState animated:NO]; 
+            [self.fgView setState:realFgState animated:NO];
+        }
+        [CATransaction commit];
+        
+        // 强制写入静态值，且所有声明的变量(realBgState等)都已被正确使用，不再报 unused variable
         [self applyExplicitState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
