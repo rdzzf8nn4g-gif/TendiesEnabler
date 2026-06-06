@@ -1463,6 +1463,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
         }
     }
+    
+    // 【核心修复 3：全天候 AOD 防闪回锁】
+    // 当系统在 AOD 状态下为了防烧屏而进行像素偏移、强制刷新布局时，
+    // 在布局的最后一刻强行把我们当前的视觉状态再次钉死！让它无从闪回！
+    if (!self.isAnimatingState && self.currentState && ![self.currentState isEqualToString:@"Init"]) {
+        [self applyExplicitState:self.currentState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+        [self applyExplicitState:self.currentState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+        [self applyExplicitState:self.currentState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+    }
 }
 
 - (void)onWakeUp {
@@ -1650,9 +1659,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    // 【核心修复 1】：在 iOS 16+ AOD 环境下，绝对不能调用系统的 setState:
-    // 改为使用我们自己解析的 Parser 数据，强行把最终静态值钉死在 Layer 的 Model 层上。
-    // 删除了未使用的 realBgState 等多余变量，防止触发 -Werror 编译错误
+    // 【核心修复 1】：彻底抛弃系统的 setState: ，防止幽灵动画被冻结到亮屏时播放
+    // 直接用我们解析的 Parser 数据强行覆盖 Layer 的 Model 值
     [self applyExplicitState:self.manualTargetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
@@ -1688,9 +1696,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
     [self ensureAllLayerMaps];
     
@@ -1710,21 +1715,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
         }
         
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        // 无动画分支同样同步底层状态机
-        if ([self.bgView respondsToSelector:@selector(setState:)]) {
-            [self.bgView performSelector:@selector(setState:) withObject:realBgState]; 
-            [self.floatingView performSelector:@selector(setState:) withObject:realFloatState]; 
-            [self.fgView performSelector:@selector(setState:) withObject:realFgState];
-        } else if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:realBgState animated:NO]; 
-            [self.floatingView setState:realFloatState animated:NO]; 
-            [self.fgView setState:realFgState animated:NO];
-        }
-        [CATransaction commit];
-        
-        // 强制写入静态值，且所有声明的变量(realBgState等)都已被正确使用，不再报 unused variable
+        // 【核心修复 2】：同理抛弃 setState:，统一使用底层插值锁定 Layer 状态
         [self applyExplicitState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
