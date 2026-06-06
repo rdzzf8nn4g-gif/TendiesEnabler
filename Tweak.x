@@ -1653,26 +1653,29 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:targetState isDark:self.manualIsDark] ?: targetState;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:targetState isDark:self.manualIsDark] ?: targetState;
     
-    // 【核心修复】：如果是息屏状态，直接钉死图层数值，拦截系统 setState，防止底层重置反弹
-    if ([targetState isEqualToString:@"Sleep"]) {
-        [self applyExplicitState:targetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-        [self applyExplicitState:targetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-        [self applyExplicitState:targetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        return; 
-    }
-    
-    // 正常亮屏解锁时，才同步 packageView 内部状态
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:realBgState animated:NO]; 
-        [self.floatingView setState:realFloatState animated:NO]; 
-        [self.fgView setState:realFgState animated:NO];
-    } else {
-        [self.bgView setState:realBgState]; 
-        [self.floatingView setState:realFloatState]; 
-        [self.fgView setState:realFgState];
+    
+    // 核心修复：如果目标是息屏(Sleep)，且壁纸文件内部并没有定义 Sleep 状态，则拦截 setState。
+    // 强行调用不存在的 Sleep 状态会导致系统底层瞬间重置回亮屏，造成视觉上的“反弹归位”。
+    BOOL bgSupports = [self.bgParser.availableStates containsObject:realBgState];
+    if (![targetState isEqualToString:@"Sleep"] || bgSupports) {
+        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) [self.bgView setState:realBgState animated:NO];
+        else [self.bgView setState:realBgState];
     }
+    
+    BOOL floatSupports = [self.floatParser.availableStates containsObject:realFloatState];
+    if (![targetState isEqualToString:@"Sleep"] || floatSupports) {
+        if ([self.floatingView respondsToSelector:@selector(setState:animated:)]) [self.floatingView setState:realFloatState animated:NO];
+        else [self.floatingView setState:realFloatState];
+    }
+    
+    BOOL fgSupports = [self.fgParser.availableStates containsObject:realFgState];
+    if (![targetState isEqualToString:@"Sleep"] || fgSupports) {
+        if ([self.fgView respondsToSelector:@selector(setState:animated:)]) [self.fgView setState:realFgState animated:NO];
+        else [self.fgView setState:realFgState];
+    }
+    
     [CATransaction commit];
 }
 
@@ -1712,8 +1715,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
-        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
-        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1727,25 +1728,34 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         if ([stateName isEqualToString:@"Sleep"]) {
-            // 【核心修复】：息屏状态直接钉死数值即可，绝不能往下走系统的 setState
             [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
             [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        } else {
-            // 非息屏状态才允许系统状态机介入
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-                [self.bgView setState:realBgState animated:NO]; 
-                [self.floatingView setState:realFloatState animated:NO]; 
-                [self.fgView setState:realFgState animated:NO];
-            } else {
-                [self.bgView setState:realBgState]; 
-                [self.floatingView setState:realFloatState]; 
-                [self.fgView setState:realFgState];
-            }
-            [CATransaction commit];
         }
+        
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        
+        // 同样在无动画模式下进行安全拦截，防止无动画直接反弹
+        BOOL bgSupports = [self.bgParser.availableStates containsObject:realBgState];
+        if (![stateName isEqualToString:@"Sleep"] || bgSupports) {
+            if ([self.bgView respondsToSelector:@selector(setState:animated:)]) [self.bgView setState:realBgState animated:NO];
+            else [self.bgView setState:realBgState];
+        }
+        
+        BOOL floatSupports = [self.floatParser.availableStates containsObject:realFloatState];
+        if (![stateName isEqualToString:@"Sleep"] || floatSupports) {
+            if ([self.floatingView respondsToSelector:@selector(setState:animated:)]) [self.floatingView setState:realFloatState animated:NO];
+            else [self.floatingView setState:realFloatState];
+        }
+        
+        BOOL fgSupports = [self.fgParser.availableStates containsObject:realFgState];
+        if (![stateName isEqualToString:@"Sleep"] || fgSupports) {
+            if ([self.fgView respondsToSelector:@selector(setState:animated:)]) [self.fgView setState:realFgState animated:NO];
+            else [self.fgView setState:realFgState];
+        }
+        
+        [CATransaction commit];
     }
 }
 
