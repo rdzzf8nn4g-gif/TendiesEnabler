@@ -1648,11 +1648,20 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
+    NSString *targetState = self.manualTargetState;
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:targetState isDark:self.manualIsDark] ?: targetState;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:targetState isDark:self.manualIsDark] ?: targetState;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:targetState isDark:self.manualIsDark] ?: targetState;
     
-    // 动画跑到终点后，无动画同步一次 packageView 内部状态，防止状态脱节
+    // 【核心修复】：如果是息屏状态，直接钉死图层数值，拦截系统 setState，防止底层重置反弹
+    if ([targetState isEqualToString:@"Sleep"]) {
+        [self applyExplicitState:targetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+        [self applyExplicitState:targetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+        [self applyExplicitState:targetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+        return; 
+    }
+    
+    // 正常亮屏解锁时，才同步 packageView 内部状态
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
@@ -1718,23 +1727,25 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
         
         if ([stateName isEqualToString:@"Sleep"]) {
+            // 【核心修复】：息屏状态直接钉死数值即可，绝不能往下走系统的 setState
             [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
             [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        }
-        
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:realBgState animated:NO]; 
-            [self.floatingView setState:realFloatState animated:NO]; 
-            [self.fgView setState:realFgState animated:NO];
         } else {
-            [self.bgView setState:realBgState]; 
-            [self.floatingView setState:realFloatState]; 
-            [self.fgView setState:realFgState];
+            // 非息屏状态才允许系统状态机介入
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+                [self.bgView setState:realBgState animated:NO]; 
+                [self.floatingView setState:realFloatState animated:NO]; 
+                [self.fgView setState:realFgState animated:NO];
+            } else {
+                [self.bgView setState:realBgState]; 
+                [self.floatingView setState:realFloatState]; 
+                [self.fgView setState:realFgState];
+            }
+            [CATransaction commit];
         }
-        [CATransaction commit];
     }
 }
 
