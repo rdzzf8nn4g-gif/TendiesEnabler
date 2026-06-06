@@ -945,17 +945,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
     
+    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    
+    [self ensureAllLayerMaps];
+    
     if (animated) {
         self.animationGeneration++;
-        NSInteger currentGen = self.animationGeneration;
         self.isAnimatingState = YES;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(g_animDuration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (self.animationGeneration == currentGen) {
-                self.isAnimatingState = NO;
-            }
-        });
+        [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
-        [self ensureAllLayerMaps];
         if ([stateName isEqualToString:@"Unlock"]) {
             [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
             [self applyProgress:1.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
@@ -965,32 +966,37 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
             [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
         }
-    }
-    
-    if ([stateName isEqualToString:@"Sleep"]) {
-        [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
-    }
-    
-    [CATransaction begin];
-    if (!animated) {
+        
+        if ([stateName isEqualToString:@"Sleep"]) {
+            [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+            [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+            [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+        }
+        
+        [CATransaction begin];
         [CATransaction setDisableActions:YES];
-    } else {
-        [CATransaction setAnimationDuration:g_animDuration];
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+        
+        // 同样在无动画模式下进行安全拦截，防止无动画直接反弹
+        BOOL bgSupports = [self.bgParser.availableStates containsObject:realBgState];
+        if (![stateName isEqualToString:@"Sleep"] || bgSupports) {
+            if ([self.bgView respondsToSelector:@selector(setState:animated:)]) [self.bgView setState:realBgState animated:NO];
+            else [self.bgView setState:realBgState];
+        }
+        
+        BOOL floatSupports = [self.floatParser.availableStates containsObject:realFloatState];
+        if (![stateName isEqualToString:@"Sleep"] || floatSupports) {
+            if ([self.floatingView respondsToSelector:@selector(setState:animated:)]) [self.floatingView setState:realFloatState animated:NO];
+            else [self.floatingView setState:realFloatState];
+        }
+        
+        BOOL fgSupports = [self.fgParser.availableStates containsObject:realFgState];
+        if (![stateName isEqualToString:@"Sleep"] || fgSupports) {
+            if ([self.fgView respondsToSelector:@selector(setState:animated:)]) [self.fgView setState:realFgState animated:NO];
+            else [self.fgView setState:realFgState];
+        }
+        
+        [CATransaction commit];
     }
-    
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:stateName animated:animated]; 
-        [self.floatingView setState:stateName animated:animated]; 
-        [self.fgView setState:stateName animated:animated];
-    } else {
-        [self.bgView setState:stateName]; 
-        [self.floatingView setState:stateName]; 
-        [self.fgView setState:stateName];
-    }
-    [CATransaction commit];
 }
 
 - (void)clearCurrentViewsSafely {
