@@ -1659,8 +1659,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    // 【核心修复 1】：彻底抛弃系统的 setState: ，防止幽灵动画被冻结到亮屏时播放
-    // 直接用我们解析的 Parser 数据强行覆盖 Layer 的 Model 值
+    // 【核心修复 3】：动画播完后，彻底抛弃 BSUICAPackageView 的 setState: ！！
+    // 直接用我们解析的数据，强行把最终视觉状态写死在 Layer 上。
+    // 这让 iOS 系统再也无法冻结或篡改我们的动画终点，完美解决亮屏播反向动画的 Bug。
     [self applyExplicitState:self.manualTargetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
@@ -1669,9 +1670,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【核心修复 2】：如果正在播放亮屏/息屏的过渡动画，绝对不接受系统发来的假进度！
-    // 彻底防止系统在亮屏瞬间发送 progress=0.0 瞬间杀掉动画并错乱状态
+    // 【核心修复 2】：绝对拦截！如果正在播放过渡动画，或者屏幕处于息屏/AOD状态，丢弃一切进度指令。
     if (self.isAnimatingState) return; 
+    if (!g_isScreenOn) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -1691,6 +1692,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
+    
+    // 【核心防御】：息屏期间，拒绝接受任何让壁纸亮起的强制指令！
+    if (!g_isScreenOn && ![stateName isEqualToString:@"Sleep"]) {
+        return;
+    }
+    
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
@@ -1702,7 +1709,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
-        // 启动纯手写逐帧渲染
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1715,7 +1721,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
         }
         
-        // 【核心修复 2】：同理抛弃 setState:，统一使用底层插值锁定 Layer 状态
+        // 【核心修复 4】：无动画分支同样剥夺系统控制权，直接全状态强制写死图层数值！
         [self applyExplicitState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
         [self applyExplicitState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
@@ -2312,10 +2318,9 @@ static void EnsureEngineViewIsMounted() {
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
-        g_isScreenOn = !mode;
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
+        // 【核心修复 1】：删除 iOS 16 下此方法对壁纸引擎的干扰！
+        // AOD 期间系统会频繁调用此方法，导致引擎反复重置。
+        // 现在将亮息屏的控制权 100% 交给更底层的 SBBacklightController 和 AODTransition，彻底根除闪回干扰。
         if (mode) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
         } else {
