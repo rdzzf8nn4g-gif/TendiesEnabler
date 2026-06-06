@@ -246,6 +246,8 @@ static NSString *g_zonePath = nil;
 // 视觉状态标识
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
+// 【修复核心】：加入AOD三元状态追踪 (0=黑屏, 1=亮屏, 2=全天候AOD)
+static NSInteger g_currentBacklightState = 1; 
 
 static double g_resolutionFactor = 1.0;
 static double g_lastTickProgress = -1; 
@@ -942,7 +944,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
-    if ([self.currentState isEqualToString:stateName]) return;
+    
+    // 【修复核心】：解除防御拦截。
+    // 如果是无动画强制刷新（通常来自AOD完成时的强制定格），即使状态相同也必须放行，以强写 Model 层抵抗系统底层回滚！
+    if ([self.currentState isEqualToString:stateName] && animated) return; 
+    
     self.currentState = [stateName copy];
     
     if (animated) {
@@ -1575,7 +1581,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
-    if ([self.currentState isEqualToString:stateName]) return;
+    
+    // 【修复核心】：解除防御拦截。
+    // 如果是无动画强制刷新（通常来自AOD完成时的强制定格），即使状态相同也必须放行，以强写 Model 层抵抗系统底层回滚！
+    if ([self.currentState isEqualToString:stateName] && animated) return; 
+    
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -2217,42 +2227,17 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = !mode;
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
-        if (mode) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        }
-    }
+    // 【修复核心】：移除与 SBBacklightController 抢夺状态的冲突代码，解决亮屏动画反转。
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = YES;
-        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-    }
+    // 同上，已完全移交 SBBacklightController 统一调度
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = !inactive;
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
-        if (inactive) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        }
-    }
+    // 同上，已完全移交 SBBacklightController 统一调度
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2332,20 +2317,22 @@ static void EnsureEngineViewIsMounted() {
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
+        if (state != g_currentBacklightState) {
+            g_currentBacklightState = state;
+            g_isScreenOn = (state == 1); // 兼容原版旧逻辑
             g_lastTickProgress = -1; 
             
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
+            NSString *zoneState = @"Init";
+            if (state == 1) { // 1 = 彻底亮屏
+                zoneState = g_isUnlocked ? @"Unlock" : @"Locked";
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
+            } else if (state == 2 || state == 0) { // 2 = AOD暗化, 0 = 彻底黑屏
+                zoneState = @"Sleep";
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
+            
+            // 【阶段一】：状态将要切换。此时屏幕开始变暗/变亮，我们发起带有流畅过渡时间的常规动画！
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
     }
@@ -2353,22 +2340,22 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
-            
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
+        // 二重同步，防止被越过
+        g_currentBacklightState = state;
+        g_isScreenOn = (state == 1);
+        
+        NSString *zoneState = @"Init";
+        if (state == 1) { 
+            zoneState = g_isUnlocked ? @"Unlock" : @"Locked";
+        } else if (state == 2 || state == 0) { 
+            zoneState = @"Sleep";
         }
+        
+        // 【阶段二】：AOD 致命修复！状态彻底完成，系统即将锁死渲染树并进入 1Hz 功耗。
+        // 此时系统大概率会强杀刚才在阶段一发起的隐式动画。
+        // 为此，我们在此刻必须补发一次 `animated:NO`，瞬间、强势地将 Layer 的 Model 值定死在终点！抵抗系统回滚！
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @NO}];
     }
 }
 %end
