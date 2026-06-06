@@ -436,6 +436,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
                 // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
+                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
                         [self playVideo];
@@ -463,10 +464,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } @catch (NSException *e) {}
 
     // 【🚨防定格修复2：重新牵手硬件解码器🚨】
+    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
     if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
     }
 
+    // 无视 status，暴力执行 play
     [self.player play];
 }
 
@@ -491,7 +494,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.looper = nil;
     }
     if (self.playerLayer) {
-        self.playerLayer.player = nil; 
+        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation 引用
         [self.playerLayer removeFromSuperlayer];
         self.playerLayer = nil;
     }
@@ -919,10 +922,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【核心修复：隔离 AOD 与假进度】
-    // 息屏后，系统必定会强行刷入各种假进度，必须彻底屏蔽！
+    // 【核心修复：绝对屏蔽息屏状态下的假进度干扰】
+    // 当屏幕关闭，或者当前状态为 Sleep 时，系统发送的 progress（如 0.0）会强行将壁纸重置为 Locked！
+    // 只要处于息屏状态，屏蔽一切滑动操作。
     if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return; 
     
+    // 用户正常滑动时，立刻打断挂起的自动动画标识，交还给手动进度
     if (self.isAnimatingState) {
         self.isAnimatingState = NO;
     }
@@ -946,6 +951,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
+    
+    NSString *prevState = self.currentState;
     self.currentState = [stateName copy];
     
     if (animated) {
@@ -957,6 +964,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 self.isAnimatingState = NO;
             }
         });
+        
+        // 【核心修复：AOD 状态无缝衔接】
+        // 当进入息屏，或者从息屏唤醒时，强制注入显式动画，完美覆盖系统底层断层行为
+        if ([stateName isEqualToString:@"Sleep"] || [prevState isEqualToString:@"Sleep"]) {
+            [self applyExplicitState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:YES];
+            [self applyExplicitState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:YES];
+            [self applyExplicitState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:YES];
+        }
     } else {
         [self ensureAllLayerMaps];
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -968,12 +983,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
             [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
         }
-    }
-    
-    if ([stateName isEqualToString:@"Sleep"]) {
-        [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:animated];
-        [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
+        
+        if ([stateName isEqualToString:@"Sleep"]) {
+            [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+            [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+            [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+        }
     }
     
     [CATransaction begin];
@@ -1327,19 +1342,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
-
-// 👇【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 👇
-@property (nonatomic, strong) CADisplayLink *manualAnimLink;
-@property (nonatomic, assign) double manualAnimStartTime;
-@property (nonatomic, strong) NSMutableArray *manualAnimTasks;
-@property (nonatomic, copy) NSString *manualTargetState;
-@property (nonatomic, assign) BOOL manualIsDark;
-// 👆 新增结束 👆
-
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 - (void)lockSolidBackground;
-- (void)startManualDisplayLinkTransitionToState:(NSString *)stateName previousState:(NSString *)prevState isDark:(BOOL)isDark;
 @end
 
 @implementation ZoneRenderEngineEnhanced
@@ -1380,10 +1385,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-- (void)dealloc { 
-    [[NSNotificationCenter defaultCenter] removeObserver:self]; 
-    if (_manualAnimLink) { [_manualAnimLink invalidate]; _manualAnimLink = nil; }
-}
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
@@ -1568,150 +1570,16 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction commit];
 }
 
-// ========================================================
-// 【全天候终极修复】：完全脱离 CAAnimation 的纯手写逐帧插值引擎
-// ========================================================
-- (void)startManualDisplayLinkTransitionToState:(NSString *)stateName previousState:(NSString *)prevState isDark:(BOOL)isDark {
-    if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
-    self.manualAnimTasks = [NSMutableArray array];
-    self.manualTargetState = stateName;
-    self.manualIsDark = isDark;
-    
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    
-    // 【核心修复】：获取上一个状态的真实映射名，用于作为强杀后的保底起点
-    NSString *realCurrentBgState = [self.bgParser resolveRealStateNameFor:prevState isDark:isDark] ?: prevState;
-    NSString *realCurrentFloatState = [self.floatParser resolveRealStateNameFor:prevState isDark:isDark] ?: prevState;
-    NSString *realCurrentFgState = [self.fgParser resolveRealStateNameFor:prevState isDark:isDark] ?: prevState;
-    
-    void (^buildTasks)(ZoneCAMLParserEnhanced *, NSDictionary *, NSString *, NSString *) = ^(ZoneCAMLParserEnhanced *parser, NSDictionary *layerMap, NSString *realTargetState, NSString *realCurrentState) {
-        if (!parser || layerMap.count == 0) return;
-        for (NSString *targetId in parser.statesData) {
-            CALayer *layer = layerMap[targetId]; if (!layer) continue;
-            NSDictionary *targetVals = parser.statesData[targetId][realTargetState];
-            NSDictionary *currentVals = parser.statesData[targetId][realCurrentState];
-            if (!targetVals) continue;
-            
-            for (NSString *keyPath in targetVals) {
-                id endVal = targetVals[keyPath];
-                id startVal = nil;
-                
-                // 🚨【核心修复 1：AOD 亮屏起点强行纠偏】
-                // 如果上一个是 Sleep（比如亮屏瞬间），绝对不能信赖系统的 Layer，因为它已经被 AOD 强杀！
-                // 必须强制从 Parser 的 XML 数据源里提取 Sleep 状态的值作为动画起点！
-                if ([prevState isEqualToString:@"Sleep"] && currentVals[keyPath]) {
-                    startVal = currentVals[keyPath];
-                } else {
-                    // 正常情况，依然优先抓取 Presentation Layer 实现丝滑的半路打断反弹
-                    startVal = [[layer presentationLayer] ?: layer valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
-                }
-                
-                if (startVal && endVal) {
-                    [layer removeAnimationForKey:keyPath]; // 瞬间杀掉系统原生 CAAnimation
-                    [self.manualAnimTasks addObject:@{ @"layer": layer, @"keyPath": keyPath, @"start": startVal, @"end": endVal }];
-                }
-            }
-        }
-    };
-    
-    buildTasks(self.bgParser, self.bgLayerMap, realBgState, realCurrentBgState);
-    buildTasks(self.floatParser, self.floatLayerMap, realFloatState, realCurrentFloatState);
-    buildTasks(self.fgParser, self.fgLayerMap, realFgState, realCurrentFgState);
-    
-    if (self.manualAnimTasks.count > 0) {
-        self.manualAnimStartTime = CACurrentMediaTime();
-        self.manualAnimLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(manualTick:)];
-        [self.manualAnimLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    } else {
-        [self completeManualTransition];
-    }
-}
-
-- (void)manualTick:(CADisplayLink *)link {
-    double duration = (g_animDuration > 0) ? g_animDuration : 0.85;
-    double progress = (CACurrentMediaTime() - self.manualAnimStartTime) / duration;
-    if (progress >= 1.0) progress = 1.0;
-    
-    // 模拟苹果原生的 EaseInOut 缓动曲线
-    double easedProgress = progress * progress * (3.0 - 2.0 * progress);
-    
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    for (NSDictionary *task in self.manualAnimTasks) {
-        CALayer *layer = task[@"layer"];
-        NSString *keyPath = task[@"keyPath"];
-        id startVal = task[@"start"];
-        id endVal = task[@"end"];
-        
-        @try {
-            if ([startVal isKindOfClass:[NSNumber class]] && [endVal isKindOfClass:[NSNumber class]]) {
-                double s = [startVal doubleValue];
-                double e = [endVal doubleValue];
-                [layer setValue:@(s + (e - s) * easedProgress) forKeyPath:keyPath];
-            } else if ([startVal isKindOfClass:[NSValue class]] && [endVal isKindOfClass:[NSValue class]]) {
-                CGPoint s = [startVal CGPointValue];
-                CGPoint e = [endVal CGPointValue];
-                [layer setValue:[NSValue valueWithCGPoint:CGPointMake(s.x + (e.x - s.x) * easedProgress, s.y + (e.y - s.y) * easedProgress)] forKeyPath:keyPath];
-            }
-        } @catch (NSException *e) {}
-    }
-    [CATransaction commit];
-    
-    if (progress >= 1.0) [self completeManualTransition];
-}
-
-- (void)completeManualTransition {
-    if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
-    self.manualAnimTasks = nil;
-    self.isAnimatingState = NO;
-    
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    
-    // 1. 让系统包视图自己同步内部状态（必须有，否则内部状态机断层）
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:realBgState animated:NO]; 
-        [self.floatingView setState:realFloatState animated:NO]; 
-        [self.fgView setState:realFgState animated:NO];
-    } else {
-        [self.bgView setState:realBgState]; 
-        [self.floatingView setState:realFloatState]; 
-        [self.fgView setState:realFgState];
-    }
-    
-    // 🚨【核心修复 2：绝不妥协的终极定格】
-    // 由于上面 setState 极有可能被 iOS 的 CAStateController 暗中重置图层，
-    // 我们必须在同一个 Transaction 事务内，强制用 Parser 解析出来的最终值再覆盖一遍！
-    // 这样屏幕渲染呈现的绝对是我们手写动画的最终帧，彻底断绝反弹和闪烁！
-    [self applyExplicitState:self.manualTargetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-    [self applyExplicitState:self.manualTargetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-    [self applyExplicitState:self.manualTargetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-    
-    [CATransaction commit];
-}
-
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 🚨【核心修复 3：系统假进度拦截网】
-    // 当屏幕关闭，或者当前状态被设定为休眠(Sleep)时，系统发来的所有 Progress(通常是0.0) 均为假信号，必须绝对拦截！
-    // 否则会导致息屏动画结束后，图层被假进度瞬间扯回 Locked 状态。
-    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return;
+    // 【核心修复：绝对屏蔽息屏状态下的假进度干扰】
+    // 当屏幕关闭，或者当前状态为 Sleep 时，系统发送的 progress（如 0.0）会强行将壁纸重置为 Locked！
+    // 只要处于息屏状态，屏蔽一切滑动操作。
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    // ⚡️【核心交互优化】：响应用户滑动立刻接管
-    // 如果当前正在执行“亮屏动画”，此时用户急着滑了屏幕，立刻打断定时器并交还控制权给手势进度！
+    // 用户正常滑动时，立刻打断挂起的自动动画标识，交还给手动进度
     if (self.isAnimatingState) {
-        if (self.manualAnimLink) {
-            [self.manualAnimLink invalidate];
-            self.manualAnimLink = nil;
-        }
-        self.manualAnimTasks = nil;
         self.isAnimatingState = NO;
     }
     
@@ -1747,10 +1615,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     if (animated) {
         self.animationGeneration++;
+        NSInteger currentGen = self.animationGeneration;
         self.isAnimatingState = YES;
-        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
-        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
-        [self startManualDisplayLinkTransitionToState:stateName previousState:prevState isDark:isDark];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(g_animDuration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.animationGeneration == currentGen) {
+                self.isAnimatingState = NO;
+            }
+        });
+        
+        // 【核心修复：AOD 状态无缝衔接】
+        // 当进入息屏，或者从息屏唤醒时，强制注入显式动画，完美覆盖系统底层断层行为
+        if ([stateName isEqualToString:@"Sleep"] || [prevState isEqualToString:@"Sleep"]) {
+            [self applyExplicitState:stateName parser:self.bgParser layerMap:self.bgLayerMap animated:YES];
+            [self applyExplicitState:stateName parser:self.floatParser layerMap:self.floatLayerMap animated:YES];
+            [self applyExplicitState:stateName parser:self.fgParser layerMap:self.fgLayerMap animated:YES];
+        }
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
             [self applyProgress:1.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
@@ -1767,26 +1646,29 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
         }
-        
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:realBgState animated:NO]; 
-            [self.floatingView setState:realFloatState animated:NO]; 
-            [self.fgView setState:realFgState animated:NO];
-        } else {
-            [self.bgView setState:realBgState]; 
-            [self.floatingView setState:realFloatState]; 
-            [self.fgView setState:realFgState];
-        }
-        [CATransaction commit];
     }
+    
+    [CATransaction begin];
+    if (!animated) {
+        [CATransaction setDisableActions:YES];
+    } else {
+        [CATransaction setAnimationDuration:g_animDuration];
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    }
+    
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:realBgState animated:animated]; 
+        [self.floatingView setState:realFloatState animated:animated]; 
+        [self.fgView setState:realFgState animated:animated];
+    } else {
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
+    }
+    [CATransaction commit];
 }
 
 - (void)clearCurrentViewsSafely {
-    if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
-    self.manualAnimTasks = nil;
-    
     [self.bgView removeFromSuperview]; self.bgView = nil;
     [self.floatingView removeFromSuperview]; self.floatingView = nil;
     [self.fgView removeFromSuperview]; self.fgView = nil;
