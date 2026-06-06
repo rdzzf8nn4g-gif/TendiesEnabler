@@ -436,7 +436,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
                 // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
-                // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
                         [self playVideo];
@@ -464,12 +463,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     } @catch (NSException *e) {}
 
     // 【🚨防定格修复2：重新牵手硬件解码器🚨】
-    // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
     if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
     }
 
-    // 无视 status，暴力执行 play
     [self.player play];
 }
 
@@ -494,7 +491,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.looper = nil;
     }
     if (self.playerLayer) {
-        self.playerLayer.player = nil; // 强行剥离图层对播放器的底层 CoreAnimation引用
+        self.playerLayer.player = nil; 
         [self.playerLayer removeFromSuperlayer];
         self.playerLayer = nil;
     }
@@ -921,9 +918,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    self.isAnimatingState = NO;
+    // 【核心修复：隔离 AOD 与假进度】
+    // 息屏后，系统必定会强行刷入各种假进度，必须彻底屏蔽！
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return; 
+    
+    if (self.isAnimatingState) {
+        self.isAnimatingState = NO;
+    }
+    
     self.animationGeneration++;
     
     double progress = [note.userInfo[@"progress"] doubleValue];
@@ -1578,7 +1581,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
-    // 【新增】：获取上一个状态的真实映射名，用于作为强杀后的保底起点
+    // 【核心修复】：获取上一个状态的真实映射名，用于作为强杀后的保底起点
     NSString *realCurrentBgState = [self.bgParser resolveRealStateNameFor:prevState isDark:isDark] ?: prevState;
     NSString *realCurrentFloatState = [self.floatParser resolveRealStateNameFor:prevState isDark:isDark] ?: prevState;
     NSString *realCurrentFgState = [self.fgParser resolveRealStateNameFor:prevState isDark:isDark] ?: prevState;
@@ -1595,8 +1598,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 id endVal = targetVals[keyPath];
                 id startVal = nil;
                 
-                // 【核心修复 1：AOD 亮屏起点纠偏】
-                // 如果上一个引擎状态是 Sleep（正准备亮屏），绝对不能信赖系统的 Layer，因为它已经被 AOD 机制强杀了！
+                // 🚨【核心修复 1：AOD 亮屏起点强行纠偏】
+                // 如果上一个是 Sleep（比如亮屏瞬间），绝对不能信赖系统的 Layer，因为它已经被 AOD 强杀！
                 // 必须强制从 Parser 的 XML 数据源里提取 Sleep 状态的值作为动画起点！
                 if ([prevState isEqualToString:@"Sleep"] && currentVals[keyPath]) {
                     startVal = currentVals[keyPath];
@@ -1664,28 +1667,54 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
+    
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     
-    // 【核心修复 2：暴力钉死底层 Model Layer】
-    // 强制用我们的 Parser 将终点值死死烙印在图层上
+    // 1. 让系统包视图自己同步内部状态（必须有，否则内部状态机断层）
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:realBgState animated:NO]; 
+        [self.floatingView setState:realFloatState animated:NO]; 
+        [self.fgView setState:realFgState animated:NO];
+    } else {
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
+    }
+    
+    // 🚨【核心修复 2：绝不妥协的终极定格】
+    // 由于上面 setState 极有可能被 iOS 的 CAStateController 暗中重置图层，
+    // 我们必须在同一个 Transaction 事务内，强制用 Parser 解析出来的最终值再覆盖一遍！
+    // 这样屏幕渲染呈现的绝对是我们手写动画的最终帧，彻底断绝反弹和闪烁！
     [self applyExplicitState:self.manualTargetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
     [self applyExplicitState:self.manualTargetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-    
-    // 🚨 【核心修复 3：直接删除了 BSUICAPackageView 的 setState 调用！】
-    // 绝对不要在这里调 [self.bgView setState:]。
-    // 在 Enhanced 引擎下，视觉状态已经完全由你的 manualTick 和 applyExplicitState 接管。
-    // 调用自带的 setState 会触发底层 CAStateController 的内部流转，这是导致你息屏动画播完后瞬间归位的唯一罪魁祸首！
     
     [CATransaction commit];
 }
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    self.isAnimatingState = NO;
+    // 🚨【核心修复 3：系统假进度拦截网】
+    // 当屏幕关闭，或者当前状态被设定为休眠(Sleep)时，系统发来的所有 Progress(通常是0.0) 均为假信号，必须绝对拦截！
+    // 否则会导致息屏动画结束后，图层被假进度瞬间扯回 Locked 状态。
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return;
+    
+    // ⚡️【核心交互优化】：响应用户滑动立刻接管
+    // 如果当前正在执行“亮屏动画”，此时用户急着滑了屏幕，立刻打断定时器并交还控制权给手势进度！
+    if (self.isAnimatingState) {
+        if (self.manualAnimLink) {
+            [self.manualAnimLink invalidate];
+            self.manualAnimLink = nil;
+        }
+        self.manualAnimTasks = nil;
+        self.isAnimatingState = NO;
+    }
+    
     self.animationGeneration++;
     
     double progress = [note.userInfo[@"progress"] doubleValue];
@@ -1705,6 +1734,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
+    
     NSString *prevState = self.currentState; // 核心：记录动画发生前上一个状态
     self.currentState = [stateName copy];
     
