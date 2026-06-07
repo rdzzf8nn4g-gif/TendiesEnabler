@@ -1715,9 +1715,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     if (!g_isScreenOn || g_isAODInactive) return;
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    self.isAnimatingState = NO;
+    // 【核心修复 2】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
+    // 绝对禁止系统传来的 1.0 或 0.0 progress 打断动画！彻底解决亮屏瞬间画面被强拉到终点的问题。
+    if (self.isAnimatingState) return; 
+
     self.animationGeneration++;
     
     double progress = [note.userInfo[@"progress"] doubleValue];
@@ -2061,7 +2063,6 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：增加 Reachability，只要触发降半屏，立刻拦截并恢复系统原生壁纸
         if ([className containsString:@"SceneView"] || 
             [className containsString:@"AppContainer"] ||
             [className containsString:@"Folder"] || 
@@ -2070,7 +2071,6 @@ static void EnsureEngineViewIsMounted() {
             return NO; 
         }
         
-        // 2. 核心白名单：去掉 Reachability，保持桌面、锁屏、多任务的自定义壁纸显示
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
@@ -2087,6 +2087,7 @@ static void EnsureEngineViewIsMounted() {
     if (!g_enabled) {
         self.hidden = NO;
         self.alpha = 1.0;
+        self.layer.opacity = 1.0;
         return;
     }
 
@@ -2097,7 +2098,6 @@ static void EnsureEngineViewIsMounted() {
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
         BOOL hide = NO;
         
-        // 如果锁屏和桌面都有视频，全局隐藏原生壁纸
         if (IsSingleVideoMode() || (hasLock && hasHome)) {
             hide = YES;
         } else {
@@ -2105,7 +2105,6 @@ static void EnsureEngineViewIsMounted() {
             if ([self respondsToSelector:@selector(variant)]) {
                 variant = (long long)[self performSelector:@selector(variant)];
             }
-            // 解决降半屏、左滑负一屏闪烁原壁纸问题：0是锁屏，其他(1, 2等)全部判定为桌面！
             if (variant == 0) {
                 hide = hasLock;
             } else {
@@ -2114,42 +2113,44 @@ static void EnsureEngineViewIsMounted() {
         }
         self.hidden = hide;
         self.alpha = hide ? 0.0 : 1.0;
+        self.layer.opacity = hide ? 0.0 : 1.0; // 【核心修复 4】：暴力绑定底层图层不透明度
     } else {
         self.hidden = YES;
         self.alpha = 0.0;
+        self.layer.opacity = 0.0;
     }
 }
 
 - (void)setAlpha:(double)alpha {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(0.0); return; }
+        if (!g_isVideoMode) { %orig(0.0); self.layer.opacity = 0.0; return; }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(0.0); return; }
+        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(0.0); self.layer.opacity = 0.0; return; }
         
         long long variant = 1;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
         
-        if (variant == 0 && hasLock) { %orig(0.0); return; }
-        if (variant != 0 && hasHome) { %orig(0.0); return; }
+        if (variant == 0 && hasLock) { %orig(0.0); self.layer.opacity = 0.0; return; }
+        if (variant != 0 && hasHome) { %orig(0.0); self.layer.opacity = 0.0; return; }
     }
     %orig;
 }
 
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(YES); return; }
+        if (!g_isVideoMode) { %orig(YES); self.layer.opacity = 0.0; return; }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(YES); return; }
+        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(YES); self.layer.opacity = 0.0; return; }
         
         long long variant = 1;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
         
-        if (variant == 0 && hasLock) { %orig(YES); return; }
-        if (variant != 0 && hasHome) { %orig(YES); return; }
+        if (variant == 0 && hasLock) { %orig(YES); self.layer.opacity = 0.0; return; }
+        if (variant != 0 && hasHome) { %orig(YES); self.layer.opacity = 0.0; return; }
     }
     %orig;
 }
@@ -2430,22 +2431,8 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
-    if (!g_isScreenOn || g_isAODInactive) {
-        g_lastSystemProgress = progress;
-        return;
-    }
-
-    double delta = progress - g_lastSystemProgress;
-    g_lastSystemProgress = progress;
-
-    if (ABS(delta) > 0.15) {
-        return;
-    }
-
-    EnsureEngineViewIsMounted();
-
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-
+    // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
+    // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -2470,6 +2457,22 @@ static void EnsureEngineViewIsMounted() {
             [CATransaction commit];
         }
     }
+
+    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
+    if (!g_isScreenOn || g_isAODInactive) {
+        g_lastSystemProgress = progress;
+        return;
+    }
+
+    double delta = progress - g_lastSystemProgress;
+    g_lastSystemProgress = progress;
+
+    if (ABS(delta) > 0.15) {
+        return;
+    }
+
+    EnsureEngineViewIsMounted();
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
 }
 %end
 
