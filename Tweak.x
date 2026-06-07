@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h> 
+#include <sys/stat.h>  // 👈 新增这一行解决 chmod 报错
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
