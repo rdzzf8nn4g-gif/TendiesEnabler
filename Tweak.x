@@ -252,7 +252,7 @@ static double g_lastTickProgress = -1;
 static BOOL old_hideTextShadow = NO; 
 
 // ==========================================
-// 实时调试日志系统 (绕过沙盒增强版)
+// 实时调试日志系统 (绕过沙盒增强版 - 修复编译报错)
 // ==========================================
 static void ZoneLog(NSString *format, ...) {
     if (!format) return;
@@ -261,10 +261,10 @@ static void ZoneLog(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
-    // 1. 发送到 iOS 系统原生日志 (兜底方案，绝对不会失败)
+    // 1. 发送到 iOS 系统原生日志 (兜底方案)
     NSLog(@"[ZoneTweak] %@", message);
 
-    // 2. 写入文件 (改写到 /tmp 目录，避开 Documents 沙盒限制)
+    // 2. 写入文件
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
         NSString *logPath = @"/tmp/zone_debug.log";
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
@@ -275,8 +275,8 @@ static void ZoneLog(NSString *format, ...) {
         NSFileManager *fm = [NSFileManager defaultManager];
         if (![fm fileExistsAtPath:logPath]) {
             [@"=== ZONE ENGINE AOD DEBUG LOG ===\n" writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            // 强行赋予所有用户读写权限
-            chmod([logPath UTF8String], 0666); 
+            // 🚨 核心修复：使用纯 OC 方式赋予权限，完美避开 chmod 编译错误
+            [fm setAttributes:@{NSFilePosixPermissions: @0666} ofItemAtPath:logPath error:nil];
         }
 
         NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
@@ -285,12 +285,7 @@ static void ZoneLog(NSString *format, ...) {
             [fileHandle writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
             [fileHandle closeFile];
         } else {
-            NSError *err = nil;
-            [logLine writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:&err];
-            if (err) {
-                // 如果文件依然写不进去，会在系统日志里报错
-                NSLog(@"[ZoneTweak] 写入日志文件失败: %@", err);
-            }
+            [logLine writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
     });
 }
