@@ -783,6 +783,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
+    NSLog(@"[ZONE_DEBUG] [Legacy引擎] 收到状态切换通知 -> 目标: %@, 当前: %@, 屏幕亮: %d", state, self.currentState, g_isScreenOn);
+    
     if (state) {
         [self transitionToState:state animated:animated];
     }
@@ -922,9 +924,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【🚨 终极护盾 1】：只要当前是息屏 (Sleep) 状态，或者屏幕没亮，
-    // 绝对免疫一切进度干扰！防止底层状态被系统的幽灵进度篡改。
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    NSLog(@"[ZONE_DEBUG] [Legacy引擎] 收到进度: %f, 当前状态: %@, 屏幕点亮: %d", progress, self.currentState, g_isScreenOn);
+    
+    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！防止被幽灵进度篡改状态。
     if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
+        NSLog(@"[ZONE_DEBUG] [Legacy引擎] 拦截！当前处于Sleep或未亮屏，拒绝进度覆写图层！");
         return;
     }
 
@@ -933,7 +938,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
-    double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
@@ -1378,6 +1382,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
+    NSLog(@"[ZONE_DEBUG] [Enhanced引擎] 收到状态切换通知 -> 目标: %@, 当前: %@, 屏幕亮: %d", state, self.currentState, g_isScreenOn);
+    
     if (state) {
         [self transitionToState:state animated:animated];
     }
@@ -1677,8 +1683,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【🚨 终极护盾 2】：同理，保护增强引擎的 AOD 状态绝对纯洁。
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    NSLog(@"[ZONE_DEBUG] [Enhanced引擎] 收到进度: %f, 当前状态: %@, 屏幕点亮: %d", progress, self.currentState, g_isScreenOn);
+    
+    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！防止被幽灵进度篡改状态。
     if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
+        NSLog(@"[ZONE_DEBUG] [Enhanced引擎] 拦截！当前处于Sleep或未亮屏，拒绝进度覆写图层！");
         return;
     }
 
@@ -1687,7 +1697,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
-    double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
@@ -2410,16 +2419,12 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
-    // 【🚨 终极护盾 3】：息屏全天候下，系统内部触发的任何假进度全部拦截，
-    // 防止 Portal 遮罩层在息屏时突然重置，导致透明度闪烁。
-    if (!g_isScreenOn) {
-        return;
-    }
-    
+    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
     // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
     
+    // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
     if (ABS(delta) > 0.15) {
         return; 
     }
@@ -2429,7 +2434,6 @@ static void EnsureEngineViewIsMounted() {
     // 直接分发，不要用异步（保证绝对跟手的无延迟感）
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
     
-    // 👇👇你的下滑透明度逻辑完全原封不动保留👇👇
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
