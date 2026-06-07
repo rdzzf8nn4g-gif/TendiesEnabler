@@ -1280,7 +1280,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *keyword = logicalState;
     if ([logicalState isEqualToString:@"Unlock"]) keyword = @"Home"; 
     if ([logicalState isEqualToString:@"Locked"]) keyword = @"Lock";
-    // 【修复 AOD 闪回问题 4/4】: 映射原生 AOD 命名
     if ([logicalState isEqualToString:@"Sleep"]) keyword = @"AOD";
     
     NSMutableArray *candidates = [NSMutableArray array];
@@ -1294,7 +1293,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 continue; 
             }
         }
-        // 增加拦截，让 Sleep 精准匹配到 AOD 相关的状态
+        // 【向下兼容 AOD 与 Sleep 复合命名】
         if ([lowerLogic isEqualToString:@"sleep"]) {
             if ([lowerState containsString:@"sleep"] || [lowerState containsString:@"aod"] || [lowerState containsString:@"alwayson"] || [lowerState containsString:@"dim"]) {
                 [candidates addObject:state];
@@ -1398,8 +1397,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
             NSString *savedState = [self.currentState copy];
             self.currentState = nil; 
-            // 【修复 AOD 闪回问题 3/4】: AOD触发时系统强制切换深色模式，必须用 animated:NO 瞬间同步数值，避免打断当前手写的 CADisplayLink 动画！
-            [self transitionToState:savedState animated:NO]; 
+            // 【恢复原版】：使用 animated:YES，彻底修复 AOD 黑屏后才出图、以及进入桌面壁纸凭空消失的毁灭性 Bug
+            [self transitionToState:savedState animated:YES]; 
         }
     }
 }
@@ -1682,14 +1681,25 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【修复 AOD 闪回问题 1/4】: 只要处于息屏/AOD 状态，绝对屏蔽系统的假进度干扰！
-    if ([self.currentState isEqualToString:@"Sleep"]) return;
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    progress = MAX(0.0, MIN(1.0, progress));
+
+    // 【终极防御 1：保护全天候 AOD 定格】
+    // 只有在屏幕处于息屏/AOD状态，且引擎确实在 Sleep 时，才抛弃底层强加的进度，防止锁屏画面回弹
+    if (!g_isScreenOn && [self.currentState isEqualToString:@"Sleep"]) {
+        return;
+    }
+
+    // 【终极防御 2：保护手动 CADisplayLink 唤醒/息屏动画】
+    // 允许真正的滑动(如0.05, 0.5等)打断动画，但屏蔽系统在动画期间发来的 0.0 或 1.0 的“死值”对齐信号！
+    if (self.isAnimatingState) {
+        if ([self.currentState isEqualToString:@"Sleep"]) return;
+        if ([self.currentState isEqualToString:@"Locked"] && progress <= 0.05) return;
+        if ([self.currentState isEqualToString:@"Unlock"] && progress >= 0.95) return;
+    }
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
-    
-    double progress = [note.userInfo[@"progress"] doubleValue];
-    progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -2411,24 +2421,17 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
-    // 【修复 AOD 闪回问题 2/4】: 只要屏幕处于 AOD 或息屏状态，彻底切断系统发出的锁屏重置进度！
-    if (!g_isScreenOn) return;
-    
-    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
-    
-    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
-    // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
+    // 【恢复原版：纯跳跃过滤器 (Delta Filter)】
+    // 专门对付系统为实现模糊而发出的巨大假进度跳跃。完美兼容下拉锁屏与日常交互！
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
     
-    // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
     if (ABS(delta) > 0.15) {
         return; 
     }
     
     EnsureEngineViewIsMounted();
     
-    // 直接分发，不要用异步（保证绝对跟手的无延迟感）
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
     
     if (g_portalView) {
