@@ -274,6 +274,10 @@ static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
 static NSString *g_lastEmittedWallpaperState = nil;
 static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
 
+static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
+    return (state == 0 || state == 1);
+}
+
 static inline void ZoneEmitScreenEvent(BOOL screenOn) {
     CFTimeInterval now = CACurrentMediaTime();
     if (g_lastEmittedScreenState && g_lastEmittedScreenStateTime > 0.0 &&
@@ -295,6 +299,10 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     }
     if (!screenOn) {
         finalState = @"Sleep";
+    }
+
+    if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
+        return;
     }
 
     CFTimeInterval now = CACurrentMediaTime();
@@ -970,6 +978,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    if (!g_isScreenOn || g_isAODInactive) return;
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -1718,6 +1727,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    if (!g_isScreenOn || g_isAODInactive) return;
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -2364,11 +2374,11 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// ✅ 完全以锁屏UI的真实视觉状态为唯一基准，抛弃 FaceID 状态的干扰
+// 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn) {
+    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         ZoneEmitWallpaperState(YES, state, YES);
     }
@@ -2433,10 +2443,15 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
+    if (!g_isScreenOn || g_isAODInactive) {
+        g_lastSystemProgress = progress;
+        return;
+    }
+
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
 
-    if (ABS(delta) > 0.15 && g_isScreenOn) {
+    if (ABS(delta) > 0.15) {
         return;
     }
 
@@ -2475,6 +2490,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled && !g_isVideoMode) {
+        if (!ZoneIsDefinitiveBacklightState(state)) return;
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
@@ -2490,6 +2506,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
     if (g_enabled && !g_isVideoMode) {
+        if (!ZoneIsDefinitiveBacklightState(state)) return;
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
