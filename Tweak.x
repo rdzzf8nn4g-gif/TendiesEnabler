@@ -1706,23 +1706,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    
-    // 动画跑到终点后，无动画同步一次 packageView 内部状态，防止状态脱节
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:realBgState animated:NO]; 
-        [self.floatingView setState:realFloatState animated:NO]; 
-        [self.fgView setState:realFgState animated:NO];
-    } else {
-        [self.bgView setState:realBgState]; 
-        [self.floatingView setState:realFloatState]; 
-        [self.fgView setState:realFgState];
-    }
-    [CATransaction commit];
+    // 【核心修复 1】：删掉原有的 setState:animated:NO
+    // 因为我们纯手写的 CADisplayLink 已经把每一帧插值到了绝对终点！
+    // 如果这里再去调用系统的 setState，CAStateController 会强行刷新并打断图层，导致最后一张图“直接闪出来”。
+    // 删掉后，动画将完美、丝滑地定格在最后一帧。
 }
 
 - (void)onProgress:(NSNotification *)note {
