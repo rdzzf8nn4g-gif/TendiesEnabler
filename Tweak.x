@@ -989,9 +989,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
     [CATransaction commit];
-    if ([self.manualTargetState isEqualToString:@"Sleep"]) {
-        [self lockSolidBackground];
-    }
 }
 
 - (void)onProgress:(NSNotification *)note {
