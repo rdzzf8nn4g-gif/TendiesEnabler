@@ -243,38 +243,6 @@ static BOOL g_hideTextShadow = NO;
 static BOOL g_lowPowerPause = NO; 
 static NSString *g_zonePath = nil;
 
-// ==========================================
-// 物理文件级强力日志器 (百分百不丢日志)
-// ==========================================
-static void ZoneLog(NSString *format, ...) {
-    if (!format) return;
-    va_list args;
-    va_start(args, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    
-    // 生成时间戳
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:@"HH:mm:ss.SSS"];
-    NSString *timeStr = [formatter stringFromDate:[NSDate date]];
-    NSString *finalLog = [NSString stringWithFormat:@"[%@] %@\n", timeStr, message];
-    
-    // 保存到设备文件路径
-    NSString *logPath = @"/var/mobile/Documents/zone_debug.log";
-#if __has_include(<roothide.h>)
-    logPath = jbroot(logPath);
-#endif
-    
-    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
-    if (fileHandle) {
-        [fileHandle seekToEndOfFile];
-        [fileHandle writeData:[finalLog dataUsingEncoding:NSUTF8StringEncoding]];
-        [fileHandle closeFile];
-    } else {
-        [finalLog writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
 // 视觉状态标识
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
@@ -815,7 +783,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
-    ZoneLog(@"[Legacy-状态] 收到切换指令 -> 目标: %@, 当前: %@, 亮屏: %d", state, self.currentState, g_isScreenOn);
+    // 【✅ 核心修复 1：过滤矛盾的系统假指令】
+    // 没亮屏就叫我亮，或者亮着屏叫我息，绝对是系统其他Hook在乱发，直接丢弃！
+    BOOL targetIsAwake = [state isEqualToString:@"Locked"] || [state isEqualToString:@"Unlock"];
+    if (targetIsAwake && !g_isScreenOn) return; 
+    if ([state isEqualToString:@"Sleep"] && g_isScreenOn) return; 
     
     if (state) {
         [self transitionToState:state animated:animated];
@@ -956,12 +928,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    double progress = [note.userInfo[@"progress"] doubleValue];
-    ZoneLog(@"[Legacy-进度] progress: %.3f, 当前状态: %@, 亮屏: %d", progress, self.currentState, g_isScreenOn);
-    
-    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！
+    // 【✅ 核心修复 2：拦截幽灵滑动进度】
     if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
-        ZoneLog(@"[Legacy-拦截] 🛑 成功拦截幽灵进度！当前是Sleep，拒绝重置画面！");
         return;
     }
 
@@ -970,6 +938,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
+    double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
@@ -1024,14 +993,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
     }
     
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:stateName animated:animated]; 
-        [self.floatingView setState:stateName animated:animated]; 
-        [self.fgView setState:stateName animated:animated];
-    } else {
-        [self.bgView setState:stateName]; 
-        [self.floatingView setState:stateName]; 
-        [self.fgView setState:stateName];
+    // 【✅ 核心修复 3：禁止对 Sleep 状态调用 setState 导致图层重置】
+    if (![stateName isEqualToString:@"Sleep"]) {
+        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+            [self.bgView setState:stateName animated:animated]; 
+            [self.floatingView setState:stateName animated:animated]; 
+            [self.fgView setState:stateName animated:animated];
+        } else {
+            [self.bgView setState:stateName]; 
+            [self.floatingView setState:stateName]; 
+            [self.fgView setState:stateName];
+        }
     }
     [CATransaction commit];
 }
@@ -1414,7 +1386,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
-    ZoneLog(@"[Enhanced-状态] 收到切换指令 -> 目标: %@, 当前: %@, 亮屏: %d", state, self.currentState, g_isScreenOn);
+    // 【✅ 核心修复 1：过滤矛盾的系统假指令】
+    BOOL targetIsAwake = [state isEqualToString:@"Locked"] || [state isEqualToString:@"Unlock"];
+    if (targetIsAwake && !g_isScreenOn) return; 
+    if ([state isEqualToString:@"Sleep"] && g_isScreenOn) return; 
     
     if (state) {
         [self transitionToState:state animated:animated];
@@ -1697,17 +1672,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     
-    // 动画跑到终点后，无动画同步一次 packageView 内部状态，防止状态脱节
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:realBgState animated:NO]; 
-        [self.floatingView setState:realFloatState animated:NO]; 
-        [self.fgView setState:realFgState animated:NO];
-    } else {
-        [self.bgView setState:realBgState]; 
-        [self.floatingView setState:realFloatState]; 
-        [self.fgView setState:realFgState];
+    // 【✅ 核心修复 3：动画播完后，如果是 Sleep，绝对不更新 package 状态防重置】
+    if (![self.manualTargetState isEqualToString:@"Sleep"]) {
+        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+            [self.bgView setState:realBgState animated:NO]; 
+            [self.floatingView setState:realFloatState animated:NO]; 
+            [self.fgView setState:realFgState animated:NO];
+        } else {
+            [self.bgView setState:realBgState]; 
+            [self.floatingView setState:realFloatState]; 
+            [self.fgView setState:realFgState];
+        }
     }
     [CATransaction commit];
 }
@@ -1715,12 +1692,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    double progress = [note.userInfo[@"progress"] doubleValue];
-    ZoneLog(@"[Enhanced-进度] progress: %.3f, 当前状态: %@, 亮屏: %d", progress, self.currentState, g_isScreenOn);
-    
-    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！
+    // 【✅ 核心修复 2：拦截幽灵滑动进度】
     if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
-        ZoneLog(@"[Enhanced-拦截] 🛑 成功拦截幽灵进度！当前是Sleep，拒绝重置画面！");
         return;
     }
 
@@ -1729,6 +1702,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
+    double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
@@ -1757,8 +1731,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
-        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
-        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1779,14 +1751,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:realBgState animated:NO]; 
-            [self.floatingView setState:realFloatState animated:NO]; 
-            [self.fgView setState:realFgState animated:NO];
-        } else {
-            [self.bgView setState:realBgState]; 
-            [self.floatingView setState:realFloatState]; 
-            [self.fgView setState:realFgState];
+        // 【✅ 核心修复 3：非动画跳跃时，如果是 Sleep 同样跳过重置】
+        if (![stateName isEqualToString:@"Sleep"]) {
+            if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+                [self.bgView setState:realBgState animated:NO]; 
+                [self.floatingView setState:realFloatState animated:NO]; 
+                [self.fgView setState:realFgState animated:NO];
+            } else {
+                [self.bgView setState:realBgState]; 
+                [self.floatingView setState:realFloatState]; 
+                [self.fgView setState:realFgState];
+            }
         }
         [CATransaction commit];
     }
