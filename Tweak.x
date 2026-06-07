@@ -921,6 +921,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    
+    // 【🚨 终极护盾 1】：只要当前是息屏 (Sleep) 状态，或者屏幕没亮，
+    // 绝对免疫一切进度干扰！防止底层状态被系统的幽灵进度篡改。
+    if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
+        return;
+    }
+
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -1669,6 +1676,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
+    
+    // 【🚨 终极护盾 2】：同理，保护增强引擎的 AOD 状态绝对纯洁。
+    if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
+        return;
+    }
+
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -2397,12 +2410,16 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
-    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
+    // 【🚨 终极护盾 3】：息屏全天候下，系统内部触发的任何假进度全部拦截，
+    // 防止 Portal 遮罩层在息屏时突然重置，导致透明度闪烁。
+    if (!g_isScreenOn) {
+        return;
+    }
+    
     // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
     
-    // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
     if (ABS(delta) > 0.15) {
         return; 
     }
@@ -2412,6 +2429,7 @@ static void EnsureEngineViewIsMounted() {
     // 直接分发，不要用异步（保证绝对跟手的无延迟感）
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
     
+    // 👇👇你的下滑透明度逻辑完全原封不动保留👇👇
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
