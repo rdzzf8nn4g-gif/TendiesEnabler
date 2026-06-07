@@ -276,6 +276,7 @@ static NSString *g_lastEmittedScreenState = nil;
 static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
 static NSString *g_lastEmittedWallpaperState = nil;
 static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
+static CFTimeInterval g_aodWakeHoldUntil = 0.0;
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
     return (state == 0 || state == 1);
@@ -286,16 +287,19 @@ static inline void ZoneBeginAODHold(void) {
     g_isAODStateHold = YES;
     g_isAODWakePending = NO;
     g_isAODResumeProgress = NO;
+    g_aodWakeHoldUntil = 0.0;
 }
 
 static inline void ZoneArmAODWake(void) {
     g_isAODWakePending = YES;
+    g_isAODResumeProgress = YES;
 }
 
 static inline void ZoneConsumeAODWake(void) {
     g_isAODStateHold = NO;
     g_isAODWakePending = NO;
     g_isAODResumeProgress = YES;
+    g_aodWakeHoldUntil = CACurrentMediaTime() + 0.85;
 }
 
 static inline void ZoneEmitScreenEvent(BOOL screenOn) {
@@ -321,17 +325,21 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
         finalState = @"Sleep";
     }
 
+    CFTimeInterval now = CACurrentMediaTime();
     if (g_isAODStateHold) {
         if (!screenOn) {
             finalState = @"Sleep";
-        } else if (!g_isAODWakePending) {
+        } else {
             return;
         }
     } else if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
         return;
     }
 
-    CFTimeInterval now = CACurrentMediaTime();
+    if (now < g_aodWakeHoldUntil && ![finalState isEqualToString:@"Sleep"]) {
+        return;
+    }
+
     if (g_lastEmittedWallpaperState && g_lastEmittedWallpaperStateTime > 0.0 &&
         [g_lastEmittedWallpaperState isEqualToString:finalState] &&
         (now - g_lastEmittedWallpaperStateTime) < 0.20) {
@@ -344,10 +352,6 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
                                                         object:nil
                                                       userInfo:@{@"state": finalState, @"animated": @(animated)}];
-
-    if (g_isAODStateHold && screenOn && g_isAODWakePending && ![finalState isEqualToString:@"Sleep"]) {
-        ZoneConsumeAODWake();
-    }
 }
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated) {
@@ -2432,6 +2436,7 @@ static void EnsureEngineViewIsMounted() {
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         if (mode) {
             ZoneEmitScreenAndWallpaperState(NO, state, YES);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
         }
     }
 }
@@ -2447,6 +2452,7 @@ static void EnsureEngineViewIsMounted() {
         EnsureEngineViewIsMounted();
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
         ZoneEmitScreenAndWallpaperState(YES, state, YES);
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
     }
 }
 
@@ -2467,6 +2473,7 @@ static void EnsureEngineViewIsMounted() {
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         if (inactive) {
             ZoneEmitScreenAndWallpaperState(NO, state, YES);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
         }
     }
 }
@@ -2497,13 +2504,17 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
-    if (!g_isScreenOn || g_isAODInactive || g_isAODStateHold) {
+    if (!g_isScreenOn || g_isAODInactive || (g_isAODStateHold && !g_isAODWakePending)) {
         g_lastSystemProgress = progress;
         return;
     }
 
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
+
+    if (g_isAODStateHold && g_isAODWakePending) {
+        ZoneConsumeAODWake();
+    }
 
     if (ABS(delta) > 0.15 && !g_isAODResumeProgress) {
         return;
