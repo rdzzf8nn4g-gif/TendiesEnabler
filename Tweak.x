@@ -1280,27 +1280,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *keyword = logicalState;
     if ([logicalState isEqualToString:@"Unlock"]) keyword = @"Home"; 
     if ([logicalState isEqualToString:@"Locked"]) keyword = @"Lock";
-    if ([logicalState isEqualToString:@"Sleep"]) keyword = @"AOD";
     
     NSMutableArray *candidates = [NSMutableArray array];
     for (NSString *state in self.availableStates) {
         NSString *lowerState = [state lowercaseString];
         NSString *lowerLogic = [logicalState lowercaseString];
         NSString *lowerKey = [keyword lowercaseString];
-        
         if ([lowerLogic isEqualToString:@"locked"]) {
             if ([lowerState containsString:@"unlock"] || [lowerState containsString:@"home"]) {
                 continue; 
             }
         }
-        // 【向下兼容 AOD 与 Sleep 复合命名】
-        if ([lowerLogic isEqualToString:@"sleep"]) {
-            if ([lowerState containsString:@"sleep"] || [lowerState containsString:@"aod"] || [lowerState containsString:@"alwayson"] || [lowerState containsString:@"dim"]) {
-                [candidates addObject:state];
-                continue;
-            }
-        }
-        
         if ([lowerState containsString:lowerLogic] || [lowerState containsString:lowerKey]) {
             [candidates addObject:state];
         }
@@ -1395,15 +1385,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [super traitCollectionDidChange:previousTraitCollection];
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
         if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
-            // 【绝杀 1：防止进入AOD时深色模式切换打断手写息屏动画】
-            // 如果动画正在运行，绝对不允许打断，保证画面平滑过渡到最后一帧！
-            if (self.isAnimatingState || self.manualAnimLink) {
-                return;
-            }
-            
             NSString *savedState = [self.currentState copy];
             self.currentState = nil; 
-            [self transitionToState:savedState animated:NO]; 
+            [self transitionToState:savedState animated:YES]; 
         }
     }
 }
@@ -1664,36 +1648,43 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    // 【绝杀 2：废除破坏性的 BSUICAPackageView 原生 setState:】
-    // 我们的 CADisplayLink 已经将图层完美定格，此时调用系统的 setState: 会触发隐式清空导致图层消失！
-    // 直接用我们自己的底层数学解析器精准锁定状态，永不丢失图层！
-    [self applyExplicitState:self.manualTargetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-    [self applyExplicitState:self.manualTargetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-    [self applyExplicitState:self.manualTargetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+    // 【🚨 核心修复 1：拦截未知状态的 setState】
+    // 如果目标是 Sleep（原生CA包里没有此状态），绝对不能去调用 setState！
+    // 我们的 CADisplayLink 已经把属性固定在了终点，只要不调 setState，图层就不会归位。
+    if ([self.manualTargetState isEqualToString:@"Sleep"]) {
+        return;
+    }
+
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
+    
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:realBgState animated:NO]; 
+        [self.floatingView setState:realFloatState animated:NO]; 
+        [self.fgView setState:realFgState animated:NO];
+    } else {
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
+    }
+    [CATransaction commit];
 }
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    double progress = [note.userInfo[@"progress"] doubleValue];
-    progress = MAX(0.0, MIN(1.0, progress));
-
-    // 【绝杀 4：智能防御网】
-    // 只有在确定已经息屏并且引擎处于 Sleep 帧时，才阻断系统底层的 0.0 死值回调，把画面牢牢定死在 AOD。
-    if (!g_isScreenOn && [self.currentState isEqualToString:@"Sleep"]) {
-        return;
-    }
-
-    // 在亮屏/息屏丝滑过渡期间，如果系统发来极端的 0.0 或 1.0 对齐信号，拦截掉，让我们的手写动画播完。
-    // 但是如果是真实的手指滑动 (比如 progress 是 0.3)，则允许打断动画并跟随手指！
-    if (self.isAnimatingState) {
-        if ([self.currentState isEqualToString:@"Sleep"]) return;
-        if ([self.currentState isEqualToString:@"Locked"] && progress <= 0.05) return;
-        if ([self.currentState isEqualToString:@"Unlock"] && progress >= 0.95) return;
-    }
+    // 【🚨 核心修复 2：彻底切断系统假进度的干涉】
+    // 处于息屏状态时，绝对不接收任何 Progress 变动，防止被进度 0.0 强行拉回 Locked 状态
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
+    
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -1712,12 +1703,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
     [self ensureAllLayerMaps];
     
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
+        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
+        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1736,8 +1732,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
         }
         
-        // 【绝杀 3：彻底剔除原生 [self.bgView setState:xxx] 调用】
-        // 数学插值已经将图层调整到位，不需要系统再次介入破坏属性。
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+            [self.bgView setState:realBgState animated:NO]; 
+            [self.floatingView setState:realFloatState animated:NO]; 
+            [self.fgView setState:realFgState animated:NO];
+        } else {
+            [self.bgView setState:realBgState]; 
+            [self.floatingView setState:realFloatState]; 
+            [self.fgView setState:realFgState];
+        }
+        [CATransaction commit];
     }
 }
 
@@ -2330,42 +2336,14 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = !mode;
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
-        if (mode) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        }
-    }
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = YES;
-        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-    }
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
-    if (g_enabled) {
-        g_isScreenOn = !inactive;
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
-        if (inactive) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        }
-    }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2398,18 +2376,21 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
-    if (!g_enabled) return; 
+    // 【新增拦截】：如果插件没开，或者当前处于息屏状态，绝对不允许系统更新动画进度！
+    if (!g_enabled || !g_isScreenOn) return; 
     
-    // 【完美还原最初的跳跃滤网】：放行所有真实手指滑动与正常的点亮动画，仅过滤 16+ 通知中心产生的假进度突变
+    // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
     
+    // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
     if (ABS(delta) > 0.15) {
         return; 
     }
     
     EnsureEngineViewIsMounted();
     
+    // 直接分发，不要用异步（保证绝对跟手的无延迟感）
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
     
     if (g_portalView) {
@@ -2440,15 +2421,20 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBBacklightController
+
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
     // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
-        BOOL screenOn = (state == 1);
+        // 在 iOS 16/17 中，状态 1 是 Active(亮屏)，0 是 Off(黑屏)，2 是 AlwaysOn(AOD/息屏)
+        // 只要状态是 1，就是亮屏；其他全是息屏。
+        BOOL screenOn = (state == 1); 
+        
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
             
+            // 判定要切换的目标状态：亮屏时看是否解锁，息屏时必定是 Sleep
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
             if (screenOn) {
@@ -2456,6 +2442,8 @@ static void EnsureEngineViewIsMounted() {
             } else {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
+            
+            // 【全剧终极调度】：只有这里才允许发送 StateChange 通知！
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
     }
@@ -2463,24 +2451,9 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
-    if (g_enabled && !g_isVideoMode) {
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
-            
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
-        }
-    }
+    // 为了防止底层多次重复发送，这里无需重复处理，交给 willTransitionToState 处理提前量即可。
 }
+
 %end
 
 %end // 结束 iOS16Plus
