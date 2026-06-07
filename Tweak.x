@@ -954,6 +954,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onProgress:(NSNotification *)note {
+    // 提前获取 progress 用于日志记录
     double progress = [note.userInfo[@"progress"] doubleValue];
     ZONELOG(@"[Engine1] 收到进度: %.4f | g_isScreenOn: %d | 当前状态: %@ | isAnimating: %d", progress, g_isScreenOn, self.currentState, self.isAnimatingState);
     
@@ -961,12 +962,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) {
         ZONELOG(@"[Engine1] 拦截进度: 因为当前在 Sleep 且 isAnimatingState=YES");
         return; 
-    } 
+    }
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
-    double progress = [note.userInfo[@"progress"] doubleValue];
+    // 注意：这里去掉了前面的 double 声明，直接使用开头定义的 progress
     progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
@@ -1709,10 +1710,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction commit];
 }
 
- - (void)onProgress:(NSNotification *)note {
+- (void)onProgress:(NSNotification *)note {
+    // 提前获取 progress 用于日志记录
     double progress = [note.userInfo[@"progress"] doubleValue];
     ZONELOG(@"[Engine2] 收到进度: %.4f | g_isScreenOn: %d | 当前状态: %@ | isAnimating: %d", progress, g_isScreenOn, self.currentState, self.isAnimatingState);
-
+    
     if (!g_enabled || !self.bgView) return;
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) {
         ZONELOG(@"[Engine2] 拦截进度: 因为当前在 Sleep 且 isAnimatingState=YES");
@@ -1722,7 +1724,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
-    double progress = [note.userInfo[@"progress"] doubleValue];
+    // 注意：这里去掉了前面的 double 声明，直接使用开头定义的 progress
     progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
