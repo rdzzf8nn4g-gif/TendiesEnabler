@@ -252,9 +252,8 @@ static double g_lastTickProgress = -1;
 static BOOL old_hideTextShadow = NO; 
 
 // 防御系统发假进度的滤网记录器
-static double g_lastSystemProgress = 0.0; 
-static BOOL g_aodSleepFrameLocked = NO; // iOS16-17：息屏最终帧冻结，仅在开启全天侯时生效
-
+static double g_lastSystemProgress = 0.0;  
+static BOOL g_aodFinalFrameLocked = NO;  
 static BOOL g_enableAnimSpeed = YES; 
 
 static BOOL g_isVideoMode = NO;
@@ -555,6 +554,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onWakeUp {
+    g_aodFinalFrameLocked = NO;
     if (!g_enabled || !g_isVideoMode) return;
     if (g_lowPowerPause && [[NSProcessInfo processInfo] isLowPowerModeEnabled]) {
         [self.lockVideoView pauseVideo];
@@ -841,6 +841,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onWakeUp {
+    g_aodFinalFrameLocked = NO;
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES];
@@ -1465,6 +1466,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onWakeUp {
+    g_aodFinalFrameLocked = NO;
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES];
@@ -2331,8 +2333,7 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isScreenOn = !mode;
         if (!mode) {
-            g_aodSleepFrameLocked = NO;
-            g_lastSystemProgress = -1.0;
+            g_aodFinalFrameLocked = NO;
         }
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
@@ -2345,27 +2346,23 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-
 - (void)_startFadeInAnimationForSource:(int)source {
     %orig;
     if (g_enabled) {
         g_isScreenOn = YES;
-        g_aodSleepFrameLocked = NO;
-        g_lastSystemProgress = -1.0;
+        g_aodFinalFrameLocked = NO;
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
     }
 }
 
-
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
     if (g_enabled) {
         g_isScreenOn = !inactive;
         if (!inactive) {
-            g_aodSleepFrameLocked = NO;
-            g_lastSystemProgress = -1.0;
+            g_aodFinalFrameLocked = NO;
         }
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
@@ -2378,30 +2375,27 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = NO;
         g_lastTickProgress = -1; 
-        g_lastSystemProgress = -1.0; // iOS16-17：首次进度不做跳跃过滤
-        g_aodSleepFrameLocked = NO;
-        
+        if (g_isScreenOn) {
+            g_isUnlocked = NO;
+            g_lastSystemProgress = 0.0; // 重置过滤器
+        }
     }
 }
-
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = YES;
         g_lastTickProgress = -1; 
-        g_lastSystemProgress = -1.0; // iOS16-17：回到前台后重新建立进度基线
-        g_aodSleepFrameLocked = NO;
-        
+        if (g_isScreenOn) {
+            g_isUnlocked = YES;
+            g_lastSystemProgress = 1.0; // 重置过滤器
+        }
     }
 }
-
 %end
 
 %hook SBWallpaperController
@@ -2412,41 +2406,28 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
-    if (!g_enabled) {
-        %orig;
-        return;
-    }
-    
-    // iOS16-17：息屏最终帧已冻结后，不再让原始系统进度把壁纸拉回初始锁屏态
-    // 只冻结“已完全息屏”之后的回写；熄屏过渡本身仍然允许继续播放。
-    if (g_isScreenOn && g_aodSleepFrameLocked) {
-        g_aodSleepFrameLocked = NO;
-    }
-    if (g_aodSleepFrameLocked && !g_isScreenOn) {
-        return;
-    }
-    
     %orig;
-    
+    if (!g_enabled) return; 
+
+    if (!g_isScreenOn && g_aodFinalFrameLocked) {
+        return;
+    }
+
     // 【🚨 核心：跳跃过滤器 (Delta Filter)】
     // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
-    if (g_lastSystemProgress < 0.0) {
-        g_lastSystemProgress = progress;
-    } else {
-        double delta = progress - g_lastSystemProgress;
-        g_lastSystemProgress = progress;
-        
-        // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
-        if (ABS(delta) > 0.15) {
-            return;
-        }
+    double delta = progress - g_lastSystemProgress;
+    g_lastSystemProgress = progress;
+
+    // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
+    if (ABS(delta) > 0.15) {
+        return; 
     }
-    
+
     EnsureEngineViewIsMounted();
-    
+
     // 直接分发，不要用异步（保证绝对跟手的无延迟感）
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-    
+
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -2471,6 +2452,10 @@ static void EnsureEngineViewIsMounted() {
             [CATransaction commit];
         }
     }
+
+    if (!g_isScreenOn && (progress <= 0.02 || progress >= 0.98)) {
+        g_aodFinalFrameLocked = YES;
+    }
 }
 
 %end
@@ -2484,10 +2469,6 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
-            if (screenOn) {
-                g_aodSleepFrameLocked = NO;
-                g_lastSystemProgress = -1.0;
-            }
             
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
@@ -2500,7 +2481,6 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
-
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
@@ -2510,14 +2490,6 @@ static void EnsureEngineViewIsMounted() {
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
             g_lastTickProgress = -1; 
-            if (screenOn) {
-                g_aodSleepFrameLocked = NO;
-                g_lastSystemProgress = -1.0;
-            } else {
-                // 息屏已完全完成：锁定当前最后一帧，阻止后续系统回调把壁纸拉回初始锁屏态
-                g_aodSleepFrameLocked = YES;
-                g_lastSystemProgress = -1.0;
-            }
             
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             
@@ -2530,7 +2502,6 @@ static void EnsureEngineViewIsMounted() {
         }
     }
 }
-
 %end
 
 %end // 结束 iOS16Plus
@@ -2842,16 +2813,20 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = NO;
         g_lastTickProgress = -1; 
+        if (g_isScreenOn) {
+            g_isUnlocked = NO;
+        }
     }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = YES;
         g_lastTickProgress = -1; 
+        if (g_isScreenOn) {
+            g_isUnlocked = YES;
+        }
     }
 }
 
@@ -2859,6 +2834,9 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (g_enabled) {
         g_isScreenOn = !mode;
+        if (!mode) {
+            g_aodFinalFrameLocked = NO;
+        }
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
     }
