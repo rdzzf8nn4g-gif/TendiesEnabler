@@ -1653,10 +1653,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    // 【修复1：防止息屏后动画归位闪烁】
-    // 如果目标是息屏(Sleep)，直接保留手写引擎定格的最后一帧，绝对不要交还给系统去 setState，否则系统会强行重置图层！
+    // 【核心护盾 3：冻结息屏最后一帧】
+    // 息屏动画跑完后，绝对不能交还控制权给系统 packageView，否则系统 AOD 刷新会强行重置图层导致闪回！
     if ([self.manualTargetState isEqualToString:@"Sleep"]) {
-        return;
+        return; 
     }
     
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
@@ -1681,7 +1681,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【修复4：严格保护手动动画，只要正在播放亮/灭屏动画，绝对屏蔽系统滑动的假进度打断】
+    // 【核心护盾 1：AOD 状态锁定防线】
+    // 处于息屏状态时，绝对无视系统底层的假进度刷新（这是导致AOD突然恢复正常壁纸的元凶）
+    if ([self.currentState isEqualToString:@"Sleep"]) return;
+    
+    // 正在播放亮/灭屏主线动画时，屏蔽所有滑动打断
     if (self.isAnimatingState) return; 
     
     self.isAnimatingState = NO;
@@ -1705,9 +1709,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     
-    // 【修复2：防止亮屏瞬间接收到多次系统指令导致起终点颠倒（亮屏动画错乱）】
-    if (self.isAnimatingState && [self.manualTargetState isEqualToString:stateName]) {
-        return;
+    // 【核心护盾 2：并发重入锁与亮屏反转修正】
+    // 如果正在执行同一方向的动画，直接拦截！(防止亮屏时被系统多重信号打乱起终点)
+    if (self.isAnimatingState && [self.manualTargetState isEqualToString:stateName]) return;
+    
+    // 如果系统发出亮屏指令，但由于卡顿当前还在播息屏，立刻中断息屏，以当前画面作为起点完美播放亮屏！
+    if (self.isAnimatingState && [stateName isEqualToString:@"Locked"] && [self.manualTargetState isEqualToString:@"Sleep"]) {
+        if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
+        self.isAnimatingState = NO;
     }
     
     self.currentState = [stateName copy];
