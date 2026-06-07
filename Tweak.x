@@ -251,6 +251,40 @@ static double g_resolutionFactor = 1.0;
 static double g_lastTickProgress = -1; 
 static BOOL old_hideTextShadow = NO; 
 
+// ==========================================
+// 实时调试日志系统
+// ==========================================
+static void ZoneLog(NSString *format, ...) {
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
+    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+    NSString *logLine = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
+
+    // 日志路径
+    NSString *logPath = @"/var/mobile/Documents/zone_debug.log";
+    
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+            [@"=== ZONE ENGINE AOD DEBUG LOG ===\n" writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
+        if (fileHandle) {
+            [fileHandle seekToEndOfFile];
+            [fileHandle writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
+            [fileHandle closeFile];
+        } else {
+            [logLine writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+    });
+}
+#define ZONELOG(fmt, ...) ZoneLog(fmt, ##__VA_ARGS__)
+
 // 防御系统发假进度的滤网记录器
 static double g_lastSystemProgress = 0.0; 
 
@@ -920,8 +954,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)onProgress:(NSNotification *)note {
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    ZONELOG(@"[Engine1] 收到进度: %.4f | g_isScreenOn: %d | 当前状态: %@ | isAnimating: %d", progress, g_isScreenOn, self.currentState, self.isAnimatingState);
+    
     if (!g_enabled || !self.bgView) return;
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
+    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) {
+        ZONELOG(@"[Engine1] 拦截进度: 因为当前在 Sleep 且 isAnimatingState=YES");
+        return; 
+    } 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -940,6 +980,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
+    ZONELOG(@"[Engine1] 请求状态切换: %@ -> %@ | animated: %d | g_isScreenOn: %d", self.currentState, stateName, animated, g_isScreenOn);
+    
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
@@ -1667,9 +1709,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction commit];
 }
 
-- (void)onProgress:(NSNotification *)note {
+ - (void)onProgress:(NSNotification *)note {
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    ZONELOG(@"[Engine2] 收到进度: %.4f | g_isScreenOn: %d | 当前状态: %@ | isAnimating: %d", progress, g_isScreenOn, self.currentState, self.isAnimatingState);
+
     if (!g_enabled || !self.bgView) return;
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
+    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) {
+        ZONELOG(@"[Engine2] 拦截进度: 因为当前在 Sleep 且 isAnimatingState=YES");
+        return; 
+    }
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -1688,6 +1736,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
+    ZONELOG(@"[Engine2] 请求状态切换: %@ -> %@ | animated: %d | g_isScreenOn: %d", self.currentState, stateName, animated, g_isScreenOn);
+
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
@@ -2327,6 +2377,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
+    ZONELOG(@"[Hook-CS16] setInScreenOffMode:%d | 现记录g_isScreenOn将变为:%d", mode, !mode);
     if (g_enabled) {
         g_isScreenOn = !mode;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
@@ -2352,6 +2403,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
+    ZONELOG(@"[Hook-CS16] _updateAppearanceForAODTransitionToInactive:%d | 现记录g_isScreenOn将变为:%d", inactive, !inactive);
     if (g_enabled) {
         g_isScreenOn = !inactive;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
@@ -2397,6 +2449,8 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
+    // ZONELOG(@"[Hook-WP16] updateWallpaperAnimationWithProgress: %.4f", progress); // 这个发得太频繁，仅在突变时拦截记录
+    
     // 【🚨 核心：跳跃过滤器 (Delta Filter)】
     // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
     double delta = progress - g_lastSystemProgress;
@@ -2404,8 +2458,11 @@ static void EnsureEngineViewIsMounted() {
     
     // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
     if (ABS(delta) > 0.15) {
+        ZONELOG(@"[Hook-WP16] 拦截了过大的进度跳跃: %.4f (delta: %.4f)", progress, delta);
         return; 
     }
+    
+    ZONELOG(@"[Hook-WP16] 派发合法系统进度: %.4f", progress);
     
     EnsureEngineViewIsMounted();
     
@@ -2442,6 +2499,7 @@ static void EnsureEngineViewIsMounted() {
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
+    ZONELOG(@"[Hook-BL16] backlightHost:willTransitionToState:%lld | g_isScreenOn=%d", state, g_isScreenOn);
     // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
         BOOL screenOn = (state == 1);
