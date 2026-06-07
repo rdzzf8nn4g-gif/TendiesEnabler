@@ -273,7 +273,6 @@ static NSString *g_lastEmittedScreenState = nil;
 static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
 static NSString *g_lastEmittedWallpaperState = nil;
 static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
-static BOOL g_screenOffWallpaperLatched = NO;
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
     return (state == 0 || state == 1);
@@ -289,9 +288,6 @@ static inline void ZoneEmitScreenEvent(BOOL screenOn) {
 
     g_lastEmittedScreenState = [screenOn ? @"ON" : @"OFF" copy];
     g_lastEmittedScreenStateTime = now;
-    if (screenOn) {
-        g_screenOffWallpaperLatched = NO;
-    }
 
     [[NSNotificationCenter defaultCenter] postNotificationName:(screenOn ? @"ZoneEngineWake" : @"ZoneEngineSleep") object:nil];
 }
@@ -303,15 +299,6 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     }
     if (!screenOn) {
         finalState = @"Sleep";
-        if (g_screenOffWallpaperLatched) {
-            return;
-        }
-        g_screenOffWallpaperLatched = YES;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            EnsureEngineViewIsMounted();
-        });
-    } else if (![finalState isEqualToString:@"Sleep"]) {
-        g_screenOffWallpaperLatched = NO;
     }
 
     if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
@@ -850,7 +837,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onStateChange:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     NSString *state = note.userInfo[@"state"];
-    if ((g_isAODInactive || !g_isScreenOn) && state && ![state isEqualToString:@"Sleep"]) return;
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
@@ -920,7 +906,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:YES];
-    [self lockSolidBackground];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -1014,7 +999,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
-    if ((g_isAODInactive || !g_isScreenOn) && ![stateName isEqualToString:@"Sleep"]) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
@@ -1442,7 +1426,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onStateChange:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     NSString *state = note.userInfo[@"state"];
-    if ((g_isAODInactive || !g_isScreenOn) && state && ![state isEqualToString:@"Sleep"]) return;
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
@@ -1548,7 +1531,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:YES];
-    [self lockSolidBackground];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserEnhanced *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -1722,15 +1704,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)completeManualTransition {
     if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
     self.manualAnimTasks = nil;
-    self.isAnimatingState = NO;
     
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     
-    // 动画跑到终点后，无动画同步一次 packageView 内部状态，防止状态脱节
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    
+    // 恢复底层逻辑状态同步，防止下一次点击时出现状态脱节
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
         [self.bgView setState:realBgState animated:NO]; 
         [self.floatingView setState:realFloatState animated:NO]; 
@@ -1740,15 +1722,25 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self.floatingView setState:realFloatState]; 
         [self.fgView setState:realFgState];
     }
+    
+    // 【核心修复】：立刻用我们解析的精准数据，暴力碾碎 setState 刚触发的系统隐式动画，完美定格
+    [self applyExplicitState:realBgState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+    [self applyExplicitState:realFloatState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+    [self applyExplicitState:realFgState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+    
     [CATransaction commit];
+    
+    // 状态归位，解除锁定
+    self.isAnimatingState = NO;
 }
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     if (!g_isScreenOn || g_isAODInactive) return;
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
-    self.isAnimatingState = NO;
+    // 【防御核心】：如果我们的逐帧动画还在跑，绝对禁止系统乱入的进度(如快速亮屏的1.0)打断画面！
+    if (self.isAnimatingState) return; 
+    
     self.animationGeneration++;
     
     double progress = [note.userInfo[@"progress"] doubleValue];
@@ -1766,7 +1758,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
-    if ((g_isAODInactive || !g_isScreenOn) && ![stateName isEqualToString:@"Sleep"]) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
@@ -2093,7 +2084,6 @@ static void EnsureEngineViewIsMounted() {
     while (view) {
         NSString *className = NSStringFromClass([view class]);
         
-        // 1. 绝对黑名单：增加 Reachability，只要触发降半屏，立刻拦截并恢复系统原生壁纸
         if ([className containsString:@"SceneView"] || 
             [className containsString:@"AppContainer"] ||
             [className containsString:@"Folder"] || 
@@ -2102,7 +2092,6 @@ static void EnsureEngineViewIsMounted() {
             return NO; 
         }
         
-        // 2. 核心白名单：去掉 Reachability，保持桌面、锁屏、多任务的自定义壁纸显示
         if ([className containsString:@"CoverSheet"] || 
             [className containsString:@"WallpaperWindow"] || 
             [className containsString:@"WallpaperViewController"] || 
@@ -2114,11 +2103,22 @@ static void EnsureEngineViewIsMounted() {
     return isMain;
 }
 
+// 【终极大杀器】：拦截底层图层的动画隐式注入，让AOD无法再唤醒它
+%new
+- (id)actionForLayer:(CALayer *)layer forKey:(NSString *)event {
+    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
+        // 返回 NSNull 彻底杀掉这个属性的所有动画
+        return (id)[NSNull null]; 
+    }
+    return %orig;
+}
+
 - (void)layoutSubviews {
     %orig;
     if (!g_enabled) {
         self.hidden = NO;
         self.alpha = 1.0;
+        self.layer.opacity = 1.0;
         return;
     }
 
@@ -2129,7 +2129,6 @@ static void EnsureEngineViewIsMounted() {
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
         BOOL hide = NO;
         
-        // 如果锁屏和桌面都有视频，全局隐藏原生壁纸
         if (IsSingleVideoMode() || (hasLock && hasHome)) {
             hide = YES;
         } else {
@@ -2137,7 +2136,6 @@ static void EnsureEngineViewIsMounted() {
             if ([self respondsToSelector:@selector(variant)]) {
                 variant = (long long)[self performSelector:@selector(variant)];
             }
-            // 解决降半屏、左滑负一屏闪烁原壁纸问题：0是锁屏，其他(1, 2等)全部判定为桌面！
             if (variant == 0) {
                 hide = hasLock;
             } else {
@@ -2146,42 +2144,44 @@ static void EnsureEngineViewIsMounted() {
         }
         self.hidden = hide;
         self.alpha = hide ? 0.0 : 1.0;
+        self.layer.opacity = hide ? 0.0 : 1.0;
     } else {
         self.hidden = YES;
         self.alpha = 0.0;
+        self.layer.opacity = 0.0;
     }
 }
 
 - (void)setAlpha:(double)alpha {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(0.0); return; }
+        if (!g_isVideoMode) { %orig(0.0); self.layer.opacity = 0.0; return; }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(0.0); return; }
+        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(0.0); self.layer.opacity = 0.0; return; }
         
         long long variant = 1;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
         
-        if (variant == 0 && hasLock) { %orig(0.0); return; }
-        if (variant != 0 && hasHome) { %orig(0.0); return; }
+        if (variant == 0 && hasLock) { %orig(0.0); self.layer.opacity = 0.0; return; }
+        if (variant != 0 && hasHome) { %orig(0.0); self.layer.opacity = 0.0; return; }
     }
     %orig;
 }
 
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(YES); return; }
+        if (!g_isVideoMode) { %orig(YES); self.layer.opacity = 0.0; return; }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(YES); return; }
+        if (IsSingleVideoMode() || (hasLock && hasHome)) { %orig(YES); self.layer.opacity = 0.0; return; }
         
         long long variant = 1;
         if ([self respondsToSelector:@selector(variant)]) variant = (long long)[self performSelector:@selector(variant)];
         
-        if (variant == 0 && hasLock) { %orig(YES); return; }
-        if (variant != 0 && hasHome) { %orig(YES); return; }
+        if (variant == 0 && hasLock) { %orig(YES); self.layer.opacity = 0.0; return; }
+        if (variant != 0 && hasHome) { %orig(YES); self.layer.opacity = 0.0; return; }
     }
     %orig;
 }
@@ -2199,10 +2199,6 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewWillLayoutSubviews {
     %orig;
-    
-    if (g_enabled) {
-        EnsureEngineViewIsMounted();
-    }
     
     if (!g_enabled) {
         if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
@@ -2414,7 +2410,6 @@ static void EnsureEngineViewIsMounted() {
         g_isScreenOn = !mode;
         g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        EnsureEngineViewIsMounted();
         ZoneEmitScreenAndWallpaperState(!mode, state, YES);
     }
 }
@@ -2437,7 +2432,6 @@ static void EnsureEngineViewIsMounted() {
         g_isScreenOn = !inactive;
         g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        EnsureEngineViewIsMounted();
         ZoneEmitScreenAndWallpaperState(!inactive, state, YES);
     }
 }
@@ -2468,6 +2462,38 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
+    // 【核心修复】：接管覆盖在最上层的 Portal 遮罩
+    if (g_portalView) {
+        double targetAlpha = 0.0;
+        if (g_isVideoMode) {
+            targetAlpha = 1.0;
+        } else {
+            if (progress > 0.7) {
+                targetAlpha = (1.0 - progress) * (0.05 / 0.3);
+            } else if (progress > 0.6) {
+                targetAlpha = 0.05 + (0.7 - progress) * 1.0; 
+            } else {
+                targetAlpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+            }
+            targetAlpha = MAX(0.0, MIN(1.0, targetAlpha));
+        }
+
+        if (ABS(g_portalView.alpha - targetAlpha) > 0.01) {
+            [CATransaction begin];
+            double deltaProgress = progress - g_lastSystemProgress;
+            // 如果是快速亮屏/息屏（瞬间进度跨度极大），必须赋予平滑过渡，否则会直闪
+            if (ABS(deltaProgress) > 0.3) {
+                [CATransaction setDisableActions:NO];
+                [CATransaction setAnimationDuration:g_animDuration > 0 ? g_animDuration : 0.85];
+                [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+            } else {
+                [CATransaction setDisableActions:YES];
+            }
+            g_portalView.alpha = targetAlpha;
+            [CATransaction commit];
+        }
+    }
+
     if (!g_isScreenOn || g_isAODInactive) {
         g_lastSystemProgress = progress;
         return;
@@ -2481,33 +2507,7 @@ static void EnsureEngineViewIsMounted() {
     }
 
     EnsureEngineViewIsMounted();
-
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-
-    if (g_portalView) {
-        if (g_isVideoMode) {
-            if (g_portalView.alpha != 1.0) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = 1.0;
-                [CATransaction commit];
-            }
-        } else {
-            double alpha = 0.0;
-            if (progress > 0.7) {
-                alpha = (1.0 - progress) * (0.05 / 0.3);
-            } else if (progress > 0.6) {
-                alpha = 0.05 + (0.7 - progress) * 1.0; 
-            } else {
-                alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-            }
-            alpha = MAX(0.0, MIN(1.0, alpha));
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            g_portalView.alpha = alpha;
-            [CATransaction commit];
-        }
-    }
 }
 %end
 
