@@ -965,15 +965,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     if (!g_enabled || !self.bgView) return;
     
-    // 🚨 终极 AOD 防御护盾：
-    // 只要当前状态是 Sleep (不论动画是否结束)，绝对拦截系统底层一切滑动假进度！
-    // 这样进度就永远无法篡改我们的 currentState
-    if ([self.currentState isEqualToString:@"Sleep"]) {
+    // 🚨 终极护盾 1：如果正在播放状态机动画（亮屏、息屏过渡），绝对禁止任何底层进度打断它！
+    // 这行代码完美挽救了你丢失的亮屏和息屏动画
+    if (self.isAnimatingState) {
+        ZONELOG(@"[Engine1] 拦截进度: 正在执行底层状态机动画，禁止打断");
+        return;
+    }
+    
+    // 🚨 终极护盾 2：如果在 AOD 期间，或者当前已经是 Sleep，绝对禁止假进度篡改状态！
+    // 这行代码完美解决了 AOD 播完动画后突然归位、乱跳的问题
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) {
         ZONELOG(@"[Engine1] 拦截进度: 处于 AOD/Sleep 状态，屏蔽底层假进度以防归位");
         return; 
     }
     
-    self.isAnimatingState = NO;
+    // 注意：去掉了原本的 self.isAnimatingState = NO; 因为已经在上面完美拦截了
     self.animationGeneration++;
     
     progress = MAX(0.0, MIN(1.0, progress));
@@ -1724,15 +1730,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     if (!g_enabled || !self.bgView) return;
     
-    // 🚨 终极 AOD 防御护盾：
-    // 只要当前状态是 Sleep (不论动画是否结束)，绝对拦截系统底层一切滑动假进度！
-    // 这样进度就永远无法篡改我们的 currentState
-    if ([self.currentState isEqualToString:@"Sleep"]) {
+    // 🚨 终极护盾 1：如果正在播放状态机动画（亮屏、息屏过渡），绝对禁止任何底层进度打断它！
+    // 这行代码完美挽救了你丢失的亮屏和息屏动画
+    if (self.isAnimatingState) {
+        ZONELOG(@"[Engine2] 拦截进度: 正在执行底层状态机动画，禁止打断");
+        return;
+    }
+    
+    // 🚨 终极护盾 2：如果在 AOD 期间，或者当前已经是 Sleep，绝对禁止假进度篡改状态！
+    // 这行代码完美解决了 AOD 播完动画后突然归位、乱跳的问题
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) {
         ZONELOG(@"[Engine2] 拦截进度: 处于 AOD/Sleep 状态，屏蔽底层假进度以防归位");
         return; 
     }
     
-    self.isAnimatingState = NO;
+    // 注意：去掉了原本的 self.isAnimatingState = NO; 因为已经在上面完美拦截了
     self.animationGeneration++;
     
     progress = MAX(0.0, MIN(1.0, progress));
