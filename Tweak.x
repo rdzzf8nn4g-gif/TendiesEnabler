@@ -1586,11 +1586,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             for (NSString *keyPath in targetVals) {
                 id endVal = targetVals[keyPath];
-                // 抓取动画开始时的当前真实呈现值(Presentation Layer)，解决半路打断反弹问题
                 id startVal = [[layer presentationLayer] ?: layer valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
                 
                 if (startVal && endVal) {
-                    [layer removeAnimationForKey:keyPath]; // 瞬间杀掉系统原生 CAAnimation
+                    [layer removeAnimationForKey:keyPath]; 
                     [self.manualAnimTasks addObject:@{ @"layer": layer, @"keyPath": keyPath, @"start": startVal, @"end": endVal }];
                 }
             }
@@ -1601,23 +1600,40 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     buildTasks(self.floatParser, self.floatLayerMap, realFloatState);
     buildTasks(self.fgParser, self.fgLayerMap, realFgState);
     
+    // 🚨【破局点 1：起跑前通报状态】
+    // 在动画起步前，提前给系统底层报备：“我已经去 Sleep 了！”
+    // 这样哪怕中间 CPU 休眠了，过一会 AOD 刷新时，系统调用的也是 Sleep 状态，绝不闪回原图！
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:realBgState animated:NO]; 
+        [self.floatingView setState:realFloatState animated:NO]; 
+        [self.fgView setState:realFgState animated:NO];
+    } else {
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
+    }
+    [CATransaction commit];
+
     if (self.manualAnimTasks.count > 0) {
-        self.manualAnimStartTime = CACurrentMediaTime();
+        // 🚨【破局点 2：改用绝对现实时间】
+        // 绝对不能用 CACurrentMediaTime()，改用 NSDate！现实时间永远不会休眠！
+        self.manualAnimStartTime = [NSDate timeIntervalSinceReferenceDate];
         self.manualAnimLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(manualTick:)];
         [self.manualAnimLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     } else {
-        // 【修复3：如果壁纸根本没有Sleep动画，不要调用结束重置，直接原地定格】
-        if ([stateName isEqualToString:@"Sleep"]) {
-            self.isAnimatingState = NO;
-            return;
-        }
         [self completeManualTransition];
     }
 }
 
 - (void)manualTick:(CADisplayLink *)link {
     double duration = (g_animDuration > 0) ? g_animDuration : 0.85;
-    double progress = (CACurrentMediaTime() - self.manualAnimStartTime) / duration;
+    
+    // 🚨【破局点 3：用现实时间插值】
+    // 只要设备休眠了几秒钟，唤醒时这个 progress 会瞬间 > 1.0，立刻结束该动画！
+    // 彻底杜绝“亮屏时还在补播刚才没播完的息屏动画”的诡异现象。
+    double progress = ([NSDate timeIntervalSinceReferenceDate] - self.manualAnimStartTime) / duration;
     if (progress >= 1.0) progress = 1.0;
     
     // 模拟苹果原生的 EaseInOut 缓动曲线
@@ -1653,12 +1669,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    // 【核心护盾 3：冻结息屏最后一帧】
-    // 息屏动画跑完后，绝对不能交还控制权给系统 packageView，否则系统 AOD 刷新会强行重置图层导致闪回！
-    if ([self.manualTargetState isEqualToString:@"Sleep"]) {
-        return; 
-    }
-    
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
@@ -1680,13 +1690,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    
-    // 【核心护盾 1：AOD 状态锁定防线】
-    // 处于息屏状态时，绝对无视系统底层的假进度刷新（这是导致AOD突然恢复正常壁纸的元凶）
-    if ([self.currentState isEqualToString:@"Sleep"]) return;
-    
-    // 正在播放亮/灭屏主线动画时，屏蔽所有滑动打断
-    if (self.isAnimatingState) return; 
+    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -1707,16 +1711,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)transitionToState:(NSString *)stateName animated:(BOOL)animated {
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
-    if ([self.currentState isEqualToString:stateName]) return;
     
-    // 【核心护盾 2：并发重入锁与亮屏反转修正】
-    // 如果正在执行同一方向的动画，直接拦截！(防止亮屏时被系统多重信号打乱起终点)
-    if (self.isAnimatingState && [self.manualTargetState isEqualToString:stateName]) return;
-    
-    // 如果系统发出亮屏指令，但由于卡顿当前还在播息屏，立刻中断息屏，以当前画面作为起点完美播放亮屏！
-    if (self.isAnimatingState && [stateName isEqualToString:@"Locked"] && [self.manualTargetState isEqualToString:@"Sleep"]) {
-        if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
-        self.isAnimatingState = NO;
+    // 🚨【破局点 4：同向拦截，反向放行】
+    // 只有在同一个方向重复触发时才拦截。
+    // 如果你在息屏没播完时突然点亮屏幕，直接放行，让它立刻开启亮屏动画，完美衔接！
+    if (self.isAnimatingState && [self.manualTargetState isEqualToString:stateName]) {
+        return;
     }
     
     self.currentState = [stateName copy];
