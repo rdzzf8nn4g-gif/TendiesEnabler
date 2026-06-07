@@ -243,6 +243,38 @@ static BOOL g_hideTextShadow = NO;
 static BOOL g_lowPowerPause = NO; 
 static NSString *g_zonePath = nil;
 
+// ==========================================
+// 物理文件级强力日志器 (百分百不丢日志)
+// ==========================================
+static void ZoneLog(NSString *format, ...) {
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    
+    // 生成时间戳
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"HH:mm:ss.SSS"];
+    NSString *timeStr = [formatter stringFromDate:[NSDate date]];
+    NSString *finalLog = [NSString stringWithFormat:@"[%@] %@\n", timeStr, message];
+    
+    // 保存到设备文件路径
+    NSString *logPath = @"/var/mobile/Documents/zone_debug.log";
+#if __has_include(<roothide.h>)
+    logPath = jbroot(logPath);
+#endif
+    
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    if (fileHandle) {
+        [fileHandle seekToEndOfFile];
+        [fileHandle writeData:[finalLog dataUsingEncoding:NSUTF8StringEncoding]];
+        [fileHandle closeFile];
+    } else {
+        [finalLog writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
 // 视觉状态标识
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
@@ -783,7 +815,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
-    NSLog(@"[ZONE_DEBUG] [Legacy引擎] 收到状态切换通知 -> 目标: %@, 当前: %@, 屏幕亮: %d", state, self.currentState, g_isScreenOn);
+    ZoneLog(@"[Legacy-状态] 收到切换指令 -> 目标: %@, 当前: %@, 亮屏: %d", state, self.currentState, g_isScreenOn);
     
     if (state) {
         [self transitionToState:state animated:animated];
@@ -925,11 +957,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     
     double progress = [note.userInfo[@"progress"] doubleValue];
-    NSLog(@"[ZONE_DEBUG] [Legacy引擎] 收到进度: %f, 当前状态: %@, 屏幕点亮: %d", progress, self.currentState, g_isScreenOn);
+    ZoneLog(@"[Legacy-进度] progress: %.3f, 当前状态: %@, 亮屏: %d", progress, self.currentState, g_isScreenOn);
     
-    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！防止被幽灵进度篡改状态。
+    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！
     if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
-        NSLog(@"[ZONE_DEBUG] [Legacy引擎] 拦截！当前处于Sleep或未亮屏，拒绝进度覆写图层！");
+        ZoneLog(@"[Legacy-拦截] 🛑 成功拦截幽灵进度！当前是Sleep，拒绝重置画面！");
         return;
     }
 
@@ -1382,7 +1414,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
-    NSLog(@"[ZONE_DEBUG] [Enhanced引擎] 收到状态切换通知 -> 目标: %@, 当前: %@, 屏幕亮: %d", state, self.currentState, g_isScreenOn);
+    ZoneLog(@"[Enhanced-状态] 收到切换指令 -> 目标: %@, 当前: %@, 亮屏: %d", state, self.currentState, g_isScreenOn);
     
     if (state) {
         [self transitionToState:state animated:animated];
@@ -1684,11 +1716,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     
     double progress = [note.userInfo[@"progress"] doubleValue];
-    NSLog(@"[ZONE_DEBUG] [Enhanced引擎] 收到进度: %f, 当前状态: %@, 屏幕点亮: %d", progress, self.currentState, g_isScreenOn);
+    ZoneLog(@"[Enhanced-进度] progress: %.3f, 当前状态: %@, 亮屏: %d", progress, self.currentState, g_isScreenOn);
     
-    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！防止被幽灵进度篡改状态。
+    // 【核心护盾】：如果是息屏状态，或者屏幕已黑，绝对不响应进度！
     if ([self.currentState isEqualToString:@"Sleep"] || !g_isScreenOn) {
-        NSLog(@"[ZONE_DEBUG] [Enhanced引擎] 拦截！当前处于Sleep或未亮屏，拒绝进度覆写图层！");
+        ZoneLog(@"[Enhanced-拦截] 🛑 成功拦截幽灵进度！当前是Sleep，拒绝重置画面！");
         return;
     }
 
