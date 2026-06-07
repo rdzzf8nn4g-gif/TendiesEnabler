@@ -1602,7 +1602,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     buildTasks(self.fgParser, self.fgLayerMap, realFgState);
     
     if (self.manualAnimTasks.count > 0) {
-        self.manualAnimStartTime = [NSDate timeIntervalSinceReferenceDate]; // 核心修复4：改用不受休眠影响的绝对时间
+        // 【核心微创 2】：改用 NSDate 绝对现实时间！现实时间不会随设备休眠而冻结，杜绝亮屏续播旧动画。
+        self.manualAnimStartTime = [NSDate timeIntervalSinceReferenceDate];
         self.manualAnimLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(manualTick:)];
         [self.manualAnimLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     } else {
@@ -1612,7 +1613,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)manualTick:(CADisplayLink *)link {
     double duration = (g_animDuration > 0) ? g_animDuration : 0.85;
-    double progress = ([NSDate timeIntervalSinceReferenceDate] - self.manualAnimStartTime) / duration; // 配套修改为绝对时间
+    // 【核心微创 3】：配套使用绝对时间计算。哪怕休眠醒来，progress 也会立刻 >1.0 干脆结束，绝不乱跳。
+    double progress = ([NSDate timeIntervalSinceReferenceDate] - self.manualAnimStartTime) / duration;
     if (progress >= 1.0) progress = 1.0;
     
     // 模拟苹果原生的 EaseInOut 缓动曲线
@@ -1669,10 +1671,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    // 核心修复1：如果是息屏状态，绝对免疫系统的假进度打断（防闪回）
-    if ([self.currentState isEqualToString:@"Sleep"]) return; 
-    // 核心修复2：主线动画播放时，免疫打断
-    if (self.isAnimatingState) return; 
+    
+    // 【核心微创 1】：如果屏幕是黑的(AOD)，物理屏蔽系统发出的所有假滑动信号。彻底解决息屏被歌词刷新闪回！
+    if (!g_isScreenOn) return;
+    
+    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return;
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -1694,24 +1697,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
-    
-    NSString *oldState = self.currentState;
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    
-    // 核心修复3：如果从息屏唤醒，强制把图层视觉瞬间拉到 100% 息屏状态，防止读取到卡在半路的旧动画
-    if ([oldState isEqualToString:@"Sleep"] && [stateName isEqualToString:@"Locked"]) {
-        NSString *realSleepState = [self.bgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
-        NSString *realSleepFloat = [self.floatParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
-        NSString *realSleepFg = [self.fgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        [self applyExplicitState:realSleepState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-        [self applyExplicitState:realSleepFloat parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-        [self applyExplicitState:realSleepFg parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        [CATransaction commit];
-    }
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
