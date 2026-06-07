@@ -2371,13 +2371,11 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
+// iOS 16-17 AOD: only lock to Sleep on screen-off, do not emit early Wake here.
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
-    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
+    if (g_enabled) {
         g_isUnlocked = dismissed;
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
-        ZoneEmitWallpaperState(YES, state, YES);
     }
 }
 
@@ -2391,9 +2389,8 @@ static void EnsureEngineViewIsMounted() {
 
         EnsureEngineViewIsMounted();
 
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         if (mode) {
-            ZoneEmitScreenAndWallpaperState(NO, state, YES);
+            ZoneEmitWallpaperState(NO, @"Sleep", YES);
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
         }
     }
@@ -2407,8 +2404,6 @@ static void EnsureEngineViewIsMounted() {
         g_lastTickProgress = -1;
         g_lastSystemProgress = 1.0;
         EnsureEngineViewIsMounted();
-        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        ZoneEmitScreenAndWallpaperState(YES, state, YES);
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
     }
 }
@@ -2423,9 +2418,8 @@ static void EnsureEngineViewIsMounted() {
 
         EnsureEngineViewIsMounted();
 
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         if (inactive) {
-            ZoneEmitScreenAndWallpaperState(NO, state, YES);
+            ZoneEmitWallpaperState(NO, @"Sleep", YES);
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
         }
     }
@@ -2500,8 +2494,11 @@ static void EnsureEngineViewIsMounted() {
             g_isAODInactive = !screenOn;
             g_lastTickProgress = -1;
             g_lastSystemProgress = screenOn ? 1.0 : 0.0;
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
+            if (!screenOn) {
+                ZoneEmitWallpaperState(NO, @"Sleep", YES);
+            } else {
+                EnsureEngineViewIsMounted();
+            }
         }
     }
 }
@@ -2516,8 +2513,11 @@ static void EnsureEngineViewIsMounted() {
             g_isAODInactive = !screenOn;
             g_lastTickProgress = -1;
             g_lastSystemProgress = screenOn ? 1.0 : 0.0;
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
+            if (!screenOn) {
+                ZoneEmitWallpaperState(NO, @"Sleep", YES);
+            } else {
+                EnsureEngineViewIsMounted();
+            }
         }
     }
 }
