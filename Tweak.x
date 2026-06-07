@@ -268,6 +268,55 @@ static inline BOOL IsSingleVideoMode() {
     return (g_isVideoMode && g_lockVideoPath && g_homeVideoPath && [g_lockVideoPath isEqualToString:g_homeVideoPath]);
 }
 
+static BOOL g_isAODInactive = NO;
+static NSString *g_lastEmittedScreenState = nil;
+static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
+static NSString *g_lastEmittedWallpaperState = nil;
+static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
+
+static inline void ZoneEmitScreenEvent(BOOL screenOn) {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (g_lastEmittedScreenState && g_lastEmittedScreenStateTime > 0.0 &&
+        [g_lastEmittedScreenState isEqualToString:(screenOn ? @"ON" : @"OFF")] &&
+        (now - g_lastEmittedScreenStateTime) < 0.20) {
+        return;
+    }
+
+    g_lastEmittedScreenState = [screenOn ? @"ON" : @"OFF" copy];
+    g_lastEmittedScreenStateTime = now;
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:(screenOn ? @"ZoneEngineWake" : @"ZoneEngineSleep") object:nil];
+}
+
+static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL animated) {
+    NSString *finalState = state;
+    if (!finalState) {
+        finalState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+    }
+    if (!screenOn) {
+        finalState = @"Sleep";
+    }
+
+    CFTimeInterval now = CACurrentMediaTime();
+    if (g_lastEmittedWallpaperState && g_lastEmittedWallpaperStateTime > 0.0 &&
+        [g_lastEmittedWallpaperState isEqualToString:finalState] &&
+        (now - g_lastEmittedWallpaperStateTime) < 0.20) {
+        return;
+    }
+
+    g_lastEmittedWallpaperState = [finalState copy];
+    g_lastEmittedWallpaperStateTime = now;
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
+                                                        object:nil
+                                                      userInfo:@{@"state": finalState, @"animated": @(animated)}];
+}
+
+static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated) {
+    ZoneEmitScreenEvent(screenOn);
+    ZoneEmitWallpaperState(screenOn, state, animated);
+}
+
 static void reloadPrefs() {
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     CFPreferencesAppSynchronize(appID);
@@ -921,12 +970,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    
-    // 🚨 针对 iOS 16-17 AOD 的精准修复：
-    // 如果屏幕已经处于黑屏/AOD模式 (g_isScreenOn == NO)，系统发的任何滑动假进度通通拦截！
-    // 这样壁纸就会完美停留在息屏动画的最后一帧，而不会被强行拽回亮屏状态。
-    if (!g_isScreenOn) return;
-    
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -1390,10 +1433,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
-        if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
+        if (g_isScreenOn && self.currentState && ![self.currentState isEqualToString:@"Init"] && ![self.currentState isEqualToString:@"Sleep"]) {
             NSString *savedState = [self.currentState copy];
-            self.currentState = nil; 
-            [self transitionToState:savedState animated:YES]; 
+            self.currentState = nil;
+            [self transitionToState:savedState animated:YES];
         }
     }
 }
@@ -1675,12 +1718,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    
-    // 🚨 针对 iOS 16-17 AOD 的精准修复：
-    // 如果屏幕已经处于黑屏/AOD模式 (g_isScreenOn == NO)，系统发的任何滑动假进度通通拦截！
-    // 这样壁纸就会完美停留在息屏动画的最后一帧，而不会被强行拽回亮屏状态。
-    if (!g_isScreenOn) return;
-    
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -2330,70 +2367,57 @@ static void EnsureEngineViewIsMounted() {
 // ✅ 完全以锁屏UI的真实视觉状态为唯一基准，抛弃 FaceID 状态的干扰
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
-    g_isUnlocked = dismissed; // 记录真实的视觉状态：是否已经进入桌面
+    g_isUnlocked = dismissed;
     if (g_enabled && g_isScreenOn) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
+        ZoneEmitWallpaperState(YES, state, YES);
     }
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
     %orig;
     if (g_enabled) {
+        g_isAODInactive = mode;
         g_isScreenOn = !mode;
+        g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
-        if (mode) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        }
+        ZoneEmitScreenAndWallpaperState(!mode, state, YES);
     }
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
     %orig;
     if (g_enabled) {
+        g_isAODInactive = NO;
         g_isScreenOn = YES;
+        g_lastSystemProgress = 1.0;
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+        ZoneEmitScreenAndWallpaperState(YES, state, YES);
     }
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     %orig;
     if (g_enabled) {
+        g_isAODInactive = inactive;
         g_isScreenOn = !inactive;
+        g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @YES}];
-        
-        if (inactive) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-        }
+        ZoneEmitScreenAndWallpaperState(!inactive, state, YES);
     }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = NO;
-        g_lastTickProgress = -1; 
-        g_lastSystemProgress = 0.0; // 重置过滤器
-        
+        g_lastTickProgress = -1;
     }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = YES;
-        g_lastTickProgress = -1; 
-        g_lastSystemProgress = 1.0; // 重置过滤器
-        
+        g_lastTickProgress = -1;
     }
 }
 %end
@@ -2407,23 +2431,19 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
-    if (!g_enabled) return; 
-    
-    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
-    // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
+    if (!g_enabled) return;
+
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
-    
-    // 如果一次性进度突变超过 15%，绝对不是用户手指滑出来的连续动画，直接拦截！
-    if (ABS(delta) > 0.15) {
-        return; 
+
+    if (ABS(delta) > 0.15 && g_isScreenOn) {
+        return;
     }
-    
+
     EnsureEngineViewIsMounted();
-    
-    // 直接分发，不要用异步（保证绝对跟手的无延迟感）
+
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
-    
+
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -2454,42 +2474,30 @@ static void EnsureEngineViewIsMounted() {
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
-            
+            g_isAODInactive = !screenOn;
+            g_lastTickProgress = -1;
+            g_lastSystemProgress = screenOn ? 1.0 : 0.0;
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
+            ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
         }
     }
 }
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
-            
+            g_isAODInactive = !screenOn;
+            g_lastTickProgress = -1;
+            g_lastSystemProgress = screenOn ? 1.0 : 0.0;
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            } else {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
-            }
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
+            ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
         }
     }
 }
