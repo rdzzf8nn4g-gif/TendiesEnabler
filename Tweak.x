@@ -269,6 +269,9 @@ static inline BOOL IsSingleVideoMode() {
 }
 
 static BOOL g_isAODInactive = NO;
+static BOOL g_isAODStateHold = NO;
+static BOOL g_isAODWakePending = NO;
+static BOOL g_isAODResumeProgress = NO;
 static NSString *g_lastEmittedScreenState = nil;
 static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
 static NSString *g_lastEmittedWallpaperState = nil;
@@ -276,6 +279,23 @@ static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
     return (state == 0 || state == 1);
+}
+
+static inline void ZoneBeginAODHold(void) {
+    g_isAODInactive = YES;
+    g_isAODStateHold = YES;
+    g_isAODWakePending = NO;
+    g_isAODResumeProgress = NO;
+}
+
+static inline void ZoneArmAODWake(void) {
+    g_isAODWakePending = YES;
+}
+
+static inline void ZoneConsumeAODWake(void) {
+    g_isAODStateHold = NO;
+    g_isAODWakePending = NO;
+    g_isAODResumeProgress = YES;
 }
 
 static inline void ZoneEmitScreenEvent(BOOL screenOn) {
@@ -301,7 +321,13 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
         finalState = @"Sleep";
     }
 
-    if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
+    if (g_isAODStateHold) {
+        if (!screenOn) {
+            finalState = @"Sleep";
+        } else if (!g_isAODWakePending) {
+            return;
+        }
+    } else if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
         return;
     }
 
@@ -318,6 +344,10 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
                                                         object:nil
                                                       userInfo:@{@"state": finalState, @"animated": @(animated)}];
+
+    if (g_isAODStateHold && screenOn && g_isAODWakePending && ![finalState isEqualToString:@"Sleep"]) {
+        ZoneConsumeAODWake();
+    }
 }
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated) {
@@ -2378,7 +2408,7 @@ static void EnsureEngineViewIsMounted() {
 // 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
-    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
+    if (g_enabled && g_isScreenOn && !g_isAODInactive && !g_isAODStateHold) {
         g_isUnlocked = dismissed;
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         ZoneEmitWallpaperState(YES, state, YES);
@@ -2390,9 +2420,19 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isAODInactive = mode;
         g_isScreenOn = !mode;
+        g_lastTickProgress = -1;
         g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
+
+        if (mode) {
+            ZoneBeginAODHold();
+        }
+
+        EnsureEngineViewIsMounted();
+
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneEmitScreenAndWallpaperState(!mode, state, YES);
+        if (mode) {
+            ZoneEmitScreenAndWallpaperState(NO, state, YES);
+        }
     }
 }
 
@@ -2401,7 +2441,10 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isAODInactive = NO;
         g_isScreenOn = YES;
+        g_lastTickProgress = -1;
         g_lastSystemProgress = 1.0;
+        ZoneArmAODWake();
+        EnsureEngineViewIsMounted();
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
         ZoneEmitScreenAndWallpaperState(YES, state, YES);
     }
@@ -2412,9 +2455,19 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_isAODInactive = inactive;
         g_isScreenOn = !inactive;
+        g_lastTickProgress = -1;
         g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
+
+        if (inactive) {
+            ZoneBeginAODHold();
+        }
+
+        EnsureEngineViewIsMounted();
+
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneEmitScreenAndWallpaperState(!inactive, state, YES);
+        if (inactive) {
+            ZoneEmitScreenAndWallpaperState(NO, state, YES);
+        }
     }
 }
 
@@ -2444,7 +2497,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
-    if (!g_isScreenOn || g_isAODInactive) {
+    if (!g_isScreenOn || g_isAODInactive || g_isAODStateHold) {
         g_lastSystemProgress = progress;
         return;
     }
@@ -2452,8 +2505,12 @@ static void EnsureEngineViewIsMounted() {
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
 
-    if (ABS(delta) > 0.15) {
+    if (ABS(delta) > 0.15 && !g_isAODResumeProgress) {
         return;
+    }
+
+    if (g_isAODResumeProgress) {
+        g_isAODResumeProgress = NO;
     }
 
     EnsureEngineViewIsMounted();
@@ -2498,6 +2555,11 @@ static void EnsureEngineViewIsMounted() {
             g_isAODInactive = !screenOn;
             g_lastTickProgress = -1;
             g_lastSystemProgress = screenOn ? 1.0 : 0.0;
+            if (!screenOn) {
+                ZoneBeginAODHold();
+            } else {
+                ZoneArmAODWake();
+            }
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
         }
@@ -2514,6 +2576,11 @@ static void EnsureEngineViewIsMounted() {
             g_isAODInactive = !screenOn;
             g_lastTickProgress = -1;
             g_lastSystemProgress = screenOn ? 1.0 : 0.0;
+            if (!screenOn) {
+                ZoneBeginAODHold();
+            } else {
+                ZoneArmAODWake();
+            }
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
         }
@@ -2903,6 +2970,9 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWakeEffectsForWake:(BOOL)wake animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
+        if (wake && g_isAODStateHold) {
+            ZoneArmAODWake();
+        }
         NSString *state = wake ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @(animated)}];
     }
