@@ -435,7 +435,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
-                // 【核心防卡死修复：切断同步KVO死循环，零CPU占用】
+                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
                 // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
@@ -455,7 +455,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.isManuallyPaused = NO;
     
-    // 【防定格修复1：激活静默环境底层 AudioSession 权限】
+    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
     @try {
         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
                                          withOptions:AVAudioSessionCategoryOptionMixWithOthers 
@@ -463,7 +463,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[AVAudioSession sharedInstance] setActive:YES error:nil];
     } @catch (NSException *e) {}
 
-    // 【防定格修复2：重新牵手硬件解码器】
+    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
     // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
     if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
@@ -488,7 +488,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     [self pauseVideo];
     
-    // 【防内存泄漏修复：彻底断开并拔除所有指针】
+    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
     if (self.looper) {
         [self.looper disableLooping];
         self.looper = nil;
@@ -762,7 +762,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.currentState = @"Init";
         self.reloadGeneration = 0;
         self.isAnimatingState = NO;
-        self.aodSleepFrozen = NO;
         self.animationGeneration = 0;
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
@@ -922,8 +921,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if (self.aodSleepFrozen && !g_isScreenOn) return;
-    if (g_isScreenOn) self.aodSleepFrozen = NO;
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
     self.isAnimatingState = NO;
@@ -947,7 +944,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     self.currentState = [stateName copy];
-    if (![stateName isEqualToString:@"Sleep"]) self.aodSleepFrozen = NO;
     
     if (animated) {
         self.animationGeneration++;
@@ -972,30 +968,29 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     
     if ([stateName isEqualToString:@"Sleep"]) {
-        [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-        [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-        [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        self.aodSleepFrozen = YES;
-    } else {
-        [CATransaction begin];
-        if (!animated) {
-            [CATransaction setDisableActions:YES];
-        } else {
-            [CATransaction setAnimationDuration:g_animDuration];
-            [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
-        }
-        
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:stateName animated:animated]; 
-            [self.floatingView setState:stateName animated:animated]; 
-            [self.fgView setState:stateName animated:animated];
-        } else {
-            [self.bgView setState:stateName]; 
-            [self.floatingView setState:stateName]; 
-            [self.fgView setState:stateName];
-        }
-        [CATransaction commit];
+        [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:animated];
+        [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:animated];
+        [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:animated];
     }
+    
+    [CATransaction begin];
+    if (!animated) {
+        [CATransaction setDisableActions:YES];
+    } else {
+        [CATransaction setAnimationDuration:g_animDuration];
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    }
+    
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:stateName animated:animated]; 
+        [self.floatingView setState:stateName animated:animated]; 
+        [self.fgView setState:stateName animated:animated];
+    } else {
+        [self.bgView setState:stateName]; 
+        [self.floatingView setState:stateName]; 
+        [self.fgView setState:stateName];
+    }
+    [CATransaction commit];
 }
 
 - (void)clearCurrentViewsSafely {
@@ -1005,7 +1000,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self.bgLayerMap removeAllObjects]; [self.floatLayerMap removeAllObjects]; [self.fgLayerMap removeAllObjects];
     self.bgParser = nil; self.floatParser = nil; self.fgParser = nil;
     self.dynamicSolidColor = nil;
-    self.aodSleepFrozen = NO;
 }
 
 - (void)lockSolidBackground {
@@ -1331,13 +1325,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
 
-// 【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 
+// 👇【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 👇
 @property (nonatomic, strong) CADisplayLink *manualAnimLink;
 @property (nonatomic, assign) double manualAnimStartTime;
 @property (nonatomic, strong) NSMutableArray *manualAnimTasks;
 @property (nonatomic, copy) NSString *manualTargetState;
 @property (nonatomic, assign) BOOL manualIsDark;
-//  新增结束 
+// 👆 新增结束 👆
 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
@@ -1592,11 +1586,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             for (NSString *keyPath in targetVals) {
                 id endVal = targetVals[keyPath];
-                // 抓取动画开始时的当前真实呈现值(Presentation Layer)，解决半路打断反弹问题
                 id startVal = [[layer presentationLayer] ?: layer valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
                 
                 if (startVal && endVal) {
-                    [layer removeAnimationForKey:keyPath]; // 瞬间杀掉系统原生 CAAnimation
+                    [layer removeAnimationForKey:keyPath]; 
                     [self.manualAnimTasks addObject:@{ @"layer": layer, @"keyPath": keyPath, @"start": startVal, @"end": endVal }];
                 }
             }
@@ -1608,6 +1601,30 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     buildTasks(self.fgParser, self.fgLayerMap, realFgState);
     
     if (self.manualAnimTasks.count > 0) {
+        // 🚨【全新思路 3：暗度陈仓】
+        // 核心法宝！在动画正是开跑前，提前把底层的状态“谎报”成最终状态（比如Sleep）。
+        // 这样在 AOD 息屏期间，任凭歌词/时间怎么刷新重绘，系统查到的状态都是合法的 Sleep，再也不会闪回 Locked 了！
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+            [self.bgView setState:realBgState animated:NO]; 
+            [self.floatingView setState:realFloatState animated:NO]; 
+            [self.fgView setState:realFgState animated:NO];
+        } else {
+            [self.bgView setState:realBgState]; 
+            [self.floatingView setState:realFloatState]; 
+            [self.fgView setState:realFgState];
+        }
+        
+        // 谎报完成后，为了保证你的手动动画不露馅，在同一瞬间把图层视觉立刻拉回起点。
+        for (NSDictionary *task in self.manualAnimTasks) {
+            CALayer *layer = task[@"layer"];
+            NSString *keyPath = task[@"keyPath"];
+            id startVal = task[@"start"];
+            @try { [layer setValue:startVal forKeyPath:keyPath]; } @catch(NSException *e) {}
+        }
+        [CATransaction commit];
+        
         self.manualAnimStartTime = CACurrentMediaTime();
         self.manualAnimLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(manualTick:)];
         [self.manualAnimLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
@@ -1654,11 +1671,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    if ([self.manualTargetState isEqualToString:@"Sleep"]) {
-        self.aodSleepFrozen = YES;
-        return;
-    }
-    
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
@@ -1682,6 +1694,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return; 
     
+    // 🚨【全新思路 1】：只要手指开始滑动，无情斩断潜伏在后台的动画定时器，把控制权完全交给手指，完美恢复原有滑动！
+    if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; self.manualAnimTasks = nil; }
+    
     self.isAnimatingState = NO;
     self.animationGeneration++;
     
@@ -1702,6 +1717,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
+    
+    // 🚨【全新思路 2】：只要发生新的状态切换（比如从息屏中途突然点亮屏幕），立刻杀掉旧定时器，防止它们互相打架导致亮屏连播错乱。
+    if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; self.manualAnimTasks = nil; }
+    
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -2326,7 +2345,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-//  完全以锁屏UI的真实视觉状态为唯一基准，抛弃 FaceID 状态的干扰
+// ✅ 完全以锁屏UI的真实视觉状态为唯一基准，抛弃 FaceID 状态的干扰
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed; // 记录真实的视觉状态：是否已经进入桌面
@@ -2408,7 +2427,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
-    // 【 核心：跳跃过滤器 (Delta Filter)】
+    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
     // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
@@ -2453,7 +2472,7 @@ static void EnsureEngineViewIsMounted() {
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
-    //  仅在“交互壁纸模式”下生效，保留完美的提前量动画
+    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
@@ -2474,7 +2493,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    //  仅在“交互壁纸模式”下生效，保留完美的提前量动画
+    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
