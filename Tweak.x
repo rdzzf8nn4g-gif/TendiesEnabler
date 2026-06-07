@@ -321,6 +321,7 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
 }
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated) {
+    EnsureEngineViewIsMounted();
     ZoneEmitScreenEvent(screenOn);
     ZoneEmitWallpaperState(screenOn, state, animated);
 }
@@ -2377,8 +2378,8 @@ static void EnsureEngineViewIsMounted() {
 // 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
-    g_isUnlocked = dismissed;
     if (g_enabled && g_isScreenOn && !g_isAODInactive) {
+        g_isUnlocked = dismissed;
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         ZoneEmitWallpaperState(YES, state, YES);
     }
@@ -2829,7 +2830,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = NO;
         g_lastTickProgress = -1; 
     }
 }
@@ -2837,7 +2837,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        g_isUnlocked = YES;
         g_lastTickProgress = -1; 
     }
 }
