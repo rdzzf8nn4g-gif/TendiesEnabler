@@ -1280,17 +1280,28 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *keyword = logicalState;
     if ([logicalState isEqualToString:@"Unlock"]) keyword = @"Home"; 
     if ([logicalState isEqualToString:@"Locked"]) keyword = @"Lock";
+    // 【修复 AOD 闪回问题 4/4】: 映射原生 AOD 命名
+    if ([logicalState isEqualToString:@"Sleep"]) keyword = @"AOD";
     
     NSMutableArray *candidates = [NSMutableArray array];
     for (NSString *state in self.availableStates) {
         NSString *lowerState = [state lowercaseString];
         NSString *lowerLogic = [logicalState lowercaseString];
         NSString *lowerKey = [keyword lowercaseString];
+        
         if ([lowerLogic isEqualToString:@"locked"]) {
             if ([lowerState containsString:@"unlock"] || [lowerState containsString:@"home"]) {
                 continue; 
             }
         }
+        // 增加拦截，让 Sleep 精准匹配到 AOD 相关的状态
+        if ([lowerLogic isEqualToString:@"sleep"]) {
+            if ([lowerState containsString:@"sleep"] || [lowerState containsString:@"aod"] || [lowerState containsString:@"alwayson"] || [lowerState containsString:@"dim"]) {
+                [candidates addObject:state];
+                continue;
+            }
+        }
+        
         if ([lowerState containsString:lowerLogic] || [lowerState containsString:lowerKey]) {
             [candidates addObject:state];
         }
@@ -1387,7 +1398,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
             NSString *savedState = [self.currentState copy];
             self.currentState = nil; 
-            [self transitionToState:savedState animated:YES]; 
+            // 【修复 AOD 闪回问题 3/4】: AOD触发时系统强制切换深色模式，必须用 animated:NO 瞬间同步数值，避免打断当前手写的 CADisplayLink 动画！
+            [self transitionToState:savedState animated:NO]; 
         }
     }
 }
@@ -1602,8 +1614,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     buildTasks(self.fgParser, self.fgLayerMap, realFgState);
     
     if (self.manualAnimTasks.count > 0) {
-        // 【核心微创 2】：改用 NSDate 绝对现实时间！现实时间不会随设备休眠而冻结，杜绝亮屏续播旧动画。
-        self.manualAnimStartTime = [NSDate timeIntervalSinceReferenceDate];
+        self.manualAnimStartTime = CACurrentMediaTime();
         self.manualAnimLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(manualTick:)];
         [self.manualAnimLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     } else {
@@ -1613,8 +1624,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)manualTick:(CADisplayLink *)link {
     double duration = (g_animDuration > 0) ? g_animDuration : 0.85;
-    // 【核心微创 3】：配套使用绝对时间计算。哪怕休眠醒来，progress 也会立刻 >1.0 干脆结束，绝不乱跳。
-    double progress = ([NSDate timeIntervalSinceReferenceDate] - self.manualAnimStartTime) / duration;
+    double progress = (CACurrentMediaTime() - self.manualAnimStartTime) / duration;
     if (progress >= 1.0) progress = 1.0;
     
     // 模拟苹果原生的 EaseInOut 缓动曲线
@@ -1672,10 +1682,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
     
-    // 【核心微创 1】：如果屏幕是黑的(AOD)，物理屏蔽系统发出的所有假滑动信号。彻底解决息屏被歌词刷新闪回！
-    if (!g_isScreenOn) return;
-    
-    if (self.isAnimatingState && [self.currentState isEqualToString:@"Sleep"]) return;
+    // 【修复 AOD 闪回问题 1/4】: 只要处于息屏/AOD 状态，绝对屏蔽系统的假进度干扰！
+    if ([self.currentState isEqualToString:@"Sleep"]) return;
     
     self.isAnimatingState = NO;
     self.animationGeneration++;
@@ -2402,6 +2410,11 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return; 
+    
+    // 【修复 AOD 闪回问题 2/4】: 只要屏幕处于 AOD 或息屏状态，彻底切断系统发出的锁屏重置进度！
+    if (!g_isScreenOn) return;
+    
+    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
     
     // 【🚨 核心：跳跃过滤器 (Delta Filter)】
     // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
