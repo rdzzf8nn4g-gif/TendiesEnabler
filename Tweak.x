@@ -2104,7 +2104,6 @@ static void EnsureEngineViewIsMounted() {
 }
 
 // 【终极大杀器】：拦截底层图层的动画隐式注入，让AOD无法再唤醒它
-%new
 - (id)actionForLayer:(CALayer *)layer forKey:(NSString *)event {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
         // 返回 NSNull 彻底杀掉这个属性的所有动画
