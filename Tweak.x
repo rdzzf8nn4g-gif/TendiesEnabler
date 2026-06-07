@@ -435,7 +435,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([keyPath isEqualToString:@"rate"]) {
         if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused) {
             if (self.player.rate == 0.0) {
-                // 【🚨核心防卡死修复：切断同步KVO死循环，零CPU占用🚨】
+                // 【核心防卡死修复：切断同步KVO死循环，零CPU占用】
                 // 延迟 0.25 秒再发送 play 指令。这让系统有时间处理亮屏环境，并且直接规避了一秒上万次的无限报错死锁。
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (g_enabled && g_isVideoMode && g_isScreenOn && !self.isManuallyPaused && self.player.rate == 0.0) {
@@ -455,7 +455,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.isManuallyPaused = NO;
     
-    // 【🚨防定格修复1：激活静默环境底层 AudioSession 权限🚨】
+    // 【防定格修复1：激活静默环境底层 AudioSession 权限】
     @try {
         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient 
                                          withOptions:AVAudioSessionCategoryOptionMixWithOthers 
@@ -463,7 +463,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[AVAudioSession sharedInstance] setActive:YES error:nil];
     } @catch (NSException *e) {}
 
-    // 【🚨防定格修复2：重新牵手硬件解码器🚨】
+    // 【防定格修复2：重新牵手硬件解码器】
     // 息屏极易导致 AVPlayerLayer 脱落，这里做一次保底重新绑定
     if (self.playerLayer.player == nil) {
         self.playerLayer.player = self.player;
@@ -488,7 +488,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     [self pauseVideo];
     
-    // 【🚨防内存泄漏修复：彻底断开并拔除所有指针🚨】
+    // 【防内存泄漏修复：彻底断开并拔除所有指针】
     if (self.looper) {
         [self.looper disableLooping];
         self.looper = nil;
@@ -1331,13 +1331,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
 
-// 👇【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 👇
+// 【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 
 @property (nonatomic, strong) CADisplayLink *manualAnimLink;
 @property (nonatomic, assign) double manualAnimStartTime;
 @property (nonatomic, strong) NSMutableArray *manualAnimTasks;
 @property (nonatomic, copy) NSString *manualTargetState;
 @property (nonatomic, assign) BOOL manualIsDark;
-// 👆 新增结束 👆
+//  新增结束 
 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
@@ -2326,7 +2326,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// ✅ 完全以锁屏UI的真实视觉状态为唯一基准，抛弃 FaceID 状态的干扰
+//  完全以锁屏UI的真实视觉状态为唯一基准，抛弃 FaceID 状态的干扰
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed; // 记录真实的视觉状态：是否已经进入桌面
@@ -2408,7 +2408,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
-    // 【🚨 核心：跳跃过滤器 (Delta Filter)】
+    // 【 核心：跳跃过滤器 (Delta Filter)】
     // 专门对付 iOS 16 通知亮屏时，系统为实现模糊而发出的巨大假进度跳跃。
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
@@ -2453,7 +2453,7 @@ static void EnsureEngineViewIsMounted() {
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
+    //  仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
@@ -2474,7 +2474,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    // 👉 仅在“交互壁纸模式”下生效，保留完美的提前量动画
+    //  仅在“交互壁纸模式”下生效，保留完美的提前量动画
     if (g_enabled && !g_isVideoMode) {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
