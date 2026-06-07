@@ -1395,10 +1395,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [super traitCollectionDidChange:previousTraitCollection];
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
         if (self.currentState && ![self.currentState isEqualToString:@"Init"]) {
+            // 【绝杀 1：防止进入AOD时深色模式切换打断手写息屏动画】
+            // 如果动画正在运行，绝对不允许打断，保证画面平滑过渡到最后一帧！
+            if (self.isAnimatingState || self.manualAnimLink) {
+                return;
+            }
+            
             NSString *savedState = [self.currentState copy];
             self.currentState = nil; 
-            // 【恢复原版】：使用 animated:YES，彻底修复 AOD 黑屏后才出图、以及进入桌面壁纸凭空消失的毁灭性 Bug
-            [self transitionToState:savedState animated:YES]; 
+            [self transitionToState:savedState animated:NO]; 
         }
     }
 }
@@ -1659,23 +1664,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    
-    // 动画跑到终点后，无动画同步一次 packageView 内部状态，防止状态脱节
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:realBgState animated:NO]; 
-        [self.floatingView setState:realFloatState animated:NO]; 
-        [self.fgView setState:realFgState animated:NO];
-    } else {
-        [self.bgView setState:realBgState]; 
-        [self.floatingView setState:realFloatState]; 
-        [self.fgView setState:realFgState];
-    }
-    [CATransaction commit];
+    // 【绝杀 2：废除破坏性的 BSUICAPackageView 原生 setState:】
+    // 我们的 CADisplayLink 已经将图层完美定格，此时调用系统的 setState: 会触发隐式清空导致图层消失！
+    // 直接用我们自己的底层数学解析器精准锁定状态，永不丢失图层！
+    [self applyExplicitState:self.manualTargetState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+    [self applyExplicitState:self.manualTargetState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+    [self applyExplicitState:self.manualTargetState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
 }
 
 - (void)onProgress:(NSNotification *)note {
@@ -1684,14 +1678,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
 
-    // 【终极防御 1：保护全天候 AOD 定格】
-    // 只有在屏幕处于息屏/AOD状态，且引擎确实在 Sleep 时，才抛弃底层强加的进度，防止锁屏画面回弹
+    // 【绝杀 4：智能防御网】
+    // 只有在确定已经息屏并且引擎处于 Sleep 帧时，才阻断系统底层的 0.0 死值回调，把画面牢牢定死在 AOD。
     if (!g_isScreenOn && [self.currentState isEqualToString:@"Sleep"]) {
         return;
     }
 
-    // 【终极防御 2：保护手动 CADisplayLink 唤醒/息屏动画】
-    // 允许真正的滑动(如0.05, 0.5等)打断动画，但屏蔽系统在动画期间发来的 0.0 或 1.0 的“死值”对齐信号！
+    // 在亮屏/息屏丝滑过渡期间，如果系统发来极端的 0.0 或 1.0 对齐信号，拦截掉，让我们的手写动画播完。
+    // 但是如果是真实的手指滑动 (比如 progress 是 0.3)，则允许打断动画并跟随手指！
     if (self.isAnimatingState) {
         if ([self.currentState isEqualToString:@"Sleep"]) return;
         if ([self.currentState isEqualToString:@"Locked"] && progress <= 0.05) return;
@@ -1718,17 +1712,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
     [self ensureAllLayerMaps];
     
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
-        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
-        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1747,18 +1736,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
         }
         
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:realBgState animated:NO]; 
-            [self.floatingView setState:realFloatState animated:NO]; 
-            [self.fgView setState:realFgState animated:NO];
-        } else {
-            [self.bgView setState:realBgState]; 
-            [self.floatingView setState:realFloatState]; 
-            [self.fgView setState:realFgState];
-        }
-        [CATransaction commit];
+        // 【绝杀 3：彻底剔除原生 [self.bgView setState:xxx] 调用】
+        // 数学插值已经将图层调整到位，不需要系统再次介入破坏属性。
     }
 }
 
@@ -2421,8 +2400,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return; 
     
-    // 【恢复原版：纯跳跃过滤器 (Delta Filter)】
-    // 专门对付系统为实现模糊而发出的巨大假进度跳跃。完美兼容下拉锁屏与日常交互！
+    // 【完美还原最初的跳跃滤网】：放行所有真实手指滑动与正常的点亮动画，仅过滤 16+ 通知中心产生的假进度突变
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
     
