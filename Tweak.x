@@ -1704,6 +1704,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)completeManualTransition {
     if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
     self.manualAnimTasks = nil;
+    self.isAnimatingState = NO;
     
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
@@ -1712,26 +1713,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     
-    // 恢复底层逻辑状态同步，防止下一次点击时出现状态脱节
-    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-        [self.bgView setState:realBgState animated:NO]; 
-        [self.floatingView setState:realFloatState animated:NO]; 
-        [self.fgView setState:realFgState animated:NO];
-    } else {
-        [self.bgView setState:realBgState]; 
-        [self.floatingView setState:realFloatState]; 
-        [self.fgView setState:realFgState];
-    }
-    
-    // 【核心修复】：立刻用我们解析的精准数据，暴力碾碎 setState 刚触发的系统隐式动画，完美定格
+    // 【终极修复 1】：彻底剔除系统的 setState 依赖！
+    // 直接用你强大的底层解析器，暴力修改图层的 Model Layer，把画面死死冻结在最后一帧。
+    // 这样哪怕 AOD 休眠多久，图层状态都绝对不会丢失，下一次亮屏完美衔接！
     [self applyExplicitState:realBgState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
     [self applyExplicitState:realFloatState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
     [self applyExplicitState:realFgState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
     
     [CATransaction commit];
-    
-    // 状态归位，解除锁定
-    self.isAnimatingState = NO;
 }
 
 - (void)onProgress:(NSNotification *)note {
@@ -1763,17 +1752,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
     [self ensureAllLayerMaps];
     
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
-        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
-        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1792,18 +1776,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
         }
         
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:realBgState animated:NO]; 
-            [self.floatingView setState:realFloatState animated:NO]; 
-            [self.fgView setState:realFgState animated:NO];
-        } else {
-            [self.bgView setState:realBgState]; 
-            [self.floatingView setState:realFloatState]; 
-            [self.fgView setState:realFgState];
-        }
-        [CATransaction commit];
+        // 【终极修复 2】：这里原先有调用 [self.bgView setState:]，现在彻底拔除！
+        // 既然我们自己能控制所有图层参数，就永远不要给系统 CoreAnimation 插手的机会。
     }
 }
 
