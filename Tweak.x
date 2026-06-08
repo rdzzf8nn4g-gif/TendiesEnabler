@@ -1837,10 +1837,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     
-    // 【核心修复 2 加强版】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
-    // 绝对禁止系统传来的 1.0 或 0.0 progress 打断动画！彻底解决亮屏瞬间画面被强拉到终点的问题。
+    // 【终极防御】：如果当前正在播放纯手写的开屏/息屏过渡动画，
+    // 必须绝对无视系统发来的所有滑动进度！这是切断开屏“反向滑动”错觉的最后一道防线！
     if (self.isAnimatingState || self.manualAnimLink != nil) {
-        ZoneAODLog(@"AOD.ManualAnim", @"onProgress ignored by animating state=%@", self.currentState);
         return;
     }
 
@@ -2522,18 +2521,27 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     
     // 【修复桌面息屏闪烁】：如果当前在桌面，且屏幕正在息屏或已息屏，拦截系统强加的锁屏状态
-    if (!dismissed && g_isUnlocked && !g_isScreenOn) {
-        ZoneAODLog(@"AOD.Hook", @"Block forced lock transition during sleep.");
-        return; 
-    }
-    
+    - (void)setDismissed:(BOOL)dismissed {
+    %orig;
     g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
-        ZoneAODLog(@"AOD.Hook", @"setDismissed emit state=%@", state);
-        ZoneEmitWallpaperState(YES, state, YES);
+    
+    if (g_enabled) {
+        if (dismissed) {
+            // 解锁时立即下发，保证顺畅不拖沓
+            if (g_isScreenOn && !g_isAODInactive) {
+                ZoneEmitWallpaperState(YES, @"Unlock", YES);
+            }
+        } else {
+            // 【最强拦截】：如果是电源键息屏，系统会伪造一次“回到锁屏”。
+            // 我们强制延迟 0.2 秒！如果这 0.2 秒内屏幕黑了，就会直接被后续的“Sleep”覆盖，
+            // 彻底杀死了桌面息屏闪锁屏、以及开屏画面倒退的可能！
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (g_isScreenOn && !g_isAODInactive && !g_isUnlocked) {
+                    ZoneEmitWallpaperState(YES, @"Locked", YES);
+                }
+            });
+        }
     }
-    ZoneAODLog(@"AOD.Hook", @"setDismissed exit dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
@@ -2634,24 +2642,22 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
 
-    if (g_forceAcceptNextSystemProgress) {
-        ZoneAODLog(@"AOD.Progress", @"forceAccept progress=%.4f", progress);
+if (g_forceAcceptNextSystemProgress) {
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = progress;
-        // 【修复开屏倒退】：强制吃掉开屏第一帧进度，但不发送进度广播给引擎
+        // 【强制吃掉】：开屏第一帧进度直接吞掉，严禁广播给引擎，防止开屏受滑动残值干扰
         return; 
-    } else {
-        double delta = progress - g_lastSystemProgress;
-        g_lastSystemProgress = progress;
+    } 
+    
+    double delta = progress - g_lastSystemProgress;
+    g_lastSystemProgress = progress;
 
-        if (ABS(delta) > 0.15) {
-            ZoneAODLog(@"AOD.Progress", @"droppedByDelta progress=%.4f delta=%.4f", progress, delta);
-            return;
-        }
+    // 【强化过滤】：过滤所有大于 0.15 的突兀进度跳变（桌面按电源键会触发 1.0 -> 0.0 瞬间跳跃）
+    if (ABS(delta) > 0.15) {
+        return;
     }
 
     EnsureEngineViewIsMounted();
-    ZoneAODLog(@"AOD.Progress", @"post ZoneEngineProgress progress=%.4f", progress);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
 }
 %end
