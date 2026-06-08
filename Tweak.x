@@ -1010,6 +1010,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onWakeUp {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
+    
+    // 【内存优化】：解冻图层，恢复渲染与粒子
+    ZoneFreezeLayerTree(self.bgView.layer, NO);
+    ZoneFreezeLayerTree(self.floatingView.layer, NO);
+    ZoneFreezeLayerTree(self.fgView.layer, NO);
+    
     [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:YES];
 }
 
@@ -1017,6 +1023,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
     [self transitionToState:@"Sleep" animated:YES];
+    
+    // 【内存优化】：彻底冻结图层，释放 CPU 并阻止内存泄露
+    ZoneFreezeLayerTree(self.bgView.layer, YES);
+    ZoneFreezeLayerTree(self.floatingView.layer, YES);
+    ZoneFreezeLayerTree(self.fgView.layer, YES);
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -1523,6 +1534,32 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)lockSolidBackground;
 @end
 
+// ==========================================
+// 内存优化：递归暂停图层树，彻底冻结渲染与粒子
+// ==========================================
+static void ZoneFreezeLayerTree(CALayer *layer, BOOL freeze) {
+    if (!layer) return;
+    
+    // 切断图层动画速度
+    layer.speed = freeze ? 0.0 : 1.0;
+    
+    if ([layer isKindOfClass:[CAEmitterLayer class]]) {
+        // 如果是粒子引擎，息屏时出生率设为 0，防止后台疯狂堆积内存
+        CAEmitterLayer *emitter = (CAEmitterLayer *)layer;
+        if (freeze) {
+            objc_setAssociatedObject(emitter, "ZoneOrigBirthRate", @(emitter.birthRate), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            emitter.birthRate = 0.0;
+        } else {
+            NSNumber *orig = objc_getAssociatedObject(emitter, "ZoneOrigBirthRate");
+            if (orig) emitter.birthRate = [orig floatValue];
+        }
+    }
+    
+    for (CALayer *sub in layer.sublayers) {
+        ZoneFreezeLayerTree(sub, freeze);
+    }
+}
+
 @implementation ZoneRenderEngineEnhanced
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -1546,6 +1583,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil];
+[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleMemoryWarning) name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
     }
     return self;
 }
@@ -1564,6 +1602,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)dealloc { 
     [[NSNotificationCenter defaultCenter] removeObserver:self]; 
     if (_manualAnimLink) { [_manualAnimLink invalidate]; _manualAnimLink = nil; }
+}
+
+// 【内存优化】：监听系统内存警告，主动清空不可见的离屏渲染缓存
+- (void)handleMemoryWarning {
+    if (!g_isScreenOn || [self.currentState isEqualToString:@"Sleep"]) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        
+        // 收到内存警告且屏幕未在使用壁纸时，强制刷掉光栅化缓存
+        if (self.bgView && self.bgView.layer.shouldRasterize) self.bgView.layer.shouldRasterize = NO;
+        if (self.floatingView && self.floatingView.layer.shouldRasterize) self.floatingView.layer.shouldRasterize = NO;
+        if (self.fgView && self.fgView.layer.shouldRasterize) self.fgView.layer.shouldRasterize = NO;
+        
+        [CATransaction commit];
+    }
 }
 
 - (void)layoutSubviews {
@@ -2105,15 +2158,31 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
                 }
                 
                 double factor = g_resolutionFactor;
+                // 【内存优化】：改良光栅化与异步绘制策略，防止内存雪崩
                 if (factor < 0.99) {
                     CGFloat scale = [UIScreen mainScreen].scale * factor;
-                    if (self.bgView) { self.bgView.layer.shouldRasterize = YES; self.bgView.layer.rasterizationScale = scale; }
-                    if (self.floatingView) { self.floatingView.layer.shouldRasterize = YES; self.floatingView.layer.rasterizationScale = scale; }
-                    if (self.fgView) { self.fgView.layer.shouldRasterize = YES; self.fgView.layer.rasterizationScale = scale; }
+                    if (self.bgView) { 
+                        self.bgView.layer.shouldRasterize = YES; 
+                        self.bgView.layer.rasterizationScale = scale; 
+                        self.bgView.layer.opaque = NO; 
+                        self.bgView.layer.drawsAsynchronously = YES; 
+                    }
+                    if (self.floatingView) { 
+                        self.floatingView.layer.shouldRasterize = YES; 
+                        self.floatingView.layer.rasterizationScale = scale; 
+                        self.floatingView.layer.opaque = NO; 
+                        self.floatingView.layer.drawsAsynchronously = YES; 
+                    }
+                    if (self.fgView) { 
+                        self.fgView.layer.shouldRasterize = YES; 
+                        self.fgView.layer.rasterizationScale = scale; 
+                        self.fgView.layer.opaque = NO; 
+                        self.fgView.layer.drawsAsynchronously = YES; 
+                    }
                 } else {
-                    if (self.bgView) { self.bgView.layer.shouldRasterize = NO; }
-                    if (self.floatingView) { self.floatingView.layer.shouldRasterize = NO; }
-                    if (self.fgView) { self.fgView.layer.shouldRasterize = NO; }
+                    if (self.bgView) { self.bgView.layer.shouldRasterize = NO; self.bgView.layer.drawsAsynchronously = YES; }
+                    if (self.floatingView) { self.floatingView.layer.shouldRasterize = NO; self.floatingView.layer.drawsAsynchronously = YES; }
+                    if (self.fgView) { self.fgView.layer.shouldRasterize = NO; self.fgView.layer.drawsAsynchronously = YES; }
                 }
             }
             
