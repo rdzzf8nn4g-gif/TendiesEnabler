@@ -2602,7 +2602,6 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Progress", @"updateWallpaperAnimationWithProgress progress=%.4f screenOn=%d aodInactive=%d forceNext=%d lastProgress=%.4f", progress, g_isScreenOn, g_isAODInactive, g_forceAcceptNextSystemProgress, g_lastSystemProgress);
 
     // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
-    // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
     if (g_portalView && g_isScreenOn && !g_isAODInactive) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -2634,7 +2633,7 @@ static void EnsureEngineViewIsMounted() {
         ZoneFlushPendingAODWallpaperState();
     }
 
-    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
+    // 拦截 ZoneEngineProgress 下发
     if (!g_isScreenOn || g_isAODInactive) {
         ZonePinPortalVisibleForAODSleep();
         ZoneAODLog(@"AOD.Progress", @"blockedByAOD progress=%.4f lastProgress=%.4f", progress, g_lastSystemProgress);
@@ -2642,22 +2641,23 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
 
-if (g_forceAcceptNextSystemProgress) {
+    if (g_forceAcceptNextSystemProgress) {
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = progress;
         // 【强制吃掉】：开屏第一帧进度直接吞掉，严禁广播给引擎，防止开屏受滑动残值干扰
         return; 
     } 
-    
+
     double delta = progress - g_lastSystemProgress;
     g_lastSystemProgress = progress;
 
-    // 【强化过滤】：过滤所有大于 0.15 的突兀进度跳变（桌面按电源键会触发 1.0 -> 0.0 瞬间跳跃）
+    // 【强化过滤】：过滤所有大于 0.15 的突兀进度跳变
     if (ABS(delta) > 0.15) {
         return;
     }
 
     EnsureEngineViewIsMounted();
+    ZoneAODLog(@"AOD.Progress", @"post ZoneEngineProgress progress=%.4f", progress);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
 }
 %end
