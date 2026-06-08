@@ -273,6 +273,10 @@ static NSString *g_lastEmittedScreenState = nil;
 static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
 static NSString *g_lastEmittedWallpaperState = nil;
 static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
+static NSString *g_pendingAODWallpaperState = nil;
+static BOOL g_pendingAODWallpaperAnimated = YES;
+static BOOL g_hasPendingAODWallpaperState = NO;
+static BOOL g_forceAcceptNextSystemProgress = NO;
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
 
@@ -280,12 +284,50 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
     g_isScreenOn = screenOn;
     g_isAODInactive = !screenOn;
     g_lastTickProgress = -1;
-    g_lastSystemProgress = screenOn ? 1.0 : 0.0;
+    if (screenOn) {
+        g_forceAcceptNextSystemProgress = YES;
+        g_lastSystemProgress = -1.0;
+    } else {
+        g_forceAcceptNextSystemProgress = NO;
+        g_lastSystemProgress = 0.0;
+    }
+}
+
+static inline void ZoneClearPendingAODWallpaperState(void) {
+    g_hasPendingAODWallpaperState = NO;
+    g_pendingAODWallpaperState = nil;
+    g_pendingAODWallpaperAnimated = YES;
+}
+
+static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL animated) {
+    if (!state || [state isEqualToString:@"Sleep"]) {
+        return;
+    }
+    g_hasPendingAODWallpaperState = YES;
+    g_pendingAODWallpaperState = [state copy];
+    g_pendingAODWallpaperAnimated = animated;
+}
+
+static inline void ZoneFlushPendingAODWallpaperState(void) {
+    if (!g_hasPendingAODWallpaperState || !g_isScreenOn || g_isAODInactive) {
+        return;
+    }
+    NSString *pendingState = [g_pendingAODWallpaperState copy];
+    BOOL pendingAnimated = g_pendingAODWallpaperAnimated;
+    ZoneClearPendingAODWallpaperState();
+    if (pendingState) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
+                                                            object:nil
+                                                          userInfo:@{@"state": pendingState, @"animated": @(pendingAnimated)}];
+    }
 }
 
 static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL animated) {
     ZoneSetAODScreenState(screenOn);
     ZoneEmitScreenAndWallpaperState(screenOn, state, animated);
+    if (screenOn) {
+        ZoneFlushPendingAODWallpaperState();
+    }
 }
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
@@ -316,6 +358,7 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     }
 
     if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
+        ZoneQueuePendingAODWallpaperState(finalState, animated);
         return;
     }
 
@@ -332,6 +375,10 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
                                                         object:nil
                                                       userInfo:@{@"state": finalState, @"animated": @(animated)}];
+
+    if (screenOn) {
+        ZoneFlushPendingAODWallpaperState();
+    }
 }
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated) {
@@ -2481,11 +2528,16 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
 
-    double delta = progress - g_lastSystemProgress;
-    g_lastSystemProgress = progress;
+    if (g_forceAcceptNextSystemProgress) {
+        g_forceAcceptNextSystemProgress = NO;
+        g_lastSystemProgress = progress;
+    } else {
+        double delta = progress - g_lastSystemProgress;
+        g_lastSystemProgress = progress;
 
-    if (ABS(delta) > 0.15) {
-        return;
+        if (ABS(delta) > 0.15) {
+            return;
+        }
     }
 
     EnsureEngineViewIsMounted();
