@@ -1113,6 +1113,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
+    
+    // 👇 【核心修复：桌面息屏去动画】 👇
+    if ([stateName isEqualToString:@"Sleep"]) {
+        // 如果当前是桌面状态，或者刚按下电源键导致正在向锁屏过渡，强行关掉动画
+        if ([self.currentState isEqualToString:@"Unlock"] || 
+            (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"])) {
+            animated = NO;
+        }
+    }
+    // 👆 核心修复结束 👆
+
     self.currentState = [stateName copy];
     
     if (animated) {
@@ -1864,9 +1875,21 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
+    
+    // 👇 【核心修复：桌面息屏去动画】 👇
+    if ([stateName isEqualToString:@"Sleep"]) {
+        // 如果当前是桌面状态，或者刚按下电源键导致正在向锁屏过渡，强行关掉动画
+        if ([self.currentState isEqualToString:@"Unlock"] || 
+            (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"])) {
+            animated = NO;
+            [self completeManualTransition]; // 瞬间干掉正在播放的残余手写动画
+        }
+    }
+    // 👆 核心修复结束 👆
+
     ZoneAODLog(@"AOD.ManualAnim", @"transitionToState state=%@ animated=%d current=%@ screenOn=%d aodInactive=%d", stateName, animated, self.currentState, g_isScreenOn, g_isAODInactive);
     self.currentState = [stateName copy];
-    
+
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
@@ -2533,10 +2556,7 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode enter mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        
-        // 【核心修改】：如果是进入息屏模式 (mode=YES)，并且当前在桌面 (g_isUnlocked=YES)，则取消动画
-        BOOL shouldAnimate = (mode && g_isUnlocked) ? NO : YES;
-        ZoneCommitAODTransition(!mode, state, shouldAnimate);
+        ZoneCommitAODTransition(!mode, state, YES);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode exit mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
@@ -2555,10 +2575,7 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive enter inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        
-        // 【核心修改】：如果是进入AOD静止态 (inactive=YES)，并且当前在桌面，取消动画
-        BOOL shouldAnimate = (inactive && g_isUnlocked) ? NO : YES;
-        ZoneCommitAODTransition(!inactive, state, shouldAnimate);
+        ZoneCommitAODTransition(!inactive, state, YES);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive exit inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
@@ -2669,11 +2686,8 @@ static void EnsureEngineViewIsMounted() {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            // 【核心修改】：如果是要息屏 (!screenOn)，且人在桌面 (g_isUnlocked)，切断过渡动画
-            BOOL shouldAnimate = (!screenOn && g_isUnlocked) ? NO : YES;
             ZoneAODLog(@"AOD.Backlight", @"willTransition commit screenOn=%d zoneState=%@", screenOn, zoneState);
-            ZoneCommitAODTransition(screenOn, zoneState, shouldAnimate);
+            ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
 }
@@ -2693,11 +2707,8 @@ static void EnsureEngineViewIsMounted() {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            
-            // 【核心修改】：同上，切断过渡动画
-            BOOL shouldAnimate = (!screenOn && g_isUnlocked) ? NO : YES;
             ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate commit screenOn=%d zoneState=%@", screenOn, zoneState);
-            ZoneCommitAODTransition(screenOn, zoneState, shouldAnimate);
+            ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
 }
