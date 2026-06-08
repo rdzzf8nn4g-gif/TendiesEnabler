@@ -1864,17 +1864,25 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     
-    // 【核心修复 2】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
-    // 绝对禁止系统传来的 1.0 或 0.0 progress 打断动画！彻底解决亮屏瞬间画面被强拉到终点的问题。
+    double progress = [note.userInfo[@"progress"] doubleValue];
+    progress = MAX(0.0, MIN(1.0, progress));
+    
+    // 【核心修复 2 完善】：解决亮屏秒滑桌面变锁屏的百年Bug
     if (self.isAnimatingState) {
-        ZoneAODLog(@"AOD.ManualAnim", @"onProgress ignored by animating state=%@", self.currentState);
-        return;
+        if (progress > 0.01 && progress < 0.99) {
+            // 1. 手指正在滑动：终止强制动画，把控制权交回给进度条
+            [self completeManualTransition];
+        } else if (progress >= 0.99 && ZoneIsDeviceUnlocked()) {
+            // 2. 已经秒解锁进入桌面：终止残余亮屏动画，瞬间到位
+            [self completeManualTransition];
+        } else {
+            // 3. 亮息屏瞬间的 0.0/1.0 假进度：坚决拦截防闪烁
+            ZoneAODLog(@"AOD.ManualAnim", @"onProgress ignored fake system progress");
+            return;
+        }
     }
 
     self.animationGeneration++;
-    
-    double progress = [note.userInfo[@"progress"] doubleValue];
-    progress = MAX(0.0, MIN(1.0, progress));
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
