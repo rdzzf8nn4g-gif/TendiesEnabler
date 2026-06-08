@@ -346,15 +346,7 @@ static inline void ZoneAODAppendLine(NSString *line) {
     });
 }
 
-static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    NSString *body = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    if (!body) body = @"";
-    NSString *line = [NSString stringWithFormat:@"%@ | %@ | %@\n", ZoneAODTimestamp(), scope ?: @"AOD", body];
-    ZoneAODAppendLine(line);
-}
+static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {}
 
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
@@ -2465,7 +2457,8 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
+            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
+            portalView.matchesPosition = freezeAODLayout ? NO : (IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES));
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
@@ -2478,13 +2471,16 @@ static void EnsureEngineViewIsMounted() {
             if (portalView.sourceView != sourceForPortal) {
                 portalView.sourceView = sourceForPortal; 
             }
+            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
             if (IsSingleVideoMode()) {
-                if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
-                portalView.alpha = 1.0;
+                if (!freezeAODLayout && portalView.matchesPosition != YES) portalView.matchesPosition = YES;
+                if (!freezeAODLayout) portalView.alpha = 1.0;
             } else if (g_isVideoMode && portalView.matchesPosition != NO) {
-                portalView.matchesPosition = NO;
-                portalView.alpha = 1.0;
-            } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
+                if (!freezeAODLayout) {
+                    portalView.matchesPosition = NO;
+                    portalView.alpha = 1.0;
+                }
+            } else if (!g_isVideoMode && !freezeAODLayout && portalView.matchesPosition != YES) {
                 portalView.matchesPosition = YES;
             }
         } else {
@@ -2632,7 +2628,7 @@ static void EnsureEngineViewIsMounted() {
 
     // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
     // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
-    if (g_portalView) {
+    if (g_portalView && g_isScreenOn && !g_isAODInactive) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
                 [CATransaction begin];
@@ -2967,7 +2963,8 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
+            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
+            portalView.matchesPosition = freezeAODLayout ? NO : (IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES));
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
@@ -2980,13 +2977,16 @@ static void EnsureEngineViewIsMounted() {
             if (portalView.sourceView != sourceForPortal) {
                 portalView.sourceView = sourceForPortal; 
             }
+            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
             if (IsSingleVideoMode()) {
-                if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
-                portalView.alpha = 1.0;
+                if (!freezeAODLayout && portalView.matchesPosition != YES) portalView.matchesPosition = YES;
+                if (!freezeAODLayout) portalView.alpha = 1.0;
             } else if (g_isVideoMode && portalView.matchesPosition != NO) {
-                portalView.matchesPosition = NO;
-                portalView.alpha = 1.0;
-            } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
+                if (!freezeAODLayout) {
+                    portalView.matchesPosition = NO;
+                    portalView.alpha = 1.0;
+                }
+            } else if (!g_isVideoMode && !freezeAODLayout && portalView.matchesPosition != YES) {
                 portalView.matchesPosition = YES;
             }
         } else {
@@ -3042,7 +3042,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
     }
@@ -3050,7 +3050,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    if (g_enabled) {
+    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
         g_isUnlocked = YES;
         g_lastTickProgress = -1; 
     }
@@ -3220,7 +3220,7 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-- (void)viewDidLayoutSubviews { %orig; if (g_enabled) [self viewWillLayoutSubviews]; }
+- (void)viewDidLayoutSubviews { %orig; if (g_enabled && (!g_isAODInactive || g_isScreenOn)) [self viewWillLayoutSubviews]; }
 
 - (void)_updateBackgroundContentView { %orig; }
 - (void)_updateWallpaperEffectView { %orig; }
