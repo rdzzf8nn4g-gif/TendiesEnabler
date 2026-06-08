@@ -347,6 +347,14 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
     }
 }
 
+
+static inline BOOL ZoneShouldSuppressDesktopSleepAnimation(void) {
+    if (@available(iOS 16.0, *)) {
+        return g_enabled && g_isUnlocked;
+    }
+    return NO;
+}
+
 static inline void ZonePinPortalVisibleForAODSleep(void) {
     if (!g_portalView) return;
     [CATransaction begin];
@@ -366,16 +374,6 @@ static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL 
     if (screenOn) {
         ZoneFlushPendingAODWallpaperState();
     }
-}
-
-
-static inline BOOL ZoneShouldAnimateDesktopSleepTransition(NSString *state, BOOL screenOn) {
-    if (@available(iOS 16.0, *)) {
-        if (!screenOn && g_isUnlocked && [state isEqualToString:@"Sleep"]) {
-            return NO;
-        }
-    }
-    return YES;
 }
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
@@ -407,6 +405,10 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     }
     if (!screenOn) {
         finalState = @"Sleep";
+    }
+
+    if ([finalState isEqualToString:@"Sleep"] && ZoneShouldSuppressDesktopSleepAnimation()) {
+        animated = NO;
     }
 
     if (g_deferAODWakeWallpaperState && screenOn && ![finalState isEqualToString:@"Sleep"]) {
@@ -1027,7 +1029,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:YES];
+    BOOL animated = !ZoneShouldSuppressDesktopSleepAnimation();
+    [self transitionToState:@"Sleep" animated:animated];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -1641,7 +1644,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:YES];
+    BOOL animated = !ZoneShouldSuppressDesktopSleepAnimation();
+    [self transitionToState:@"Sleep" animated:animated];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserEnhanced *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -2543,7 +2547,7 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode enter mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!mode, state, ZoneShouldAnimateDesktopSleepTransition(state, !mode));
+        ZoneCommitAODTransition(!mode, state, (mode && ZoneShouldSuppressDesktopSleepAnimation()) ? NO : YES);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode exit mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
@@ -2562,7 +2566,7 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive enter inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!inactive, state, ZoneShouldAnimateDesktopSleepTransition(state, !inactive));
+        ZoneCommitAODTransition(!inactive, state, (inactive && ZoneShouldSuppressDesktopSleepAnimation()) ? NO : YES);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive exit inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
@@ -2673,8 +2677,9 @@ static void EnsureEngineViewIsMounted() {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            BOOL animated = screenOn ? YES : !ZoneShouldSuppressDesktopSleepAnimation();
             ZoneAODLog(@"AOD.Backlight", @"willTransition commit screenOn=%d zoneState=%@", screenOn, zoneState);
-            ZoneCommitAODTransition(screenOn, zoneState, ZoneShouldAnimateDesktopSleepTransition(zoneState, screenOn));
+            ZoneCommitAODTransition(screenOn, zoneState, animated);
         }
     }
 }
@@ -2694,8 +2699,9 @@ static void EnsureEngineViewIsMounted() {
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            BOOL animated = screenOn ? YES : !ZoneShouldSuppressDesktopSleepAnimation();
             ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate commit screenOn=%d zoneState=%@", screenOn, zoneState);
-            ZoneCommitAODTransition(screenOn, zoneState, ZoneShouldAnimateDesktopSleepTransition(zoneState, screenOn));
+            ZoneCommitAODTransition(screenOn, zoneState, animated);
         }
     }
 }
