@@ -1407,7 +1407,7 @@ for (NSString *name in lockContents) {
 }
 
 // ==========================================================
-// 全新文档导入回调：包含 ZIP 绕过预检、批处理解压拆分、40MB延迟查杀
+// 全新文档导入回调：修复文件选择器权限被提前关闭的致命Bug
 // ==========================================================
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
@@ -1423,11 +1423,13 @@ for (NSString *name in lockContents) {
         BOOL containsZip = NO;
         
         for (NSURL *url in urls) {
+            // 【核心修复 1】：在这里开启权限，但绝不在这里关闭！让权限通行证保持存活。
+            [url startAccessingSecurityScopedResource];
+            
             NSString *ext = [[url pathExtension] lowercaseString];
             if ([ext isEqualToString:@"zip"] || [ext isEqualToString:@"tendies"]) {
                 containsZip = YES;
             } else {
-                BOOL isAccessing = [url startAccessingSecurityScopedResource];
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:url.path isDirectory:&isDir]) {
                     if (isDir) {
@@ -1436,8 +1438,8 @@ for (NSString *name in lockContents) {
                         totalSizeBytes += [[fm attributesOfItemAtPath:url.path error:nil] fileSize];
                     }
                 }
-                if (isAccessing) [url stopAccessingSecurityScopedResource];
             }
+            // 删除了原有的 [url stopAccessingSecurityScopedResource]; 
         }
 
         double totalMB = totalSizeBytes / (1024.0 * 1024.0);
@@ -1445,9 +1447,12 @@ for (NSString *name in lockContents) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (!containsZip && totalMB > 40.0) {
                 UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检测到大文件" 
-                                                                               message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时、卡顿甚至卡死。\n是否继续导入？", totalMB] 
+                                                                               message:[NSString stringWithFormat:@"检测导入的壁纸文件大于40MB (约 %.1f MB)。\n\n继续导入可能会导致设备在下滑锁屏时卡顿甚至卡死。\n是否继续导入？", totalMB] 
                                                                         preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+                [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action){
+                    // 如果用户取消了，需要在这里把挂起的权限关掉
+                    for (NSURL *url in urls) { [url stopAccessingSecurityScopedResource]; }
+                }]];
                 [alert addAction:[UIAlertAction actionWithTitle:@"继续导入" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
                     [self proceedWithImportingURLs:urls skipPostCheck:YES];
                 }]];
@@ -1588,7 +1593,9 @@ for (NSString *name in lockContents) {
     }
 }
 
-// 包含了深层防御以及批处理递归拆解的终极导入总入口
+// ==========================================================
+// 终极导入总入口：使用 NSData 强抽沙盒，并捕捉精确报错信息
+// ==========================================================
 - (void)proceedWithImportingURLs:(NSArray<NSURL *> *)urls skipPostCheck:(BOOL)skipPostCheck {
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在导入..." message:nil preferredStyle:UIAlertControllerStyleAlert];
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
@@ -1612,19 +1619,30 @@ for (NSString *name in lockContents) {
             [fm createDirectoryAtPath:tempWorkspace withIntermediateDirectories:YES attributes:nil error:nil];
             
             NSMutableArray *newImportedPaths = [NSMutableArray array];
+            __block NSError *exactError = nil; // 【核心修复 2】：建立错误追踪器
             
             for (NSURL *sourceURL in urls) {
-                BOOL isAccessing = [sourceURL startAccessingSecurityScopedResource];
-                
                 NSString *fileName = [sourceURL lastPathComponent];
                 NSString *tempDest = [tempWorkspace stringByAppendingPathComponent:fileName];
                 
-                if ([fm copyItemAtPath:sourceURL.path toPath:tempDest error:nil]) {
-                    // 进入究极形态的递归拆分与解压分流模块
-                    [self processImportedItemAtPath:tempDest targetDir:wpDir newImportedPaths:newImportedPaths];
+                // 【核心修复 3】：放弃 copyItemAtPath，改用 NSData 强行把文件数据抽过沙盒！
+                NSError *readErr = nil;
+                NSData *fileData = [NSData dataWithContentsOfURL:sourceURL options:NSDataReadingMappedIfSafe error:&readErr];
+                
+                if (fileData) {
+                    BOOL wrote = [fileData writeToFile:tempDest atomically:YES];
+                    if (wrote) {
+                        // 数据安全落入己方临时阵地，开始送去解压！
+                        [self processImportedItemAtPath:tempDest targetDir:wpDir newImportedPaths:newImportedPaths];
+                    } else {
+                        exactError = [NSError errorWithDomain:@"Zone" code:1 userInfo:@{NSLocalizedDescriptionKey: @"无法写入数据到临时缓存目录。"}];
+                    }
+                } else {
+                    exactError = readErr; // 捕捉沙盒拒绝或 iCloud 未下载的真实报错
                 }
                 
-                if (isAccessing) [sourceURL stopAccessingSecurityScopedResource];
+                // 【核心修复 4】：文件全部处理完后，彻底关闭 iOS 文件选择器的安全权限
+                [sourceURL stopAccessingSecurityScopedResource];
             }
             
             // 清空打扫临时加工间
@@ -1637,7 +1655,6 @@ for (NSString *name in lockContents) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
                         [self reloadSpecifiers]; 
-                        // 根据预检结果拦截决定是否执行延迟查杀
                         if (!skipPostCheck) {
                             [self checkPostImportSizeForPaths:newImportedPaths];
                         }
@@ -1646,7 +1663,9 @@ for (NSString *name in lockContents) {
             } else {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"无效的壁纸文件或已损坏。" preferredStyle:UIAlertControllerStyleAlert];
+                        // 将底层的精准报错显示给用户（再也不是一头雾水的“无效文件”了）
+                        NSString *errMsg = exactError ? exactError.localizedDescription : @"无效的壁纸文件，或解压彻底失败。";
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导入失败" message:errMsg preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [topVC presentViewController:alert animated:YES completion:nil];
                     }];
