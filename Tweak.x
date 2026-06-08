@@ -456,13 +456,30 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
     }
 }
 
-static inline void ZonePinPortalVisibleForAODSleep(void) {
+static inline void ZoneApplyPortalStateForAOD(BOOL screenOn) {
     if (!g_portalView) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    g_portalView.hidden = YES;
-    g_portalView.alpha = 0.0;
+
+    if (!screenOn) {
+        g_portalView.hidden = NO;
+        g_portalView.alpha = 1.0;
+        g_portalView.matchesAlpha = NO;
+        g_portalView.matchesTransform = NO;
+        g_portalView.matchesPosition = NO;
+    } else {
+        g_portalView.hidden = NO;
+        g_portalView.matchesAlpha = NO;
+        g_portalView.matchesTransform = YES;
+        g_portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
+        g_portalView.alpha = g_isVideoMode ? 1.0 : 0.0;
+    }
+
     [CATransaction commit];
+}
+
+static inline void ZonePinPortalVisibleForAODSleep(void) {
+    ZoneApplyPortalStateForAOD(NO);
 }
 
 static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL animated) {
@@ -2529,22 +2546,29 @@ static void EnsureEngineViewIsMounted() {
             ZoneAODLog(@"AOD.Portal", @"portal created frame=%@ matchesPosition=%d matchesTransform=%d alpha=%.2f", NSStringFromCGRect(portalView.frame), portalView.matchesPosition, portalView.matchesTransform, portalView.alpha);
         }
 
-        if (sourceForPortal && portalView.sourceView != sourceForPortal) {
-            portalView.sourceView = sourceForPortal;
-            ZoneAODLog(@"AOD.Portal", @"portal source updated to=%@", ZoneSafeLogString(sourceForPortal));
-        }
-
         if (sourceForPortal) {
             portalView.hidden = NO;
-            if (IsSingleVideoMode()) {
-                if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
-                portalView.alpha = 1.0;
-            } else if (g_isVideoMode && portalView.matchesPosition != NO) {
-                portalView.matchesPosition = NO;
-                portalView.alpha = 1.0;
-            } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
-                portalView.matchesPosition = YES;
+            if (portalView.sourceView != sourceForPortal) {
+                portalView.sourceView = sourceForPortal;
+                ZoneAODLog(@"AOD.Portal", @"portal source updated to=%@", ZoneSafeLogString(sourceForPortal));
             }
+
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            if (!g_isScreenOn || g_isAODInactive) {
+                portalView.hidden = NO;
+                portalView.alpha = 1.0;
+                portalView.matchesAlpha = NO;
+                portalView.matchesTransform = NO;
+                portalView.matchesPosition = NO;
+            } else {
+                portalView.hidden = NO;
+                portalView.matchesAlpha = NO;
+                portalView.matchesTransform = YES;
+                portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
+                portalView.alpha = g_isVideoMode ? 1.0 : 0.0;
+            }
+            [CATransaction commit];
         } else {
             portalView.hidden = YES;
             ZoneAODLog(@"AOD.Portal", @"portal hidden because source is nil");
