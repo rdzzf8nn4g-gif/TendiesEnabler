@@ -1186,14 +1186,13 @@ for (NSString *name in lockContents) {
             [cell.contentView addSubview:infoBtn];
         }
     }
-    
-if ([specKey isEqualToString:@"DoubleTapLock"]) {
+
+    if ([specKey isEqualToString:@"DoubleTapLock"]) {
         UIButton *existingBtn = [cell.contentView viewWithTag:884];
         if (!existingBtn) {
             UIButton *infoBtn = [UIButton buttonWithType:UIButtonTypeInfoLight];
             infoBtn.tag = 884;
-            // 坐标微调为 110，防止挡住“双击桌面锁屏”这几个字
-            infoBtn.frame = CGRectMake(110, (cell.bounds.size.height - 22) / 2.0, 22, 22);
+            infoBtn.frame = CGRectMake(100, (cell.bounds.size.height - 22) / 2.0, 22, 22);
             infoBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
             [infoBtn addTarget:self action:@selector(showDoubleTapLockInfo) forControlEvents:UIControlEventTouchUpInside];
             [cell.contentView addSubview:infoBtn];
