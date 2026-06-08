@@ -3106,10 +3106,6 @@ static void EnsureEngineViewIsMounted() {
 // ==================== 【全版本通用 Hook 区域】 ============================
 // =========================================================================
 
-@interface SpringBoard : UIApplication
-- (void)_simulateLockButtonPress;
-@end
-
 %hook SBIconListView
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
     // 判断：插件开启、双击锁屏开启，并且确实是双击事件
