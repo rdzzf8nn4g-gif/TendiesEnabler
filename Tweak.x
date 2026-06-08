@@ -1849,14 +1849,27 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
-    // 【核心修复 2 完善】：解决亮屏秒滑桌面变锁屏的百年Bug
+    // 【无损修复终极版】：引入“时间护盾 + 空间阈值”双重鉴别机制
     if (self.isAnimatingState) {
-        if (progress > 0.01 && progress < 0.99) {
-            // 1. 手指正在滑动：终止强制动画，把控制权交回给进度条
+        // 计算从手写动画开始到现在经过了多长时间
+        double timeSinceStart = CACurrentMediaTime() - self.manualAnimStartTime;
+        
+        if (progress >= 0.99 && ZoneIsDeviceUnlocked()) {
+            // 1. 已经秒解锁进入桌面：彻底终止亮屏动画，瞬间到位
             [self completeManualTransition];
-        } else if (progress >= 0.99 && ZoneIsDeviceUnlocked()) {
-            // 2. 已经秒解锁进入桌面：终止残余亮屏动画，瞬间到位
-            [self completeManualTransition];
+            
+        } else if (progress > 0.01 && progress < 0.99) {
+            // 2. 遭遇中间进度，鉴别是“人类滑动”还是“系统残余”
+            // 逻辑：如果刚亮屏不到 0.35 秒，且此时收到了一个大于 0.15 的巨大进度。
+            // 结论：人类不可能在按下电源键 0.35 秒内就将屏幕上滑超过 15%。
+            // 这 100% 是上一次桌面息屏没走完的“系统残余进度掉落”，坚决拦截！
+            if (timeSinceStart < 0.35 && progress > 0.15) {
+                return; // 开启护盾，保护手写动画不被斩断
+            } else {
+                // 超过 0.35 秒保护期，或者是小于 0.15 的起步微小滑动，确认为用户手指介入，交回控制权
+                [self completeManualTransition];
+            }
+            
         } else {
             // 3. 亮息屏瞬间的 0.0/1.0 假进度：坚决拦截防闪烁
             return;
@@ -1865,10 +1878,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
     self.animationGeneration++;
     
+    // 下方为正常的进度驱动图层逻辑，保持不变
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
     [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
     [self applyProgress:progress parser:self.fgParser layerMap:self.fgLayerMap];
+    
     if (progress > 0.95) { self.currentState = @"Unlock"; self.isUnlocking = NO; }
     else if (progress < 0.05) { self.currentState = @"Locked"; self.isUnlocking = NO; }
     else { self.isUnlocking = YES; self.currentState = @"Scrubbing"; }
