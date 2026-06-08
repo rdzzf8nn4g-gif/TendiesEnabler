@@ -15,6 +15,9 @@
 // ==========================================
 // 结构体与系统头文件声明
 // ==========================================
+@interface SpringBoard : UIApplication
+- (void)_simulateLockButtonPress;
+@end
 typedef struct {
     long long x0;
     long long x1;
@@ -2372,6 +2375,20 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidLoad {
     %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(viewWillLayoutSubviews) name:@"ZoneForceLayout" object:nil];
+    
+    // 【新增】：锁屏双击手势注入
+    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_handleLockScreenDoubleTap:)];
+    doubleTap.numberOfTapsRequired = 2;
+    doubleTap.cancelsTouchesInView = NO; // 极其重要：设为 NO 才能保证不影响原生的向上滑动解锁、右滑相机等手势！
+    doubleTap.delaysTouchesBegan = NO;
+    [self.view addGestureRecognizer:doubleTap];
+}
+
+%new
+- (void)zone_handleLockScreenDoubleTap:(UITapGestureRecognizer *)gesture {
+    if (g_enabled && g_doubleTapLock) {
+        [(SpringBoard *)[%c(SpringBoard) sharedApplication] _simulateLockButtonPress];
+    }
 }
 
 - (void)dealloc {
@@ -2810,6 +2827,20 @@ static void EnsureEngineViewIsMounted() {
         
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_screenWake) name:@"ZoneEngineWake" object:nil];
+    }
+    
+    // 【新增】：锁屏双击手势注入
+    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_handleLockScreenDoubleTap:)];
+    doubleTap.numberOfTapsRequired = 2;
+    doubleTap.cancelsTouchesInView = NO; // 极其重要：设为 NO 才能保证不影响原生的向上滑动解锁、右滑相机等手势！
+    doubleTap.delaysTouchesBegan = NO;
+    [self.view addGestureRecognizer:doubleTap];
+}
+
+%new
+- (void)zone_handleLockScreenDoubleTap:(UITapGestureRecognizer *)gesture {
+    if (g_enabled && g_doubleTapLock) {
+        [(SpringBoard *)[%c(SpringBoard) sharedApplication] _simulateLockButtonPress];
     }
 }
 
