@@ -347,9 +347,21 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
     }
 }
 
+static inline void ZonePinPortalVisibleForAODSleep(void) {
+    if (!g_portalView) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    g_portalView.hidden = NO;
+    g_portalView.alpha = 1.0;
+    [CATransaction commit];
+}
+
 static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL animated) {
     ZoneAODLog(@"AOD.Commit", @"ZoneCommitAODTransition screenOn=%d state=%@ animated=%d", screenOn, state, animated);
     ZoneSetAODScreenState(screenOn);
+    if (!screenOn) {
+        ZonePinPortalVisibleForAODSleep();
+    }
     ZoneEmitScreenAndWallpaperState(screenOn, state, animated);
     if (screenOn) {
         ZoneFlushPendingAODWallpaperState();
@@ -2347,7 +2359,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewWillLayoutSubviews {
     %orig;
     _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
-    
+
     if (!g_enabled) {
         if (portalView) portalView.hidden = YES;
         UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
@@ -2359,18 +2371,19 @@ static void EnsureEngineViewIsMounted() {
         }
         return;
     }
-    
+
     EnsureEngineViewIsMounted(); 
-    
+
     UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
     if (bgVC && bgVC.view) {
         bgVC.view.alpha = 1.0;
         bgVC.view.hidden = NO;
     }
-    
+
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
-    
+    BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
+
     if (engineView) {
         UIView *sourceForPortal = engineView;
         if (g_isVideoMode) {
@@ -2387,13 +2400,12 @@ static void EnsureEngineViewIsMounted() {
                 }
             }
         }
-        
+
         if (!portalView) {
             portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
             portalView.matchesPosition = freezeAODLayout ? NO : (IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES));
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
@@ -2401,22 +2413,30 @@ static void EnsureEngineViewIsMounted() {
             objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             g_portalView = portalView;
         }
-        
-        if (sourceForPortal) {
+
+        if (sourceForPortal && portalView.sourceView != sourceForPortal && !freezeAODLayout) {
+            portalView.sourceView = sourceForPortal; 
+        } else if (sourceForPortal && !portalView.sourceView) {
+            portalView.sourceView = sourceForPortal;
+        }
+
+        if (freezeAODLayout) {
             portalView.hidden = NO;
-            if (portalView.sourceView != sourceForPortal) {
-                portalView.sourceView = sourceForPortal; 
+            if (portalView.alpha != 1.0) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                portalView.alpha = 1.0;
+                [CATransaction commit];
             }
-            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
+        } else if (sourceForPortal) {
+            portalView.hidden = NO;
             if (IsSingleVideoMode()) {
-                if (!freezeAODLayout && portalView.matchesPosition != YES) portalView.matchesPosition = YES;
-                if (!freezeAODLayout) portalView.alpha = 1.0;
+                if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
+                portalView.alpha = 1.0;
             } else if (g_isVideoMode && portalView.matchesPosition != NO) {
-                if (!freezeAODLayout) {
-                    portalView.matchesPosition = NO;
-                    portalView.alpha = 1.0;
-                }
-            } else if (!g_isVideoMode && !freezeAODLayout && portalView.matchesPosition != YES) {
+                portalView.matchesPosition = NO;
+                portalView.alpha = 1.0;
+            } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
                 portalView.matchesPosition = YES;
             }
         } else {
@@ -2432,15 +2452,17 @@ static void EnsureEngineViewIsMounted() {
             }
             portalView.frame = bgVC.view.bounds;
             bgVC.view.clipsToBounds = YES;
-            
-            for (UIView *sub in bgVC.view.subviews) {
-                if (sub != portalView) {
-                    if (hideNativeBlurs) {
-                        sub.alpha = 0.0;
-                        sub.hidden = YES;
-                    } else {
-                        sub.alpha = 1.0;
-                        sub.hidden = NO;
+
+            if (!freezeAODLayout) {
+                for (UIView *sub in bgVC.view.subviews) {
+                    if (sub != portalView) {
+                        if (hideNativeBlurs) {
+                            sub.alpha = 0.0;
+                            sub.hidden = YES;
+                        } else {
+                            sub.alpha = 1.0;
+                            sub.hidden = NO;
+                        }
                     }
                 }
             }
@@ -2451,14 +2473,16 @@ static void EnsureEngineViewIsMounted() {
             portalView.frame = self.view.bounds;
             [self.view sendSubviewToBack:portalView];
         }
-        
-        UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
-        if (dimmingView && hideNativeBlurs) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
-        
-        UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
-        if (tintingView && hideNativeBlurs) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
+
+        if (!freezeAODLayout) {
+            UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
+            if (dimmingView && hideNativeBlurs) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+
+            UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
+            if (tintingView && hideNativeBlurs) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
+        }
     }
-    
+
     UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
     if (floatingLayer) { 
         floatingLayer.alpha = 0.0; 
@@ -2597,6 +2621,7 @@ static void EnsureEngineViewIsMounted() {
 
     // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
     if (!g_isScreenOn || g_isAODInactive) {
+        ZonePinPortalVisibleForAODSleep();
         ZoneAODLog(@"AOD.Progress", @"blockedByAOD progress=%.4f lastProgress=%.4f", progress, g_lastSystemProgress);
         g_lastSystemProgress = progress;
         return;
