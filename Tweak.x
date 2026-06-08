@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h> 
+#import <stdarg.h>
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -278,9 +279,87 @@ static BOOL g_pendingAODWallpaperAnimated = YES;
 static BOOL g_hasPendingAODWallpaperState = NO;
 static BOOL g_forceAcceptNextSystemProgress = NO;
 
+static dispatch_queue_t g_zoneAODLogQueue = nil;
+static NSString *g_zoneAODLogPath = nil;
+static NSDateFormatter *g_zoneAODLogFormatter = nil;
+
+static inline NSString *ZoneAODTimestamp(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        g_zoneAODLogFormatter = [[NSDateFormatter alloc] init];
+        g_zoneAODLogFormatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        g_zoneAODLogFormatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+    });
+    return [g_zoneAODLogFormatter stringFromDate:[NSDate date]];
+}
+
+static inline NSString *ZoneAODLogPath(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray<NSString *> *candidates = @[
+            [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches"] stringByAppendingPathComponent:@"ZoneWallpaperAOD.log"],
+            [NSTemporaryDirectory() stringByAppendingPathComponent:@"ZoneWallpaperAOD.log"]
+        ];
+        for (NSString *candidate in candidates) {
+            NSString *dir = [candidate stringByDeletingLastPathComponent];
+            NSError *err = nil;
+            if ([fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err]) {
+                g_zoneAODLogPath = [candidate copy];
+                break;
+            }
+        }
+        if (!g_zoneAODLogPath) {
+            g_zoneAODLogPath = [[NSTemporaryDirectory() stringByAppendingPathComponent:@"ZoneWallpaperAOD.log"] copy];
+            NSString *dir = [g_zoneAODLogPath stringByDeletingLastPathComponent];
+            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        }
+        g_zoneAODLogQueue = dispatch_queue_create("com.iosdump.zone.aodlog", DISPATCH_QUEUE_SERIAL);
+    });
+    return g_zoneAODLogPath;
+}
+
+static inline void ZoneAODAppendLine(NSString *line) {
+    if (line.length == 0) return;
+    NSString *path = ZoneAODLogPath();
+    if (path.length == 0) return;
+
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return;
+
+    dispatch_async(g_zoneAODLogQueue ?: dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *dir = [path stringByDeletingLastPathComponent];
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        if (![fm fileExistsAtPath:path]) {
+            [fm createFileAtPath:path contents:nil attributes:nil];
+        }
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!handle) return;
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:data];
+        } @catch (__unused NSException *e) {
+        }
+        [handle closeFile];
+    });
+}
+
+static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *body = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    if (!body) body = @"";
+    NSString *line = [NSString stringWithFormat:@"%@ | %@ | %@\n", ZoneAODTimestamp(), scope ?: @"AOD", body];
+    ZoneAODAppendLine(line);
+}
+
+
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
 
 static inline void ZoneSetAODScreenState(BOOL screenOn) {
+    ZoneAODLog(@"AOD.State", @"ZoneSetAODScreenState screenOn=%d before(screenOn=%d,aodInactive=%d,lastProgress=%.3f,forceNext=%d)", screenOn, g_isScreenOn, g_isAODInactive, g_lastSystemProgress, g_forceAcceptNextSystemProgress);
     g_isScreenOn = screenOn;
     g_isAODInactive = !screenOn;
     g_lastTickProgress = -1;
@@ -291,9 +370,11 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = 0.0;
     }
+    ZoneAODLog(@"AOD.State", @"ZoneSetAODScreenState done screenOn=%d aodInactive=%d lastProgress=%.3f forceNext=%d", g_isScreenOn, g_isAODInactive, g_lastSystemProgress, g_forceAcceptNextSystemProgress);
 }
 
 static inline void ZoneClearPendingAODWallpaperState(void) {
+    ZoneAODLog(@"AOD.Pending", @"ZoneClearPendingAODWallpaperState hadPending=%d state=%@ animated=%d", g_hasPendingAODWallpaperState, g_pendingAODWallpaperState, g_pendingAODWallpaperAnimated);
     g_hasPendingAODWallpaperState = NO;
     g_pendingAODWallpaperState = nil;
     g_pendingAODWallpaperAnimated = YES;
@@ -301,20 +382,24 @@ static inline void ZoneClearPendingAODWallpaperState(void) {
 
 static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL animated) {
     if (!state || [state isEqualToString:@"Sleep"]) {
+        ZoneAODLog(@"AOD.Pending", @"ZoneQueuePendingAODWallpaperState skip state=%@ animated=%d", state, animated);
         return;
     }
     g_hasPendingAODWallpaperState = YES;
     g_pendingAODWallpaperState = [state copy];
     g_pendingAODWallpaperAnimated = animated;
+    ZoneAODLog(@"AOD.Pending", @"ZoneQueuePendingAODWallpaperState queued state=%@ animated=%d screenOn=%d aodInactive=%d", state, animated, g_isScreenOn, g_isAODInactive);
 }
 
 static inline void ZoneFlushPendingAODWallpaperState(void) {
     if (!g_hasPendingAODWallpaperState || !g_isScreenOn || g_isAODInactive) {
+        ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState skip hasPending=%d screenOn=%d aodInactive=%d state=%@ animated=%d", g_hasPendingAODWallpaperState, g_isScreenOn, g_isAODInactive, g_pendingAODWallpaperState, g_pendingAODWallpaperAnimated);
         return;
     }
     NSString *pendingState = [g_pendingAODWallpaperState copy];
     BOOL pendingAnimated = g_pendingAODWallpaperAnimated;
     ZoneClearPendingAODWallpaperState();
+    ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState flush state=%@ animated=%d", pendingState, pendingAnimated);
     if (pendingState) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
                                                             object:nil
@@ -323,6 +408,7 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
 }
 
 static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL animated) {
+    ZoneAODLog(@"AOD.Commit", @"ZoneCommitAODTransition screenOn=%d state=%@ animated=%d", screenOn, state, animated);
     ZoneSetAODScreenState(screenOn);
     ZoneEmitScreenAndWallpaperState(screenOn, state, animated);
     if (screenOn) {
@@ -358,6 +444,7 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     }
 
     if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
+        ZoneAODLog(@"AOD.Emit", @"ZoneEmitWallpaperState queue finalState=%@ animated=%d screenOn=%d aodInactive=%d", finalState, animated, g_isScreenOn, g_isAODInactive);
         ZoneQueuePendingAODWallpaperState(finalState, animated);
         return;
     }
@@ -366,12 +453,14 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     if (g_lastEmittedWallpaperState && g_lastEmittedWallpaperStateTime > 0.0 &&
         [g_lastEmittedWallpaperState isEqualToString:finalState] &&
         (now - g_lastEmittedWallpaperStateTime) < 0.20) {
+        ZoneAODLog(@"AOD.Emit", @"ZoneEmitWallpaperState dedupe finalState=%@ animated=%d delta=%.3f", finalState, animated, now - g_lastEmittedWallpaperStateTime);
         return;
     }
 
     g_lastEmittedWallpaperState = [finalState copy];
     g_lastEmittedWallpaperStateTime = now;
 
+    ZoneAODLog(@"AOD.Emit", @"ZoneEmitWallpaperState post finalState=%@ animated=%d screenOn=%d aodInactive=%d", finalState, animated, g_isScreenOn, g_isAODInactive);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
                                                         object:nil
                                                       userInfo:@{@"state": finalState, @"animated": @(animated)}];
@@ -1500,17 +1589,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (_manualAnimLink) { [_manualAnimLink invalidate]; _manualAnimLink = nil; }
 }
 
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
-        if (g_isScreenOn && self.currentState && ![self.currentState isEqualToString:@"Init"] && ![self.currentState isEqualToString:@"Sleep"]) {
-            NSString *savedState = [self.currentState copy];
-            self.currentState = nil;
-            [self transitionToState:savedState animated:YES];
-        }
-    }
-}
-
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.bounds;
@@ -1695,6 +1773,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    ZoneAODLog(@"AOD.ManualAnim", @"start state=%@ dark=%d realBg=%@ realFloat=%@ realFg=%@ screenOn=%d aodInactive=%d", stateName, isDark, realBgState, realFloatState, realFgState, g_isScreenOn, g_isAODInactive);
     
     void (^buildTasks)(ZoneCAMLParserEnhanced *, NSDictionary *, NSString *) = ^(ZoneCAMLParserEnhanced *parser, NSDictionary *layerMap, NSString *realState) {
         if (!parser || layerMap.count == 0) return;
@@ -1722,9 +1801,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     if (self.manualAnimTasks.count > 0) {
         self.manualAnimStartTime = CACurrentMediaTime();
+        ZoneAODLog(@"AOD.ManualAnim", @"armed tasks=%lu duration=%.3f", (unsigned long)self.manualAnimTasks.count, (g_animDuration > 0 ? g_animDuration : 0.85));
         self.manualAnimLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(manualTick:)];
         [self.manualAnimLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     } else {
+        ZoneAODLog(@"AOD.ManualAnim", @"noTasks immediateComplete state=%@", stateName);
         [self completeManualTransition];
     }
 }
@@ -1769,6 +1850,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
 
+    ZoneAODLog(@"AOD.ManualAnim", @"complete state=%@ taskCount=%lu screenOn=%d aodInactive=%d", self.manualTargetState, (unsigned long)finishedTasks.count, g_isScreenOn, g_isAODInactive);
+
     if (finishedTasks.count > 0) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -1787,11 +1870,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)onProgress:(NSNotification *)note {
     if (!g_enabled || !self.bgView) return;
-    if (!g_isScreenOn || g_isAODInactive) return;
+    if (!g_isScreenOn || g_isAODInactive) {
+        ZoneAODLog(@"AOD.ManualAnim", @"onProgress ignored by AOD screenOn=%d aodInactive=%d", g_isScreenOn, g_isAODInactive);
+        return;
+    }
     
     // 【核心修复 2】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
     // 绝对禁止系统传来的 1.0 或 0.0 progress 打断动画！彻底解决亮屏瞬间画面被强拉到终点的问题。
-    if (self.isAnimatingState) return; 
+    if (self.isAnimatingState) {
+        ZoneAODLog(@"AOD.ManualAnim", @"onProgress ignored by animating state=%@", self.currentState);
+        return;
+    }
 
     self.animationGeneration++;
     
@@ -1803,6 +1892,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
     [self applyProgress:progress parser:self.fgParser layerMap:self.fgLayerMap];
     
+    ZoneAODLog(@"AOD.ManualAnim", @"onProgress apply progress=%.4f stateBefore=%@", progress, self.currentState);
     if (progress > 0.95) { self.currentState = @"Unlock"; self.isUnlocking = NO; }
     else if (progress < 0.05) { self.currentState = @"Locked"; self.isUnlocking = NO; }
     else { self.isUnlocking = YES; self.currentState = @"Scrubbing"; }
@@ -1812,6 +1902,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
+    ZoneAODLog(@"AOD.ManualAnim", @"transitionToState state=%@ animated=%d current=%@ screenOn=%d aodInactive=%d", stateName, animated, self.currentState, g_isScreenOn, g_isAODInactive);
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -1834,7 +1925,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyProgress:1.0 parser:self.fgParser layerMap:self.fgLayerMap];
         } else if ([stateName isEqualToString:@"Locked"]) {
             [self applyProgress:0.0 parser:self.bgParser layerMap:self.bgLayerMap]; 
-            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap]; 
+            [self applyProgress:0.0 parser:self.floatParser layerMap:self.floatLayerMap];
             [self applyProgress:0.0 parser:self.fgParser layerMap:self.fgLayerMap];
         }
         
@@ -1856,6 +1947,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self.fgView setState:realFgState];
         }
         [CATransaction commit];
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
+        ZoneAODLog(@"AOD.ManualAnim", @"traitCollectionDidChange screenOn=%d aodInactive=%d current=%@", g_isScreenOn, g_isAODInactive, self.currentState);
+        if (g_isScreenOn && self.currentState && ![self.currentState isEqualToString:@"Init"] && ![self.currentState isEqualToString:@"Sleep"]) {
+            NSString *savedState = [self.currentState copy];
+            self.currentState = nil;
+            [self transitionToState:savedState animated:YES];
+        }
     }
 }
 
@@ -2437,23 +2540,29 @@ static void EnsureEngineViewIsMounted() {
 
 // 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
 - (void)setDismissed:(BOOL)dismissed {
+    ZoneAODLog(@"AOD.Hook", @"setDismissed enter dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     g_isUnlocked = dismissed;
     if (g_enabled && g_isScreenOn && !g_isAODInactive) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
+        ZoneAODLog(@"AOD.Hook", @"setDismissed emit state=%@", state);
         ZoneEmitWallpaperState(YES, state, YES);
     }
+    ZoneAODLog(@"AOD.Hook", @"setDismissed exit dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
+    ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode enter mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         ZoneCommitAODTransition(!mode, state, YES);
     }
     %orig;
+    ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode exit mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
+    ZoneAODLog(@"AOD.Hook", @"startFadeIn source=%d screenOn=%d aodInactive=%d unlocked=%d", source, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
         ZoneCommitAODTransition(YES, state, YES);
@@ -2462,11 +2571,13 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
+    ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive enter inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         ZoneCommitAODTransition(!inactive, state, YES);
     }
     %orig;
+    ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive exit inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2494,6 +2605,8 @@ static void EnsureEngineViewIsMounted() {
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return;
+
+    ZoneAODLog(@"AOD.Progress", @"updateWallpaperAnimationWithProgress progress=%.4f screenOn=%d aodInactive=%d forceNext=%d lastProgress=%.4f", progress, g_isScreenOn, g_isAODInactive, g_forceAcceptNextSystemProgress, g_lastSystemProgress);
 
     // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
     // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
@@ -2524,11 +2637,13 @@ static void EnsureEngineViewIsMounted() {
 
     // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
     if (!g_isScreenOn || g_isAODInactive) {
+        ZoneAODLog(@"AOD.Progress", @"blockedByAOD progress=%.4f lastProgress=%.4f", progress, g_lastSystemProgress);
         g_lastSystemProgress = progress;
         return;
     }
 
     if (g_forceAcceptNextSystemProgress) {
+        ZoneAODLog(@"AOD.Progress", @"forceAccept progress=%.4f", progress);
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = progress;
     } else {
@@ -2536,35 +2651,47 @@ static void EnsureEngineViewIsMounted() {
         g_lastSystemProgress = progress;
 
         if (ABS(delta) > 0.15) {
+            ZoneAODLog(@"AOD.Progress", @"droppedByDelta progress=%.4f delta=%.4f", progress, delta);
             return;
         }
     }
 
     EnsureEngineViewIsMounted();
+    ZoneAODLog(@"AOD.Progress", @"post ZoneEngineProgress progress=%.4f", progress);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
 }
 %end
 
 %hook SBBacklightController
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
+    ZoneAODLog(@"AOD.Backlight", @"willTransition state=%lld screenOn=%d aodInactive=%d unlocked=%d", state, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if (!ZoneIsDefinitiveBacklightState(state)) return;
+        if (!ZoneIsDefinitiveBacklightState(state)) {
+            ZoneAODLog(@"AOD.Backlight", @"willTransition ignored nonDefinitive state=%lld", state);
+            return;
+        }
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            ZoneAODLog(@"AOD.Backlight", @"willTransition commit screenOn=%d zoneState=%@", screenOn, zoneState);
             ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
 }
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
+    ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate state=%lld screenOn=%d aodInactive=%d unlocked=%d", state, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if (!ZoneIsDefinitiveBacklightState(state)) return;
+        if (!ZoneIsDefinitiveBacklightState(state)) {
+            ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate ignored nonDefinitive state=%lld", state);
+            return;
+        }
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate commit screenOn=%d zoneState=%@", screenOn, zoneState);
             ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
