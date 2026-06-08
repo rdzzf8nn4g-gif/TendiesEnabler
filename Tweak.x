@@ -280,73 +280,9 @@ static BOOL g_hasPendingAODWallpaperState = NO;
 static BOOL g_deferAODWakeWallpaperState = NO;
 static BOOL g_forceAcceptNextSystemProgress = NO;
 
-static dispatch_queue_t g_zoneAODLogQueue = nil;
-static NSString *g_zoneAODLogPath = nil;
-static NSDateFormatter *g_zoneAODLogFormatter = nil;
-
-static inline NSString *ZoneAODTimestamp(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        g_zoneAODLogFormatter = [[NSDateFormatter alloc] init];
-        g_zoneAODLogFormatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-        g_zoneAODLogFormatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
-    });
-    return [g_zoneAODLogFormatter stringFromDate:[NSDate date]];
-}
-
-static inline NSString *ZoneAODLogPath(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSArray<NSString *> *candidates = @[
-            [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches"] stringByAppendingPathComponent:@"ZoneWallpaperAOD.log"],
-            [NSTemporaryDirectory() stringByAppendingPathComponent:@"ZoneWallpaperAOD.log"]
-        ];
-        for (NSString *candidate in candidates) {
-            NSString *dir = [candidate stringByDeletingLastPathComponent];
-            NSError *err = nil;
-            if ([fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&err]) {
-                g_zoneAODLogPath = [candidate copy];
-                break;
-            }
-        }
-        if (!g_zoneAODLogPath) {
-            g_zoneAODLogPath = [[NSTemporaryDirectory() stringByAppendingPathComponent:@"ZoneWallpaperAOD.log"] copy];
-            NSString *dir = [g_zoneAODLogPath stringByDeletingLastPathComponent];
-            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        }
-        g_zoneAODLogQueue = dispatch_queue_create("com.iosdump.zone.aodlog", DISPATCH_QUEUE_SERIAL);
-    });
-    return g_zoneAODLogPath;
-}
-
-static inline void ZoneAODAppendLine(NSString *line) {
-    if (line.length == 0) return;
-    NSString *path = ZoneAODLogPath();
-    if (path.length == 0) return;
-
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data) return;
-
-    dispatch_async(g_zoneAODLogQueue ?: dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSString *dir = [path stringByDeletingLastPathComponent];
-        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        if (![fm fileExistsAtPath:path]) {
-            [fm createFileAtPath:path contents:nil attributes:nil];
-        }
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!handle) return;
-        @try {
-            [handle seekToEndOfFile];
-            [handle writeData:data];
-        } @catch (__unused NSException *e) {
-        }
-        [handle closeFile];
-    });
-}
-
 static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {}
+
+
 
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
