@@ -460,8 +460,8 @@ static inline void ZonePinPortalVisibleForAODSleep(void) {
     if (!g_portalView) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    g_portalView.hidden = NO;
-    g_portalView.alpha = 1.0;
+    g_portalView.hidden = YES;
+    g_portalView.alpha = 0.0;
     [CATransaction commit];
 }
 
