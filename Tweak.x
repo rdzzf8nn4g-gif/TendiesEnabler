@@ -269,6 +269,23 @@ static inline BOOL IsSingleVideoMode() {
     return (g_isVideoMode && g_lockVideoPath && g_homeVideoPath && [g_lockVideoPath isEqualToString:g_homeVideoPath]);
 }
 
+static inline BOOL ZoneIsUILockedSafe(void) {
+    Class lockMgrClass = NSClassFromString(@"SBLockScreenManager");
+    if (lockMgrClass && [lockMgrClass respondsToSelector:@selector(sharedInstance)]) {
+        id mgr = [lockMgrClass sharedInstance];
+        if (mgr && [mgr respondsToSelector:@selector(isUILocked)]) {
+            @try {
+                return [mgr isUILocked];
+            } @catch (NSException *e) {}
+        }
+    }
+    return !g_isUnlocked;
+}
+
+static inline BOOL ZoneIsUIDesktopUnlockedSafe(void) {
+    return !ZoneIsUILockedSafe();
+}
+
 static BOOL g_isAODInactive = NO;
 static NSString *g_lastEmittedScreenState = nil;
 static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
@@ -915,7 +932,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
-@property (nonatomic, assign) double lastRenderedProgress; // 【新增防抖属性】
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 - (void)lockSolidBackground;
@@ -933,7 +949,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.reloadGeneration = 0;
         self.isAnimatingState = NO;
         self.animationGeneration = 0;
-        self.lastRenderedProgress = -1.0; // 【初始化防抖参数】
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
@@ -1100,12 +1115,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
-    
-    // 【核心防御】：防止 AOD 歌词刷新、微小滑动导致的内存泄漏与高频跳帧
-    if (ABS(progress - self.lastRenderedProgress) < 0.005) {
-        return;
-    }
-    self.lastRenderedProgress = progress;
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -1509,7 +1518,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableArray *manualAnimTasks;
 @property (nonatomic, copy) NSString *manualTargetState;
 @property (nonatomic, assign) BOOL manualIsDark;
-@property (nonatomic, assign) double lastRenderedProgress; // 【新增防抖属性】
 // 👆 新增结束 👆
 
 - (void)reloadWallpaperViews;
@@ -1530,7 +1538,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.logicalScreenSize = CGSizeZero;
         self.isAnimatingState = NO;
         self.animationGeneration = 0;
-        self.lastRenderedProgress = -1.0; // 【初始化防抖参数】
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
@@ -1859,14 +1866,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
-    // 【核心防御】：拦截 AOD 音乐播放器歌词变动引起的非法帧数刷新，降低占用
-    if (ABS(progress - self.lastRenderedProgress) < 0.005) {
-        return;
-    }
-    self.lastRenderedProgress = progress;
-    
     [self ensureAllLayerMaps];
-    
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
     [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
     [self applyProgress:progress parser:self.fgParser layerMap:self.fgLayerMap];
@@ -2424,7 +2424,7 @@ static void EnsureEngineViewIsMounted() {
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
             portalView.matchesPosition = freezeAODLayout ? NO : (IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES));
-            portalView.matchesTransform = YES;
+            portalView.matchesTransform = freezeAODLayout ? NO : YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
             objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2439,6 +2439,9 @@ static void EnsureEngineViewIsMounted() {
 
         if (freezeAODLayout) {
             portalView.hidden = NO;
+            portalView.matchesAlpha = NO;
+            portalView.matchesPosition = NO;
+            portalView.matchesTransform = NO;
             if (portalView.alpha != 1.0) {
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
@@ -2537,21 +2540,11 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     ZoneAODLog(@"AOD.Hook", @"setDismissed enter dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
-    g_isUnlocked = dismissed;
+    g_isUnlocked = ZoneIsUIDesktopUnlockedSafe();
     if (g_enabled && g_isScreenOn && !g_isAODInactive) {
-        // 【Bug 2 修复核心】：参考 iOS 14-15 的纯净逻辑。
-        // 当我们在桌面按下电源键时，系统准备息屏，此时锁屏UI会覆盖桌面触发 setDismissed:NO。
-        // 我们必须拦截它，防止它强行把动画拉回 Locked(锁屏)，从而保证完美的 Unlock->Sleep 丝滑过渡。
-        BOOL isScreenOffMode = NO;
-        if ([self respondsToSelector:@selector(isInScreenOffMode)]) {
-            isScreenOffMode = ((BOOL (*)(id, SEL))objc_msgSend)(self, @selector(isInScreenOffMode));
-        }
-        
-        if (!isScreenOffMode) {
-            NSString *state = dismissed ? @"Unlock" : @"Locked";
-            ZoneAODLog(@"AOD.Hook", @"setDismissed emit state=%@", state);
-            ZoneEmitWallpaperState(YES, state, YES);
-        }
+        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
+        ZoneAODLog(@"AOD.Hook", @"setDismissed emit state=%@", state);
+        ZoneEmitWallpaperState(YES, state, YES);
     }
     ZoneAODLog(@"AOD.Hook", @"setDismissed exit dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
 }
@@ -2559,6 +2552,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setInScreenOffMode:(BOOL)mode {
     ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode enter mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
+        g_isUnlocked = ZoneIsUIDesktopUnlockedSafe();
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
         ZoneCommitAODTransition(!mode, state, YES);
     }
@@ -2569,6 +2563,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)_startFadeInAnimationForSource:(int)source {
     ZoneAODLog(@"AOD.Hook", @"startFadeIn source=%d screenOn=%d aodInactive=%d unlocked=%d", source, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
+        g_isUnlocked = ZoneIsUIDesktopUnlockedSafe();
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
         ZoneCommitAODTransition(YES, state, YES);
     }
@@ -2578,12 +2573,9 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive enter inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
-        // 【Bug 1 修复核心】：原逻辑写反了。
-        // inactive == NO 时，代表系统【进入】AOD (视觉上息屏，但底层背光依然微亮以便显示时间)。
-        // inactive == YES 时，代表系统【退出】AOD (用户点亮屏幕)。
-        // 改正后引擎在 AOD 期间将彻底判定为 Sleep 并锁定进程，忽略任何歌词变更引起的重绘。
-        NSString *state = inactive ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-        ZoneCommitAODTransition(inactive, state, YES);
+        g_isUnlocked = ZoneIsUIDesktopUnlockedSafe();
+        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        ZoneCommitAODTransition(!inactive, state, YES);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive exit inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
@@ -2855,7 +2847,7 @@ static void EnsureEngineViewIsMounted() {
 
 %new
 - (void)zone_tickProgress {
-    if (!g_enabled || !g_isScreenOn) return;
+    if (!g_enabled || !g_isScreenOn || g_isAODInactive) return;
     CALayer *presLayer = self.view.layer.presentationLayer ?: self.view.layer;
     CGRect absoluteRect = [presLayer.superlayer convertRect:presLayer.frame toLayer:nil];
     double yOffset = absoluteRect.origin.y;
@@ -3062,6 +3054,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setBacklightState:(long long)state source:(long long)source {
     %orig;
     if (g_enabled) {
+        g_isUnlocked = ZoneIsUIDesktopUnlockedSafe();
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
@@ -3081,6 +3074,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
+        g_isUnlocked = ZoneIsUIDesktopUnlockedSafe();
         BOOL screenOn = (state != 0);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
