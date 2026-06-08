@@ -283,7 +283,17 @@ static BOOL g_forceAcceptNextSystemProgress = NO;
 
 static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {}
 
-
+// 【核心修复】：绕过生命周期，直接从底层 SBLockScreenManager 获取当前真实锁屏状态
+static BOOL ZoneIsDeviceUnlocked() {
+    Class lockManagerClass = NSClassFromString(@"SBLockScreenManager");
+    if ([lockManagerClass respondsToSelector:@selector(sharedInstance)]) {
+        id manager = [lockManagerClass sharedInstance];
+        if ([manager respondsToSelector:@selector(isUILocked)]) {
+            return !((BOOL)[manager performSelector:@selector(isUILocked)]);
+        }
+    }
+    return g_isUnlocked;
+}
 
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
@@ -1334,10 +1344,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             
-            double currentProgress = g_isUnlocked ? 1.0 : 0.0;
+            BOOL realUnlocked = ZoneIsDeviceUnlocked();
+            // 【竞态条件修复】：必须先执行 transitionToState 让 Package 接收真实状态，
+            // 否则会被下方的 Progress 通知提前改掉 currentState 导致直接 return 罢工！
+            [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
+            
+            double currentProgress = realUnlocked ? 1.0 : 0.0;
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(currentProgress)}];
             
-            [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
             [CATransaction commit];
             
             [self lockSolidBackground]; 
@@ -2127,10 +2141,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             
-            double currentProgress = g_isUnlocked ? 1.0 : 0.0;
+            BOOL realUnlocked = ZoneIsDeviceUnlocked();
+            // 【竞态条件修复】：必须先执行 transitionToState 让 Package 接收真实状态，
+            // 否则会被下方的 Progress 通知提前改掉 currentState 导致直接 return 罢工！
+            [self transitionToState:realUnlocked ? @"Unlock" : @"Locked" animated:NO];
+            
+            double currentProgress = realUnlocked ? 1.0 : 0.0;
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(currentProgress)}];
             
-            [self transitionToState:g_isUnlocked ? @"Unlock" : @"Locked" animated:NO];
             [CATransaction commit];
             
             [self lockSolidBackground]; 
