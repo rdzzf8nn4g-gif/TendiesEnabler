@@ -735,7 +735,7 @@ for (NSString *name in lockContents) {
             NSMutableArray *mutRoot = [rootSpecs mutableCopy];
 
             // 1. 注入“双击桌面锁屏”开关 (全版本适用)
-            PSSpecifier *doubleTapSpec = [PSSpecifier preferenceSpecifierNamed:@"双击桌面锁屏" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+            PSSpecifier *doubleTapSpec = [PSSpecifier preferenceSpecifierNamed:@"双击锁屏" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
             [doubleTapSpec setProperty:@"DoubleTapLock" forKey:@"key"];
             [doubleTapSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
             [doubleTapSpec setProperty:@NO forKey:@"default"];
@@ -1016,6 +1016,12 @@ for (NSString *name in lockContents) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)showDoubleTapLockInfo {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启后手机桌面或锁屏息屏。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (id)getWallpaperSize:(PSSpecifier *)spec { return @""; }
 - (id)getDummyValue:(PSSpecifier *)spec { return @""; }
 
@@ -1181,6 +1187,19 @@ for (NSString *name in lockContents) {
         }
     }
     
+if ([specKey isEqualToString:@"DoubleTapLock"]) {
+        UIButton *existingBtn = [cell.contentView viewWithTag:884];
+        if (!existingBtn) {
+            UIButton *infoBtn = [UIButton buttonWithType:UIButtonTypeInfoLight];
+            infoBtn.tag = 884;
+            // 坐标微调为 110，防止挡住“双击桌面锁屏”这几个字
+            infoBtn.frame = CGRectMake(110, (cell.bounds.size.height - 22) / 2.0, 22, 22);
+            infoBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
+            [infoBtn addTarget:self action:@selector(showDoubleTapLockInfo) forControlEvents:UIControlEventTouchUpInside];
+            [cell.contentView addSubview:infoBtn];
+        }
+    }
+
     if ([[spec propertyForKey:@"IsWallpaperCell"] boolValue]) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         NSString *name = [spec propertyForKey:@"WallpaperName"];
