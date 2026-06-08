@@ -2670,15 +2670,23 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Backlight", @"willTransition state=%lld screenOn=%d aodInactive=%d unlocked=%d", state, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if (!ZoneIsDefinitiveBacklightState(state)) return;
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) return;
-        
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            // 【修改点】：桌面触发背光关闭时禁止动画
-            BOOL animated = (!screenOn && g_isUnlocked) ? NO : YES;
-            ZoneCommitAODTransition(screenOn, zoneState, animated);
+        // 【核心修复】：状态 0 = 彻底息屏，状态 2 = 进入AOD (Dimmed)
+        if (state == 0 || state == 2) {
+            if (g_isScreenOn) {
+                // 如果是从亮屏准备进入息屏/AOD，且当前正处于桌面 (g_isUnlocked)
+                // 传 NO 强制瞬间归位，并且 ZoneCommitAODTransition 会把 g_isScreenOn 置为 NO，
+                // 从而直接拦截掉 iOS 16 AOD 接下来发出的长达 0.8 秒的平滑动画进度！
+                BOOL animated = g_isUnlocked ? NO : YES;
+                ZoneCommitAODTransition(NO, @"Sleep", animated);
+            }
+        } else if (state == 1) {
+            // 状态 1 = 屏幕唤醒
+            if (!g_isScreenOn) {
+                if (!ZoneShouldIgnoreAODBacklightWakeState(state)) {
+                    NSString *zoneState = g_isUnlocked ? @"Unlock" : @"Locked";
+                    ZoneCommitAODTransition(YES, zoneState, YES);
+                }
+            }
         }
     }
 }
@@ -2687,15 +2695,20 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate state=%lld screenOn=%d aodInactive=%d unlocked=%d", state, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if (!ZoneIsDefinitiveBacklightState(state)) return;
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) return;
-        
-        BOOL screenOn = (state == 1);
-        if (screenOn != g_isScreenOn) {
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            // 【修改点】：桌面触发背光关闭时禁止动画
-            BOOL animated = (!screenOn && g_isUnlocked) ? NO : YES;
-            ZoneCommitAODTransition(screenOn, zoneState, animated);
+        // 同上：状态 0 = 彻底息屏，状态 2 = 彻底进入AOD
+        if (state == 0 || state == 2) {
+            if (g_isScreenOn) {
+                BOOL animated = g_isUnlocked ? NO : YES;
+                ZoneCommitAODTransition(NO, @"Sleep", animated);
+            }
+        } else if (state == 1) {
+            // 状态 1 = 彻底唤醒
+            if (!g_isScreenOn) {
+                if (!ZoneShouldIgnoreAODBacklightWakeState(state)) {
+                    NSString *zoneState = g_isUnlocked ? @"Unlock" : @"Locked";
+                    ZoneCommitAODTransition(YES, zoneState, YES);
+                }
+            }
         }
     }
 }
