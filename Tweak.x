@@ -277,6 +277,7 @@ static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
 static NSString *g_pendingAODWallpaperState = nil;
 static BOOL g_pendingAODWallpaperAnimated = YES;
 static BOOL g_hasPendingAODWallpaperState = NO;
+static BOOL g_deferAODWakeWallpaperState = NO;
 static BOOL g_forceAcceptNextSystemProgress = NO;
 
 static dispatch_queue_t g_zoneAODLogQueue = nil;
@@ -359,6 +360,8 @@ static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
 
 static inline void ZoneSetAODScreenState(BOOL screenOn) {
+    BOOL wasScreenOn = g_isScreenOn;
+    BOOL wasAODInactive = g_isAODInactive;
     ZoneAODLog(@"AOD.State", @"ZoneSetAODScreenState screenOn=%d before(screenOn=%d,aodInactive=%d,lastProgress=%.3f,forceNext=%d)", screenOn, g_isScreenOn, g_isAODInactive, g_lastSystemProgress, g_forceAcceptNextSystemProgress);
     g_isScreenOn = screenOn;
     g_isAODInactive = !screenOn;
@@ -366,11 +369,15 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
     if (screenOn) {
         g_forceAcceptNextSystemProgress = YES;
         g_lastSystemProgress = -1.0;
+        if (!wasScreenOn && wasAODInactive) {
+            g_deferAODWakeWallpaperState = YES;
+        }
     } else {
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = 0.0;
+        g_deferAODWakeWallpaperState = NO;
     }
-    ZoneAODLog(@"AOD.State", @"ZoneSetAODScreenState done screenOn=%d aodInactive=%d lastProgress=%.3f forceNext=%d", g_isScreenOn, g_isAODInactive, g_lastSystemProgress, g_forceAcceptNextSystemProgress);
+    ZoneAODLog(@"AOD.State", @"ZoneSetAODScreenState done screenOn=%d aodInactive=%d lastProgress=%.3f forceNext=%d deferWake=%d", g_isScreenOn, g_isAODInactive, g_lastSystemProgress, g_forceAcceptNextSystemProgress, g_deferAODWakeWallpaperState);
 }
 
 static inline void ZoneClearPendingAODWallpaperState(void) {
@@ -378,6 +385,7 @@ static inline void ZoneClearPendingAODWallpaperState(void) {
     g_hasPendingAODWallpaperState = NO;
     g_pendingAODWallpaperState = nil;
     g_pendingAODWallpaperAnimated = YES;
+    g_deferAODWakeWallpaperState = NO;
 }
 
 static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL animated) {
@@ -392,6 +400,10 @@ static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL anima
 }
 
 static inline void ZoneFlushPendingAODWallpaperState(void) {
+    if (g_deferAODWakeWallpaperState) {
+        ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState skip deferWake hasPending=%d screenOn=%d aodInactive=%d state=%@ animated=%d", g_hasPendingAODWallpaperState, g_isScreenOn, g_isAODInactive, g_pendingAODWallpaperState, g_pendingAODWallpaperAnimated);
+        return;
+    }
     if (!g_hasPendingAODWallpaperState || !g_isScreenOn || g_isAODInactive) {
         ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState skip hasPending=%d screenOn=%d aodInactive=%d state=%@ animated=%d", g_hasPendingAODWallpaperState, g_isScreenOn, g_isAODInactive, g_pendingAODWallpaperState, g_pendingAODWallpaperAnimated);
         return;
@@ -441,6 +453,12 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
     }
     if (!screenOn) {
         finalState = @"Sleep";
+    }
+
+    if (g_deferAODWakeWallpaperState && screenOn && ![finalState isEqualToString:@"Sleep"]) {
+        ZoneAODLog(@"AOD.Emit", @"ZoneEmitWallpaperState deferWake finalState=%@ animated=%d screenOn=%d aodInactive=%d", finalState, animated, g_isScreenOn, g_isAODInactive);
+        ZoneQueuePendingAODWallpaperState(finalState, animated);
+        return;
     }
 
     if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
@@ -2633,6 +2651,12 @@ static void EnsureEngineViewIsMounted() {
             g_portalView.alpha = alpha;
             [CATransaction commit];
         }
+    }
+
+    if (g_deferAODWakeWallpaperState && g_isScreenOn && !g_isAODInactive) {
+        ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState onProgress trigger progress=%.4f", progress);
+        g_deferAODWakeWallpaperState = NO;
+        ZoneFlushPendingAODWallpaperState();
     }
 
     // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
