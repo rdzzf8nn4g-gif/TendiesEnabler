@@ -5,6 +5,8 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h> 
 #import <stdarg.h>
+#import <sys/stat.h>
+#import <unistd.h>
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -297,7 +299,97 @@ static BOOL g_hasPendingAODWallpaperState = NO;
 static BOOL g_deferAODWakeWallpaperState = NO;
 static BOOL g_forceAcceptNextSystemProgress = NO;
 
-static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {}
+static inline NSString *ZoneSafeLogString(id value) {
+    if (!value) return @"(null)";
+    if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    if ([value respondsToSelector:@selector(description)]) return [value description];
+    return @"(unknown)";
+}
+
+static inline NSString *ZoneAODLogDirectoryPath(void) {
+    static NSString *dirPath = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *base = jbroot(@"/var/mobile/Library/Logs/ZoneWallpaperEngine");
+        dirPath = [base copy];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSError *dirError = nil;
+        [fm createDirectoryAtPath:dirPath withIntermediateDirectories:YES attributes:@{NSFileProtectionKey: NSFileProtectionNone} error:&dirError];
+        if (dirError) {
+            NSLog(@"[ZoneAODLog] createDirectory failed: %@", dirError);
+        }
+    });
+    return dirPath;
+}
+
+static inline NSString *ZoneAODLogFilePath(void) {
+    return [ZoneAODLogDirectoryPath() stringByAppendingPathComponent:@"AOD.log"];
+}
+
+static inline void ZoneWriteAODLogLine(NSString *line) {
+    static NSObject *lock = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lock = [NSObject new];
+    });
+
+    @synchronized (lock) {
+        @autoreleasepool {
+            NSString *filePath = ZoneAODLogFilePath();
+            NSFileManager *fm = [NSFileManager defaultManager];
+            if (![fm fileExistsAtPath:filePath]) {
+                [fm createFileAtPath:filePath contents:nil attributes:@{NSFileProtectionKey: NSFileProtectionNone}];
+            }
+
+            NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+            if (!data) return;
+
+            NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:filePath];
+            if (!handle) {
+                [fm createFileAtPath:filePath contents:nil attributes:@{NSFileProtectionKey: NSFileProtectionNone}];
+                handle = [NSFileHandle fileHandleForWritingAtPath:filePath];
+            }
+            if (!handle) {
+                NSLog(@"[ZoneAODLog] open failed for path=%@", filePath);
+                return;
+            }
+
+            @try {
+                [handle seekToEndOfFile];
+                [handle writeData:data];
+                if ([handle respondsToSelector:@selector(synchronizeFile)]) {
+                    [handle synchronizeFile];
+                }
+            } @catch (NSException *exception) {
+                NSLog(@"[ZoneAODLog] write failed: %@", exception);
+            } @finally {
+                [handle closeFile];
+            }
+        }
+    }
+}
+
+static inline void ZoneAODLog(NSString *scope, NSString *format, ...) {
+    if (!scope) scope = @"Zone";
+    if (!format) format = @"";
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    static NSDateFormatter *formatter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [NSDateFormatter new];
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+    });
+
+    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+    NSString *threadTag = [NSThread isMainThread] ? @"main" : @"bg";
+    NSString *line = [NSString stringWithFormat:@"%@ [%@] [%@] %@", timestamp, threadTag, scope, ZoneSafeLogString(message)];
+    ZoneWriteAODLogLine(line);
+}
 
 
 
@@ -2339,6 +2431,8 @@ static void EnsureEngineViewIsMounted() {
     BOOL hideHome = !g_isVideoMode || (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
     BOOL hideLock = !g_isVideoMode || (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
 
+    ZoneAODLog(@"AOD.LSVC", @"PBUIWallpaperViewController layout screenOn=%d aodInactive=%d unlocked=%d hideHome=%d hideLock=%d", g_isScreenOn, g_isAODInactive, g_isUnlocked, hideHome, hideLock);
+
     if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
         UIView *homeView = [self homescreenWallpaperView];
         if (homeView) homeView.alpha = hideHome ? 0.0 : 1.0;
@@ -2399,7 +2493,8 @@ static void EnsureEngineViewIsMounted() {
 
     id wallpaperController = [%c(SBWallpaperController) sharedInstance];
     UIView *engineView = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
-    BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
+
+    ZoneAODLog(@"AOD.CoverSheet", @"layout enter screenOn=%d aodInactive=%d unlocked=%d portal=%@ engine=%@", g_isScreenOn, g_isAODInactive, g_isUnlocked, ZoneSafeLogString(portalView), ZoneSafeLogString(engineView));
 
     if (engineView) {
         UIView *sourceForPortal = engineView;
@@ -2413,42 +2508,33 @@ static void EnsureEngineViewIsMounted() {
                 if ([engineView respondsToSelector:@selector(lockVideoView)]) {
                     UIView *lockView = [engineView performSelector:@selector(lockVideoView)];
                     if (lockView) sourceForPortal = lockView;
-                    else sourceForPortal = nil; 
+                    else sourceForPortal = nil;
                 }
             }
         }
 
+        ZoneAODLog(@"AOD.Portal", @"portal setup source=%@ screenOn=%d aodInactive=%d videoMode=%d singleVideo=%d", ZoneSafeLogString(sourceForPortal), g_isScreenOn, g_isAODInactive, g_isVideoMode, IsSingleVideoMode());
+
         if (!portalView) {
             portalView = [[NSClassFromString(@"_UIPortalView") alloc] initWithFrame:self.view.bounds];
             portalView.hidesSourceView = NO;
-            portalView.matchesAlpha = NO; 
-            portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            portalView.matchesPosition = freezeAODLayout ? NO : (IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES));
-            portalView.matchesTransform = freezeAODLayout ? NO : YES;
-            portalView.clipsToBounds = YES; 
+            portalView.matchesAlpha = NO;
+            portalView.alpha = g_isVideoMode ? 1.0 : 0.0;
+            portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
+            portalView.matchesTransform = YES;
+            portalView.clipsToBounds = YES;
             portalView.userInteractionEnabled = NO;
             objc_setAssociatedObject(self, "CoverSheetZonePortal", portalView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             g_portalView = portalView;
+            ZoneAODLog(@"AOD.Portal", @"portal created frame=%@ matchesPosition=%d matchesTransform=%d alpha=%.2f", NSStringFromCGRect(portalView.frame), portalView.matchesPosition, portalView.matchesTransform, portalView.alpha);
         }
 
-        if (sourceForPortal && portalView.sourceView != sourceForPortal && !freezeAODLayout) {
-            portalView.sourceView = sourceForPortal; 
-        } else if (sourceForPortal && !portalView.sourceView) {
+        if (sourceForPortal && portalView.sourceView != sourceForPortal) {
             portalView.sourceView = sourceForPortal;
+            ZoneAODLog(@"AOD.Portal", @"portal source updated to=%@", ZoneSafeLogString(sourceForPortal));
         }
 
-        if (freezeAODLayout) {
-            portalView.hidden = NO;
-            portalView.matchesAlpha = NO;
-            portalView.matchesPosition = NO;
-            portalView.matchesTransform = NO;
-            if (portalView.alpha != 1.0) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                portalView.alpha = 1.0;
-                [CATransaction commit];
-            }
-        } else if (sourceForPortal) {
+        if (sourceForPortal) {
             portalView.hidden = NO;
             if (IsSingleVideoMode()) {
                 if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
@@ -2461,6 +2547,7 @@ static void EnsureEngineViewIsMounted() {
             }
         } else {
             portalView.hidden = YES;
+            ZoneAODLog(@"AOD.Portal", @"portal hidden because source is nil");
         }
 
         BOOL hideNativeBlurs = !g_isVideoMode || (!IsSingleVideoMode() && g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
@@ -2472,17 +2559,16 @@ static void EnsureEngineViewIsMounted() {
             }
             portalView.frame = bgVC.view.bounds;
             bgVC.view.clipsToBounds = YES;
+            ZoneAODLog(@"AOD.CoverSheet", @"portal mounted in bgVC frame=%@ alpha=%.2f hidden=%d matchesPos=%d matchesXform=%d source=%@", NSStringFromCGRect(portalView.frame), portalView.alpha, portalView.hidden, portalView.matchesPosition, portalView.matchesTransform, ZoneSafeLogString(portalView.sourceView));
 
-            if (!freezeAODLayout) {
-                for (UIView *sub in bgVC.view.subviews) {
-                    if (sub != portalView) {
-                        if (hideNativeBlurs) {
-                            sub.alpha = 0.0;
-                            sub.hidden = YES;
-                        } else {
-                            sub.alpha = 1.0;
-                            sub.hidden = NO;
-                        }
+            for (UIView *sub in bgVC.view.subviews) {
+                if (sub != portalView) {
+                    if (hideNativeBlurs) {
+                        sub.alpha = 0.0;
+                        sub.hidden = YES;
+                    } else {
+                        sub.alpha = 1.0;
+                        sub.hidden = NO;
                     }
                 }
             }
@@ -2492,15 +2578,14 @@ static void EnsureEngineViewIsMounted() {
             }
             portalView.frame = self.view.bounds;
             [self.view sendSubviewToBack:portalView];
+            ZoneAODLog(@"AOD.CoverSheet", @"portal mounted in self.view frame=%@ alpha=%.2f hidden=%d matchesPos=%d matchesXform=%d source=%@", NSStringFromCGRect(portalView.frame), portalView.alpha, portalView.hidden, portalView.matchesPosition, portalView.matchesTransform, ZoneSafeLogString(portalView.sourceView));
         }
 
-        if (!freezeAODLayout) {
-            UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
-            if (dimmingView && hideNativeBlurs) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
+        UIView *dimmingView = safelyGetIvarAsView(self, "_dimmingView");
+        if (dimmingView && hideNativeBlurs) { dimmingView.alpha = 0.0; dimmingView.hidden = YES; }
 
-            UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
-            if (tintingView && hideNativeBlurs) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
-        }
+        UIView *tintingView = safelyGetIvarAsView(self, "_tintingView");
+        if (tintingView && hideNativeBlurs) { tintingView.alpha = 0.0; tintingView.hidden = YES; }
     }
 
     UIView *floatingLayer = safelyGetIvarAsView(self, "_floatingLayerView");
@@ -2603,52 +2688,12 @@ static void EnsureEngineViewIsMounted() {
     %orig;
 }
 
+
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
     if (!g_enabled) return;
 
-    ZoneAODLog(@"AOD.Progress", @"updateWallpaperAnimationWithProgress progress=%.4f screenOn=%d aodInactive=%d forceNext=%d lastProgress=%.4f", progress, g_isScreenOn, g_isAODInactive, g_forceAcceptNextSystemProgress, g_lastSystemProgress);
-
-    // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
-    // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
-    if (g_portalView && g_isScreenOn && !g_isAODInactive) {
-        if (g_isVideoMode) {
-            if (g_portalView.alpha != 1.0) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                g_portalView.alpha = 1.0;
-                [CATransaction commit];
-            }
-        } else {
-            double alpha = 0.0;
-            if (progress > 0.7) {
-                alpha = (1.0 - progress) * (0.05 / 0.3);
-            } else if (progress > 0.6) {
-                alpha = 0.05 + (0.7 - progress) * 1.0; 
-            } else {
-                alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-            }
-            alpha = MAX(0.0, MIN(1.0, alpha));
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            g_portalView.alpha = alpha;
-            [CATransaction commit];
-        }
-    }
-
-    if (g_deferAODWakeWallpaperState && g_isScreenOn && !g_isAODInactive) {
-        ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState onProgress trigger progress=%.4f", progress);
-        g_deferAODWakeWallpaperState = NO;
-        ZoneFlushPendingAODWallpaperState();
-    }
-
-    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
-    if (!g_isScreenOn || g_isAODInactive) {
-        ZonePinPortalVisibleForAODSleep();
-        ZoneAODLog(@"AOD.Progress", @"blockedByAOD progress=%.4f lastProgress=%.4f", progress, g_lastSystemProgress);
-        g_lastSystemProgress = progress;
-        return;
-    }
+    ZoneAODLog(@"AOD.Progress", @"updateWallpaperAnimationWithProgress progress=%.4f screenOn=%d aodInactive=%d forceNext=%d lastProgress=%.4f pending=%d deferWake=%d portalAlpha=%.2f portalHidden=%d", progress, g_isScreenOn, g_isAODInactive, g_forceAcceptNextSystemProgress, g_lastSystemProgress, g_hasPendingAODWallpaperState, g_deferAODWakeWallpaperState, g_portalView ? g_portalView.alpha : -1.0, g_portalView ? g_portalView.hidden : -1);
 
     if (g_forceAcceptNextSystemProgress) {
         ZoneAODLog(@"AOD.Progress", @"forceAccept progress=%.4f", progress);
@@ -2665,9 +2710,10 @@ static void EnsureEngineViewIsMounted() {
     }
 
     EnsureEngineViewIsMounted();
-    ZoneAODLog(@"AOD.Progress", @"post ZoneEngineProgress progress=%.4f", progress);
+    ZoneAODLog(@"AOD.Progress", @"post ZoneEngineProgress progress=%.4f screenOn=%d aodInactive=%d", progress, g_isScreenOn, g_isAODInactive);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
 }
+
 %end
 
 %hook SBBacklightController
@@ -2947,8 +2993,7 @@ static void EnsureEngineViewIsMounted() {
             portalView.hidesSourceView = NO;
             portalView.matchesAlpha = NO; 
             portalView.alpha = g_isVideoMode ? 1.0 : 0.0; 
-            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
-            portalView.matchesPosition = freezeAODLayout ? NO : (IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES));
+                        portalView.matchesPosition = IsSingleVideoMode() ? YES : (g_isVideoMode ? NO : YES);
             portalView.matchesTransform = YES;
             portalView.clipsToBounds = YES; 
             portalView.userInteractionEnabled = NO;
@@ -2961,16 +3006,13 @@ static void EnsureEngineViewIsMounted() {
             if (portalView.sourceView != sourceForPortal) {
                 portalView.sourceView = sourceForPortal; 
             }
-            BOOL freezeAODLayout = (g_isAODInactive && !g_isScreenOn);
-            if (IsSingleVideoMode()) {
-                if (!freezeAODLayout && portalView.matchesPosition != YES) portalView.matchesPosition = YES;
-                if (!freezeAODLayout) portalView.alpha = 1.0;
+                        if (IsSingleVideoMode()) {
+                if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
+                portalView.alpha = 1.0;
             } else if (g_isVideoMode && portalView.matchesPosition != NO) {
-                if (!freezeAODLayout) {
-                    portalView.matchesPosition = NO;
-                    portalView.alpha = 1.0;
-                }
-            } else if (!g_isVideoMode && !freezeAODLayout && portalView.matchesPosition != YES) {
+                portalView.matchesPosition = NO;
+                portalView.alpha = 1.0;
+            } else if (!g_isVideoMode && portalView.matchesPosition != YES) {
                 portalView.matchesPosition = YES;
             }
         } else {
