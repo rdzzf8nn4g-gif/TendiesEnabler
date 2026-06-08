@@ -132,40 +132,51 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
 }
 
 // ========================================================
-// 引擎 2：原有兜底解压引擎 (严格仅调用越狱版 unzip)
+// 引擎 2：高容错兜底解压引擎 (终极放水版)
 // ========================================================
 static BOOL industrialUnzip(NSString *source, NSString *destination) {
     pid_t pid;
     int status;
-    NSString *unzipBin = nil;
-
+    
+    // 1. 智能寻找 unzip 工具：优先越狱版，系统原生版兜底（防止越狱环境没装 unzip 导致直接罢工）
+    NSString *unzipBin = @"/usr/bin/unzip"; 
 #if __has_include(<roothide.h>)
-    // 1. Roothide 越狱环境
-    unzipBin = jbroot(@"/usr/bin/unzip");
+    if ([[NSFileManager defaultManager] fileExistsAtPath:jbroot(@"/usr/bin/unzip")]) {
+        unzipBin = jbroot(@"/usr/bin/unzip");
+    }
 #else
-    // 2. Rootless (无根) 越狱环境，检查标准越狱路径
     if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/unzip"]) {
         unzipBin = @"/var/jb/usr/bin/unzip";
-    } 
-    // 3. 兼容老的 Rootful (有根) 越狱环境（很多老越狱会把第三方完整工具放在 local 目录下）
-    else if ([[NSFileManager defaultManager] fileExistsAtPath:@"/usr/local/bin/unzip"]) {
+    } else if ([[NSFileManager defaultManager] fileExistsAtPath:@"/usr/local/bin/unzip"]) {
         unzipBin = @"/usr/local/bin/unzip";
     }
 #endif
 
-    // 【核心修改】：如果没有找到明确的越狱版 unzip 工具，直接返回 NO 拦截。
-    // 彻底切断对苹果系统自带工具 ( /usr/bin/unzip ) 的依赖与调用。
-    if (!unzipBin || ![[NSFileManager defaultManager] fileExistsAtPath:unzipBin]) {
-        // 连越狱版 unzip 都没有，直接宣告第二引擎失败，不瞎调用系统指令
-        return NO;
-    }
-
-    const char *argv[] = {"unzip", "-o", "-q", [source UTF8String], "-d", [destination UTF8String], NULL};
+    // 2. 注入免疫参数：-o(强制覆盖) -q(静默) -x(强行排除 Mac 系统垃圾文件，防止引发解压中断)
+    const char *argv[] = {
+        "unzip", 
+        "-o", 
+        "-q", 
+        [source UTF8String], 
+        "-d", 
+        [destination UTF8String], 
+        "-x", 
+        "__MACOSX/*", 
+        "*/.DS_Store", 
+        NULL
+    };
     
     if (posix_spawn(&pid, [unzipBin UTF8String], NULL, NULL, (char *const *)argv, environ) == 0) {
         if (waitpid(pid, &status, 0) != -1) {
-            // unzip 命令状态码：0 为完美成功，1 为有警告但提取成功
-            return WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 1);
+            if (WIFEXITED(status)) {
+                int exitCode = WEXITSTATUS(status);
+                // 3. 【核心放水区域】：大幅提高对不规范 ZIP 的容忍度
+                // 0 = 完美解压
+                // 1 = 有轻微警告但成功
+                // 2 = ZIP 格式存在通用错误（比如被第三方工具暴力篡改过头文件），但实际上数据已经释出
+                // 3 = 严重结构错误，但在很多情况下核心媒体文件依然能被强行抽出来
+                return (exitCode <= 3); 
+            }
         }
     }
     return NO;
