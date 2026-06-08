@@ -2517,11 +2517,6 @@ static void EnsureEngineViewIsMounted() {
 
 // 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
 - (void)setDismissed:(BOOL)dismissed {
-    ZoneAODLog(@"AOD.Hook", @"setDismissed enter dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
-    %orig;
-    
-    // 【修复桌面息屏闪烁】：如果当前在桌面，且屏幕正在息屏或已息屏，拦截系统强加的锁屏状态
-    - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
     
