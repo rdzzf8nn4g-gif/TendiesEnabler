@@ -432,6 +432,10 @@ static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
     return (state == 0 || state == 1);
 }
 
+static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
+    return (g_isAODInactive && state == 1);
+}
+
 static inline void ZoneEmitScreenEvent(BOOL screenOn) {
     CFTimeInterval now = CACurrentMediaTime();
     if (g_lastEmittedScreenState && g_lastEmittedScreenStateTime > 0.0 &&
@@ -2695,6 +2699,10 @@ static void EnsureEngineViewIsMounted() {
             ZoneAODLog(@"AOD.Backlight", @"willTransition ignored nonDefinitive state=%lld", state);
             return;
         }
+        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
+            ZoneAODLog(@"AOD.Backlight", @"willTransition ignored lingeringAODWake state=%lld", state);
+            return;
+        }
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
@@ -2710,6 +2718,10 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled && !g_isVideoMode) {
         if (!ZoneIsDefinitiveBacklightState(state)) {
             ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate ignored nonDefinitive state=%lld", state);
+            return;
+        }
+        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
+            ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate ignored lingeringAODWake state=%lld", state);
             return;
         }
         BOOL screenOn = (state == 1);
