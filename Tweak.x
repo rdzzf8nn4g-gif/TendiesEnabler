@@ -952,6 +952,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
+    // 【修改点】：如果指令是息屏且当前处于桌面，强制取消动画
+    if ([state isEqualToString:@"Sleep"] && ([self.currentState isEqualToString:@"Unlock"] || g_isUnlocked)) {
+        animated = NO;
+    }
+    
     if (state) {
         [self transitionToState:state animated:animated];
     }
@@ -1017,7 +1022,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:YES];
+    // 【修改点】：在桌面触发的息屏直接传 NO 掐断动画
+    BOOL shouldAnimate = ([self.currentState isEqualToString:@"Unlock"] || g_isUnlocked) ? NO : YES;
+    [self transitionToState:@"Sleep" animated:shouldAnimate];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserLegacy *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -1541,6 +1548,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
+    // 【修改点】：如果指令是息屏且当前处于桌面，强制取消手写逐帧动画
+    if ([state isEqualToString:@"Sleep"] && ([self.currentState isEqualToString:@"Unlock"] || g_isUnlocked)) {
+        animated = NO;
+    }
+    
     if (state) {
         [self transitionToState:state animated:animated];
     }
@@ -1631,7 +1643,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)onSleep {
     if (!g_enabled || !self.bgView) return;
     self.isUnlocking = NO;
-    [self transitionToState:@"Sleep" animated:YES];
+    // 【修改点】：如果在桌面，禁止它进入手写逐帧渲染
+    BOOL shouldAnimate = ([self.currentState isEqualToString:@"Unlock"] || g_isUnlocked) ? NO : YES;
+    [self transitionToState:@"Sleep" animated:shouldAnimate];
 }
 
 - (void)ensureLayerMap:(NSMutableDictionary *)layerMap parser:(ZoneCAMLParserEnhanced *)parser packageView:(BSUICAPackageView *)pkgView {
@@ -2518,22 +2532,24 @@ static void EnsureEngineViewIsMounted() {
 
 // 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
 - (void)setDismissed:(BOOL)dismissed {
+    ZoneAODLog(@"AOD.Hook", @"setDismissed enter dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     g_isUnlocked = dismissed;
-    
-    // 【修改点】：如果当前是不活跃状态（正在息屏或已息屏），绝对不要发送 Unlock/Locked 状态
-    // 防止桌面息屏时，系统在切 Sleep 之前强塞一个 Locked 状态导致画面闪烁
     if (g_enabled && g_isScreenOn && !g_isAODInactive) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
+        ZoneAODLog(@"AOD.Hook", @"setDismissed emit state=%@", state);
         ZoneEmitWallpaperState(YES, state, YES);
     }
+    ZoneAODLog(@"AOD.Hook", @"setDismissed exit dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
     ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode enter mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!mode, state, YES);
+        // 【修改点】：拦截 iOS16+ 桌面进入 AOD/息屏 时的系统动画传参
+        BOOL animated = (mode && g_isUnlocked) ? NO : YES;
+        ZoneCommitAODTransition(!mode, state, animated);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"setInScreenOffMode exit mode=%d screenOn=%d aodInactive=%d unlocked=%d", mode, g_isScreenOn, g_isAODInactive, g_isUnlocked);
@@ -2552,7 +2568,9 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive enter inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!inactive, state, YES);
+        // 【修改点】：拦截 iOS16+ 桌面进入 AOD/息屏 时的系统动画传参
+        BOOL animated = (inactive && g_isUnlocked) ? NO : YES;
+        ZoneCommitAODTransition(!inactive, state, animated);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive exit inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
@@ -2584,25 +2602,10 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
-    // 【新增核心修复】：如果引擎当前正在播放纯手写逐帧动画（如 Sleep 唤醒动画），
-    // 绝对禁止外部 Progress 篡改 Portal Alpha，防止出现“倒退滑动”错觉！
-    id existingEngine = objc_getAssociatedObject([%c(SBWallpaperController) sharedInstance], "GlobalZoneEngine");
-    if ([existingEngine respondsToSelector:@selector(isAnimatingState)]) {
-        BOOL isAnimating = [[existingEngine valueForKey:@"isAnimatingState"] boolValue];
-        if (isAnimating) {
-            ZoneAODLog(@"AOD.Progress", @"[FIX] Ignored ALL progress because engine is explicitly animating state.");
-            return; // 直接返回，既不更新 Portal Alpha，也不下发 Progress
-        }
-    }
+    ZoneAODLog(@"AOD.Progress", @"updateWallpaperAnimationWithProgress progress=%.4f screenOn=%d aodInactive=%d forceNext=%d lastProgress=%.4f", progress, g_isScreenOn, g_isAODInactive, g_forceAcceptNextSystemProgress, g_lastSystemProgress);
 
-    // 处理 AOD 阻断
-    if (!g_isScreenOn || g_isAODInactive) {
-        ZonePinPortalVisibleForAODSleep();
-        g_lastSystemProgress = progress;
-        return;
-    }
-
-    // 只有在非动画状态下，才允许根据手指滑动进度改变 Portal 透明度
+    // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
+    // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
     if (g_portalView && g_isScreenOn && !g_isAODInactive) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -2629,20 +2632,35 @@ static void EnsureEngineViewIsMounted() {
     }
 
     if (g_deferAODWakeWallpaperState && g_isScreenOn && !g_isAODInactive) {
+        ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState onProgress trigger progress=%.4f", progress);
         g_deferAODWakeWallpaperState = NO;
         ZoneFlushPendingAODWallpaperState();
     }
 
+    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
+    if (!g_isScreenOn || g_isAODInactive) {
+        ZonePinPortalVisibleForAODSleep();
+        ZoneAODLog(@"AOD.Progress", @"blockedByAOD progress=%.4f lastProgress=%.4f", progress, g_lastSystemProgress);
+        g_lastSystemProgress = progress;
+        return;
+    }
+
     if (g_forceAcceptNextSystemProgress) {
+        ZoneAODLog(@"AOD.Progress", @"forceAccept progress=%.4f", progress);
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = progress;
     } else {
         double delta = progress - g_lastSystemProgress;
         g_lastSystemProgress = progress;
-        if (ABS(delta) > 0.15) return; // 拦截跳跃过大的幽灵进度
+
+        if (ABS(delta) > 0.15) {
+            ZoneAODLog(@"AOD.Progress", @"droppedByDelta progress=%.4f delta=%.4f", progress, delta);
+            return;
+        }
     }
 
     EnsureEngineViewIsMounted();
+    ZoneAODLog(@"AOD.Progress", @"post ZoneEngineProgress progress=%.4f", progress);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
 }
 %end
@@ -2652,19 +2670,15 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Backlight", @"willTransition state=%lld screenOn=%d aodInactive=%d unlocked=%d", state, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if (!ZoneIsDefinitiveBacklightState(state)) {
-            ZoneAODLog(@"AOD.Backlight", @"willTransition ignored nonDefinitive state=%lld", state);
-            return;
-        }
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
-            ZoneAODLog(@"AOD.Backlight", @"willTransition ignored lingeringAODWake state=%lld", state);
-            return;
-        }
+        if (!ZoneIsDefinitiveBacklightState(state)) return;
+        if (ZoneShouldIgnoreAODBacklightWakeState(state)) return;
+        
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            ZoneAODLog(@"AOD.Backlight", @"willTransition commit screenOn=%d zoneState=%@", screenOn, zoneState);
-            ZoneCommitAODTransition(screenOn, zoneState, YES);
+            // 【修改点】：桌面触发背光关闭时禁止动画
+            BOOL animated = (!screenOn && g_isUnlocked) ? NO : YES;
+            ZoneCommitAODTransition(screenOn, zoneState, animated);
         }
     }
 }
@@ -2673,19 +2687,15 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate state=%lld screenOn=%d aodInactive=%d unlocked=%d", state, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
     if (g_enabled && !g_isVideoMode) {
-        if (!ZoneIsDefinitiveBacklightState(state)) {
-            ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate ignored nonDefinitive state=%lld", state);
-            return;
-        }
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
-            ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate ignored lingeringAODWake state=%lld", state);
-            return;
-        }
+        if (!ZoneIsDefinitiveBacklightState(state)) return;
+        if (ZoneShouldIgnoreAODBacklightWakeState(state)) return;
+        
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            ZoneAODLog(@"AOD.Backlight", @"didCompleteUpdate commit screenOn=%d zoneState=%@", screenOn, zoneState);
-            ZoneCommitAODTransition(screenOn, zoneState, YES);
+            // 【修改点】：桌面触发背光关闭时禁止动画
+            BOOL animated = (!screenOn && g_isUnlocked) ? NO : YES;
+            ZoneCommitAODTransition(screenOn, zoneState, animated);
         }
     }
 }
