@@ -158,7 +158,10 @@ static double g_animDuration;
 - (void)layoutSubviews {
     [super layoutSubviews];
     if (_uiPackageView) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         _uiPackageView.frame = self.bounds;
+        [CATransaction commit];
     }
 }
 
@@ -594,9 +597,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
+    [CATransaction commit];
     if (g_isScreenOn && g_enabled && g_isVideoMode && !self.isManuallyPaused) {
         [self playVideo];
     }
@@ -712,8 +718,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     if (self.lockVideoView) self.lockVideoView.frame = self.bounds;
     if (self.homeVideoView) self.homeVideoView.frame = self.bounds;
+    [CATransaction commit];
 }
 
 - (void)powerStateChanged {
@@ -975,6 +984,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.backgroundColor = finalBgColor;
     
+    // 🚨 修复：全局封杀 CoreAnimation 隐式动画，杜绝高频刷新时的 CPU 飙升与画面抽搐
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    
     if (self.bgView) {
         self.bgView.frame = bounds;
         self.bgView.backgroundColor = finalBgColor;
@@ -1008,6 +1021,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
         }
     }
+    [CATransaction commit];
 }
 
 - (void)onWakeUp {
@@ -1573,6 +1587,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.backgroundColor = finalBgColor;
     
+    // 🚨 修复：全引擎级隐式动画切断，免疫 AOD 歌词系统的高频 Layout 轰炸
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    
     if (self.bgView) {
         self.bgView.frame = bounds;
         self.bgView.backgroundColor = finalBgColor;
@@ -1622,6 +1640,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
         }
     }
+    [CATransaction commit];
 }
 
 - (void)onWakeUp {
