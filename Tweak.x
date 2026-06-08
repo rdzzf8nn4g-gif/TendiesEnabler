@@ -1546,7 +1546,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
-@property (nonatomic, copy) NSString *previousState;
 
 // 【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 
 @property (nonatomic, strong) CADisplayLink *manualAnimLink;
@@ -1904,17 +1903,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     progress = MAX(0.0, MIN(1.0, progress));
     
     // 【核心修复 2 完善】：解决亮屏秒滑桌面变锁屏的百年Bug
-    // 【核心修复 2 完善】：解决亮屏秒滑桌面变锁屏的百年Bug
     if (self.isAnimatingState) {
         if (progress > 0.01 && progress < 0.99) {
             // 1. 手指正在滑动：终止强制动画，把控制权交回给进度条
             [self completeManualTransition];
         } else if (progress >= 0.99 && ZoneIsDeviceUnlocked()) {
             // 2. 已经秒解锁进入桌面：终止残余亮屏动画，瞬间到位
-            // 【深层 Bug 修复】：如果刚刚从息屏(Sleep)唤醒且直接显示桌面，坚决保护唤醒动画不被假进度秒杀
-            if ([self.previousState isEqualToString:@"Sleep"]) {
-                return; 
-            }
             [self completeManualTransition];
         } else {
             // 3. 亮息屏瞬间的 0.0/1.0 假进度：坚决拦截防闪烁
@@ -1948,7 +1942,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
     //  核心修复结束 
-    self.previousState = self.currentState ? [self.currentState copy] : @"Init"; // 记录跳转前的状态
     self.currentState = [stateName copy];
 
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
