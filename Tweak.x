@@ -158,10 +158,7 @@ static double g_animDuration;
 - (void)layoutSubviews {
     [super layoutSubviews];
     if (_uiPackageView) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
         _uiPackageView.frame = self.bounds;
-        [CATransaction commit];
     }
 }
 
@@ -352,8 +349,6 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
 
 static inline void ZonePinPortalVisibleForAODSleep(void) {
     if (!g_portalView) return;
-    // 💡 修复：如果当前在桌面（已解锁状态），严禁强拉锁屏视图进行息屏动画，还桌面原生纯净的渐暗效果
-    if (g_isUnlocked) return; 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     g_portalView.hidden = NO;
@@ -597,12 +592,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
     if (self.playerLayer) {
         self.playerLayer.frame = self.bounds;
     }
-    [CATransaction commit];
     if (g_isScreenOn && g_enabled && g_isVideoMode && !self.isManuallyPaused) {
         [self playVideo];
     }
@@ -718,11 +710,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
     if (self.lockVideoView) self.lockVideoView.frame = self.bounds;
     if (self.homeVideoView) self.homeVideoView.frame = self.bounds;
-    [CATransaction commit];
 }
 
 - (void)powerStateChanged {
@@ -984,10 +973,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.backgroundColor = finalBgColor;
     
-    // 🚨 修复：全局封杀 CoreAnimation 隐式动画，杜绝高频刷新时的 CPU 飙升与画面抽搐
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    
     if (self.bgView) {
         self.bgView.frame = bounds;
         self.bgView.backgroundColor = finalBgColor;
@@ -1021,7 +1006,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
         }
     }
-    [CATransaction commit];
 }
 
 - (void)onWakeUp {
@@ -1587,10 +1571,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     }
     self.backgroundColor = finalBgColor;
     
-    // 🚨 修复：全引擎级隐式动画切断，免疫 AOD 歌词系统的高频 Layout 轰炸
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    
     if (self.bgView) {
         self.bgView.frame = bounds;
         self.bgView.backgroundColor = finalBgColor;
@@ -1640,7 +1620,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             }
         }
     }
-    [CATransaction commit];
 }
 
 - (void)onWakeUp {
@@ -1858,9 +1837,9 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     
-    // 【核心修复 2】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
+    // 【核心修复 2 加强版】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
     // 绝对禁止系统传来的 1.0 或 0.0 progress 打断动画！彻底解决亮屏瞬间画面被强拉到终点的问题。
-    if (self.isAnimatingState) {
+    if (self.isAnimatingState || self.manualAnimLink != nil) {
         ZoneAODLog(@"AOD.ManualAnim", @"onProgress ignored by animating state=%@", self.currentState);
         return;
     }
@@ -2442,18 +2421,12 @@ static void EnsureEngineViewIsMounted() {
         }
 
         if (freezeAODLayout) {
-            // 💡 修复：仅在未解锁（锁屏）时才冻结并显示AOD；如果在桌面息屏，保持门户视图隐藏
-            if (!g_isUnlocked) {
-                portalView.hidden = NO;
-                if (portalView.alpha != 1.0) {
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    portalView.alpha = 1.0;
-                    [CATransaction commit];
-                }
-            } else {
-                portalView.hidden = YES;
-                portalView.alpha = 0.0;
+            portalView.hidden = NO;
+            if (portalView.alpha != 1.0) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                portalView.alpha = 1.0;
+                [CATransaction commit];
             }
         } else if (sourceForPortal) {
             portalView.hidden = NO;
@@ -2547,6 +2520,13 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     ZoneAODLog(@"AOD.Hook", @"setDismissed enter dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     %orig;
+    
+    // 【修复桌面息屏闪烁】：如果当前在桌面，且屏幕正在息屏或已息屏，拦截系统强加的锁屏状态
+    if (!dismissed && g_isUnlocked && !g_isScreenOn) {
+        ZoneAODLog(@"AOD.Hook", @"Block forced lock transition during sleep.");
+        return; 
+    }
+    
     g_isUnlocked = dismissed;
     if (g_enabled && g_isScreenOn && !g_isAODInactive) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
@@ -2658,6 +2638,8 @@ static void EnsureEngineViewIsMounted() {
         ZoneAODLog(@"AOD.Progress", @"forceAccept progress=%.4f", progress);
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = progress;
+        // 【修复开屏倒退】：强制吃掉开屏第一帧进度，但不发送进度广播给引擎
+        return; 
     } else {
         double delta = progress - g_lastSystemProgress;
         g_lastSystemProgress = progress;
