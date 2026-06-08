@@ -1381,15 +1381,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) BOOL isAnimatingState; 
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
-@property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
+@property (nonatomic, strong) UIColor *dynamicSolidColor;
 
-// 👇【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 👇
+// 👇 AOD 防强杀 CADisplayLink 核心驱动器属性
 @property (nonatomic, strong) CADisplayLink *manualAnimLink;
 @property (nonatomic, assign) double manualAnimStartTime;
 @property (nonatomic, strong) NSMutableArray *manualAnimTasks;
 @property (nonatomic, copy) NSString *manualTargetState;
 @property (nonatomic, assign) BOOL manualIsDark;
-// 👆 新增结束 👆
+
+// 👇【全新终极护盾属性】：用于 AOD 视觉欺骗与抗闪烁
+@property (nonatomic, strong) UIImageView *aodShieldView;
 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
@@ -1419,6 +1421,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil];
+        
+        // 【新增】：初始化物理外挂护盾
+        self.aodShieldView = [[UIImageView alloc] initWithFrame:self.bounds];
+        self.aodShieldView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.aodShieldView.contentMode = UIViewContentModeScaleAspectFill;
+        self.aodShieldView.hidden = YES;
+        self.aodShieldView.userInteractionEnabled = NO;
+        [self addSubview:self.aodShieldView];
     }
     return self;
 }
@@ -1706,21 +1716,19 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
     
-    NSString *realBgState = [self.bgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    NSString *realFgState = [self.fgParser resolveRealStateNameFor:self.manualTargetState isDark:self.manualIsDark] ?: self.manualTargetState;
-    
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    
-    // 【终极修复 1】：彻底剔除系统的 setState 依赖！
-    // 直接用你强大的底层解析器，暴力修改图层的 Model Layer，把画面死死冻结在最后一帧。
-    // 这样哪怕 AOD 休眠多久，图层状态都绝对不会丢失，下一次亮屏完美衔接！
-    [self applyExplicitState:realBgState parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-    [self applyExplicitState:realFloatState parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-    [self applyExplicitState:realFgState parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-    
-    [CATransaction commit];
+    // 【终极防御】：如果动画的终点是“息屏(Sleep)”，我们在动画结束瞬间拍下完美的遗照（截图）作为护盾盖在上面！
+    if ([self.manualTargetState isEqualToString:@"Sleep"]) {
+        [self bringSubviewToFront:self.aodShieldView];
+        
+        UIGraphicsBeginImageContextWithOptions(self.bounds.size, NO, [UIScreen mainScreen].scale);
+        [self.layer renderInContext:UIGraphicsGetCurrentContext()];
+        UIImage *snap = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        
+        self.aodShieldView.image = snap;
+        self.aodShieldView.alpha = 1.0;
+        self.aodShieldView.hidden = NO;
+    }
 }
 
 - (void)onProgress:(NSNotification *)note {
@@ -1752,8 +1760,30 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.currentState = [stateName copy];
     
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
+    NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
     [self ensureAllLayerMaps];
+    
+    // 【终极防御】：如果我们要亮屏了（离开Sleep），且护盾还在
+    if (![stateName isEqualToString:@"Sleep"] && !self.aodShieldView.hidden) {
+        // 第一步：趁着截图护盾还盖着，把底下被系统偷偷篡改的坐标，强行死死按回到 Sleep 状态！
+        NSString *sleepBg = [self.bgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+        NSString *sleepFloat = [self.floatParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+        NSString *sleepFg = [self.fgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+        
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [self applyExplicitState:sleepBg parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+        [self applyExplicitState:sleepFloat parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+        [self applyExplicitState:sleepFg parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+        [CATransaction commit];
+        
+        // 第二步：坐标重置完毕，瞬间撤下护盾，露出完美的底层准备播放动画！
+        self.aodShieldView.hidden = YES;
+        self.aodShieldView.image = nil;
+    }
     
     if (animated) {
         self.animationGeneration++;
@@ -1776,8 +1806,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
         }
         
-        // 【终极修复 2】：这里原先有调用 [self.bgView setState:]，现在彻底拔除！
-        // 既然我们自己能控制所有图层参数，就永远不要给系统 CoreAnimation 插手的机会。
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+            [self.bgView setState:realBgState animated:NO]; 
+            [self.floatingView setState:realFloatState animated:NO]; 
+            [self.fgView setState:realFgState animated:NO];
+        } else {
+            [self.bgView setState:realBgState]; 
+            [self.floatingView setState:realFloatState]; 
+            [self.fgView setState:realFgState];
+        }
+        [CATransaction commit];
     }
 }
 
