@@ -368,10 +368,6 @@ static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL 
     }
 }
 
-static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
-    return (state == 0 || state == 1);
-}
-
 static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
     return (g_isAODInactive && state == 1);
 }
