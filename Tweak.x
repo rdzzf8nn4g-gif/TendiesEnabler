@@ -274,6 +274,20 @@ static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
 static NSString *g_lastEmittedWallpaperState = nil;
 static CFTimeInterval g_lastEmittedWallpaperStateTime = 0.0;
 
+static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
+
+static inline void ZoneSetAODScreenState(BOOL screenOn) {
+    g_isScreenOn = screenOn;
+    g_isAODInactive = !screenOn;
+    g_lastTickProgress = -1;
+    g_lastSystemProgress = screenOn ? 1.0 : 0.0;
+}
+
+static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL animated) {
+    ZoneSetAODScreenState(screenOn);
+    ZoneEmitScreenAndWallpaperState(screenOn, state, animated);
+}
+
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
     return (state == 0 || state == 1);
 }
@@ -1381,17 +1395,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) BOOL isAnimatingState; 
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
-@property (nonatomic, strong) UIColor *dynamicSolidColor;
+@property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
 
-// 👇 AOD 防强杀 CADisplayLink 核心驱动器属性
+// 👇【新增】：AOD 防强杀 CADisplayLink 核心驱动器属性 👇
 @property (nonatomic, strong) CADisplayLink *manualAnimLink;
 @property (nonatomic, assign) double manualAnimStartTime;
 @property (nonatomic, strong) NSMutableArray *manualAnimTasks;
 @property (nonatomic, copy) NSString *manualTargetState;
 @property (nonatomic, assign) BOOL manualIsDark;
-
-// 👇【全新终极护盾属性】：用于 AOD 视觉欺骗与抗闪烁
-@property (nonatomic, strong) UIImageView *aodShieldView;
+// 👆 新增结束 👆
 
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
@@ -1421,14 +1433,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onSleep) name:@"ZoneEngineSleep" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onProgress:) name:@"ZoneEngineProgress" object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onStateChange:) name:@"ZoneEngineStateChange" object:nil];
-        
-        // 【新增】：初始化物理外挂护盾
-        self.aodShieldView = [[UIImageView alloc] initWithFrame:self.bounds];
-        self.aodShieldView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        self.aodShieldView.contentMode = UIViewContentModeScaleAspectFill;
-        self.aodShieldView.hidden = YES;
-        self.aodShieldView.userInteractionEnabled = NO;
-        [self addSubview:self.aodShieldView];
     }
     return self;
 }
@@ -1713,21 +1717,24 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)completeManualTransition {
     if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
+
+    NSArray *finishedTasks = [self.manualAnimTasks copy];
     self.manualAnimTasks = nil;
     self.isAnimatingState = NO;
-    
-    // 【终极防御】：如果动画的终点是“息屏(Sleep)”，我们在动画结束瞬间拍下完美的遗照（截图）作为护盾盖在上面！
-    if ([self.manualTargetState isEqualToString:@"Sleep"]) {
-        [self bringSubviewToFront:self.aodShieldView];
-        
-        UIGraphicsBeginImageContextWithOptions(self.bounds.size, NO, [UIScreen mainScreen].scale);
-        [self.layer renderInContext:UIGraphicsGetCurrentContext()];
-        UIImage *snap = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        
-        self.aodShieldView.image = snap;
-        self.aodShieldView.alpha = 1.0;
-        self.aodShieldView.hidden = NO;
+
+    if (finishedTasks.count > 0) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (NSDictionary *task in finishedTasks) {
+            CALayer *layer = task[@"layer"];
+            NSString *keyPath = task[@"keyPath"];
+            id endVal = task[@"end"];
+            if (layer && keyPath && endVal) {
+                [layer removeAnimationForKey:keyPath];
+                @try { [layer setValue:endVal forKeyPath:keyPath]; } @catch (NSException *e) {}
+            }
+        }
+        [CATransaction commit];
     }
 }
 
@@ -1735,9 +1742,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enabled || !self.bgView) return;
     if (!g_isScreenOn || g_isAODInactive) return;
     
-    // 【防御核心】：如果我们的逐帧动画还在跑，绝对禁止系统乱入的进度(如快速亮屏的1.0)打断画面！
+    // 【核心修复 2】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
+    // 绝对禁止系统传来的 1.0 或 0.0 progress 打断动画！彻底解决亮屏瞬间画面被强拉到终点的问题。
     if (self.isAnimatingState) return; 
-    
+
     self.animationGeneration++;
     
     double progress = [note.userInfo[@"progress"] doubleValue];
@@ -1766,28 +1774,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     [self ensureAllLayerMaps];
     
-    // 【终极防御】：如果我们要亮屏了（离开Sleep），且护盾还在
-    if (![stateName isEqualToString:@"Sleep"] && !self.aodShieldView.hidden) {
-        // 第一步：趁着截图护盾还盖着，把底下被系统偷偷篡改的坐标，强行死死按回到 Sleep 状态！
-        NSString *sleepBg = [self.bgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
-        NSString *sleepFloat = [self.floatParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
-        NSString *sleepFg = [self.fgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
-        
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        [self applyExplicitState:sleepBg parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
-        [self applyExplicitState:sleepFloat parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
-        [self applyExplicitState:sleepFg parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
-        [CATransaction commit];
-        
-        // 第二步：坐标重置完毕，瞬间撤下护盾，露出完美的底层准备播放动画！
-        self.aodShieldView.hidden = YES;
-        self.aodShieldView.image = nil;
-    }
-    
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
+        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
+        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -2117,15 +2108,6 @@ static void EnsureEngineViewIsMounted() {
     return isMain;
 }
 
-// 【终极大杀器】：拦截底层图层的动画隐式注入，让AOD无法再唤醒它
-- (id)actionForLayer:(CALayer *)layer forKey:(NSString *)event {
-    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        // 返回 NSNull 彻底杀掉这个属性的所有动画
-        return (id)[NSNull null]; 
-    }
-    return %orig;
-}
-
 - (void)layoutSubviews {
     %orig;
     if (!g_enabled) {
@@ -2157,7 +2139,7 @@ static void EnsureEngineViewIsMounted() {
         }
         self.hidden = hide;
         self.alpha = hide ? 0.0 : 1.0;
-        self.layer.opacity = hide ? 0.0 : 1.0;
+        self.layer.opacity = hide ? 0.0 : 1.0; // 【核心修复 4】：暴力绑定底层图层不透明度
     } else {
         self.hidden = YES;
         self.alpha = 0.0;
@@ -2417,36 +2399,27 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
-    %orig;
     if (g_enabled) {
-        g_isAODInactive = mode;
-        g_isScreenOn = !mode;
-        g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
         NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneEmitScreenAndWallpaperState(!mode, state, YES);
+        ZoneCommitAODTransition(!mode, state, YES);
     }
+    %orig;
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
-    %orig;
     if (g_enabled) {
-        g_isAODInactive = NO;
-        g_isScreenOn = YES;
-        g_lastSystemProgress = 1.0;
         NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        ZoneEmitScreenAndWallpaperState(YES, state, YES);
+        ZoneCommitAODTransition(YES, state, YES);
     }
+    %orig;
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
-    %orig;
     if (g_enabled) {
-        g_isAODInactive = inactive;
-        g_isScreenOn = !inactive;
-        g_lastSystemProgress = g_isScreenOn ? 1.0 : 0.0;
         NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneEmitScreenAndWallpaperState(!inactive, state, YES);
+        ZoneCommitAODTransition(!inactive, state, YES);
     }
+    %orig;
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2475,38 +2448,34 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
-    // 【核心修复】：接管覆盖在最上层的 Portal 遮罩
+    // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
+    // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
     if (g_portalView) {
-        double targetAlpha = 0.0;
         if (g_isVideoMode) {
-            targetAlpha = 1.0;
-        } else {
-            if (progress > 0.7) {
-                targetAlpha = (1.0 - progress) * (0.05 / 0.3);
-            } else if (progress > 0.6) {
-                targetAlpha = 0.05 + (0.7 - progress) * 1.0; 
-            } else {
-                targetAlpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
-            }
-            targetAlpha = MAX(0.0, MIN(1.0, targetAlpha));
-        }
-
-        if (ABS(g_portalView.alpha - targetAlpha) > 0.01) {
-            [CATransaction begin];
-            double deltaProgress = progress - g_lastSystemProgress;
-            // 如果是快速亮屏/息屏（瞬间进度跨度极大），必须赋予平滑过渡，否则会直闪
-            if (ABS(deltaProgress) > 0.3) {
-                [CATransaction setDisableActions:NO];
-                [CATransaction setAnimationDuration:g_animDuration > 0 ? g_animDuration : 0.85];
-                [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
-            } else {
+            if (g_portalView.alpha != 1.0) {
+                [CATransaction begin];
                 [CATransaction setDisableActions:YES];
+                g_portalView.alpha = 1.0;
+                [CATransaction commit];
             }
-            g_portalView.alpha = targetAlpha;
+        } else {
+            double alpha = 0.0;
+            if (progress > 0.7) {
+                alpha = (1.0 - progress) * (0.05 / 0.3);
+            } else if (progress > 0.6) {
+                alpha = 0.05 + (0.7 - progress) * 1.0; 
+            } else {
+                alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+            }
+            alpha = MAX(0.0, MIN(1.0, alpha));
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            g_portalView.alpha = alpha;
             [CATransaction commit];
         }
     }
 
+    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
     if (!g_isScreenOn || g_isAODInactive) {
         g_lastSystemProgress = progress;
         return;
@@ -2531,12 +2500,8 @@ static void EnsureEngineViewIsMounted() {
         if (!ZoneIsDefinitiveBacklightState(state)) return;
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_isAODInactive = !screenOn;
-            g_lastTickProgress = -1;
-            g_lastSystemProgress = screenOn ? 1.0 : 0.0;
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
+            ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
 }
@@ -2547,12 +2512,8 @@ static void EnsureEngineViewIsMounted() {
         if (!ZoneIsDefinitiveBacklightState(state)) return;
         BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
-            g_isScreenOn = screenOn;
-            g_isAODInactive = !screenOn;
-            g_lastTickProgress = -1;
-            g_lastSystemProgress = screenOn ? 1.0 : 0.0;
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            ZoneEmitScreenAndWallpaperState(screenOn, zoneState, YES);
+            ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
 }
