@@ -638,6 +638,13 @@ static NSString * GetPrefsPlistPath() {
         [enableSpec setProperty:@NO forKey:@"default"];
         enableSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:enableSpec];
+
+PSSpecifier *doubleTapLockSpecVideo = [PSSpecifier preferenceSpecifierNamed:@"双击锁屏" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        [doubleTapLockSpecVideo setProperty:@"DoubleTapLock" forKey:@"key"];
+        [doubleTapLockSpecVideo setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+        [doubleTapLockSpecVideo setProperty:@NO forKey:@"default"];
+        doubleTapLockSpecVideo->action = @selector(setPreferenceValue:specifier:);
+        [_specifiers addObject:doubleTapLockSpecVideo];
         
         PSSpecifier *lowPowerSpec = [PSSpecifier preferenceSpecifierNamed:@"低电模式暂停" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [lowPowerSpec setProperty:@"LowPowerPause" forKey:@"key"];
@@ -714,27 +721,38 @@ for (NSString *name in lockContents) {
     } else {
         NSArray *rootSpecs = [self loadSpecifiersFromPlistName:@"Root" target:self];
         
-        // ====== 新增：仅在 iOS 16 及以上动态注入“壁纸动画”开关 ======
-        if (@available(iOS 16.0, *)) {
-            NSUInteger insertIndex = NSNotFound;
-            for (NSUInteger i = 0; i < rootSpecs.count; i++) {
-                PSSpecifier *spec = rootSpecs[i];
-                if ([[spec propertyForKey:@"key"] isEqualToString:@"HideTextShadow"]) {
-                    insertIndex = i + 1; // 插入在文字阴影下方
-                    break;
-                }
+        // ====== 动态注入“双击锁屏”与“壁纸动画”开关 ======
+        NSUInteger baseInsertIndex = NSNotFound;
+        for (NSUInteger i = 0; i < rootSpecs.count; i++) {
+            PSSpecifier *spec = rootSpecs[i];
+            if ([[spec propertyForKey:@"key"] isEqualToString:@"HideTextShadow"]) {
+                baseInsertIndex = i + 1; // 记录文字阴影开关下方的核心位置
+                break;
             }
-            if (insertIndex != NSNotFound) {
+        }
+
+        if (baseInsertIndex != NSNotFound) {
+            NSMutableArray *mutRoot = [rootSpecs mutableCopy];
+
+            // 1. 注入“双击桌面锁屏”开关 (全版本适用)
+            PSSpecifier *doubleTapSpec = [PSSpecifier preferenceSpecifierNamed:@"双击桌面锁屏" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+            [doubleTapSpec setProperty:@"DoubleTapLock" forKey:@"key"];
+            [doubleTapSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+            [doubleTapSpec setProperty:@NO forKey:@"default"];
+            doubleTapSpec->action = @selector(setPreferenceValue:specifier:);
+            [mutRoot insertObject:doubleTapSpec atIndex:baseInsertIndex];
+
+            // 2. 注入“动画速度”开关 (仅 iOS 16+)
+            if (@available(iOS 16.0, *)) {
                 PSSpecifier *animSpec = [PSSpecifier preferenceSpecifierNamed:@"动画速度" target:self set:@selector(setAnimEnableValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
                 [animSpec setProperty:@"EnableAnimSpeed" forKey:@"key"];
                 [animSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
                 [animSpec setProperty:@YES forKey:@"default"];
                 animSpec->action = @selector(setAnimEnableValue:specifier:);
-                
-                NSMutableArray *mutRoot = [rootSpecs mutableCopy];
-                [mutRoot insertObject:animSpec atIndex:insertIndex];
-                rootSpecs = mutRoot;
+                [mutRoot insertObject:animSpec atIndex:baseInsertIndex + 1]; // 顺延插入在双击锁屏下方
             }
+
+            rootSpecs = mutRoot;
         }
         // ==========================================================
 
@@ -1829,7 +1847,7 @@ for (NSString *name in lockContents) {
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     
     NSString *key = [specifier propertyForKey:@"key"];
-    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"] || [key isEqualToString:@"EnableAnimSpeed"]) {
+    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"] || [key isEqualToString:@"EnableAnimSpeed"] || [key isEqualToString:@"DoubleTapLock"]) {
         CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, appID);
         CFPreferencesAppSynchronize(appID);
         
