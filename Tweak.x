@@ -242,6 +242,7 @@ static BOOL g_enabled = NO;
 static BOOL g_enhanced_engine = NO;
 static BOOL g_hideTextShadow = NO;
 static BOOL g_lowPowerPause = NO; 
+static BOOL g_doubleTapLock = NO;
 static NSString *g_zonePath = nil;
 
 // 视觉状态标识
@@ -446,6 +447,7 @@ static void reloadPrefs() {
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
     g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
     g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO;
+g_doubleTapLock = CFPreferencesGetAppBooleanValue(CFSTR("DoubleTapLock"), appID, &valid) ? valid : NO;
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
     g_enableAnimSpeed = CFPreferencesGetAppBooleanValue(CFSTR("EnableAnimSpeed"), appID, &valid) ? valid : YES;
     
@@ -3097,6 +3099,21 @@ static void EnsureEngineViewIsMounted() {
 // =========================================================================
 // ==================== 【全版本通用 Hook 区域】 ============================
 // =========================================================================
+
+@interface SpringBoard : UIApplication
+- (void)_simulateLockButtonPress;
+@end
+
+%hook SBIconListView
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+    // 判断：插件开启、双击锁屏开启，并且确实是双击事件
+    if (g_enabled && g_doubleTapLock && [[touches anyObject] tapCount] == 2) {
+        [(SpringBoard *)[%c(SpringBoard) sharedApplication] _simulateLockButtonPress];
+    } else {
+        %orig;
+    }
+}
+%end
 
 %hook SBFLegacyWallpaperWakeAnimator
 - (void)updateWakeEffectsForWake:(BOOL)wake animated:(BOOL)animated completion:(id)completion {
