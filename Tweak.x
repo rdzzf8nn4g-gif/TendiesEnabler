@@ -1837,9 +1837,10 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     
-    // 【终极防御】：如果当前正在播放纯手写的开屏/息屏过渡动画，
-    // 必须绝对无视系统发来的所有滑动进度！这是切断开屏“反向滑动”错觉的最后一道防线！
-    if (self.isAnimatingState || self.manualAnimLink != nil) {
+    // 【核心修复 2】：如果当前正在播放手写逐帧动画（如息屏/平滑亮屏中），
+    // 绝对禁止系统传来的 1.0 或 0.0 progress 打断动画！彻底解决亮屏瞬间画面被强拉到终点的问题。
+    if (self.isAnimatingState) {
+        ZoneAODLog(@"AOD.ManualAnim", @"onProgress ignored by animating state=%@", self.currentState);
         return;
     }
 
@@ -2520,22 +2521,11 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     g_isUnlocked = dismissed;
     
-    if (g_enabled) {
-        if (dismissed) {
-            // 解锁时立即下发，保证顺畅不拖沓
-            if (g_isScreenOn && !g_isAODInactive) {
-                ZoneEmitWallpaperState(YES, @"Unlock", YES);
-            }
-        } else {
-            // 【最强拦截】：如果是电源键息屏，系统会伪造一次“回到锁屏”。
-            // 我们强制延迟 0.2 秒！如果这 0.2 秒内屏幕黑了，就会直接被后续的“Sleep”覆盖，
-            // 彻底杀死了桌面息屏闪锁屏、以及开屏画面倒退的可能！
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (g_isScreenOn && !g_isAODInactive && !g_isUnlocked) {
-                    ZoneEmitWallpaperState(YES, @"Locked", YES);
-                }
-            });
-        }
+    // 【修改点】：如果当前是不活跃状态（正在息屏或已息屏），绝对不要发送 Unlock/Locked 状态
+    // 防止桌面息屏时，系统在切 Sleep 之前强塞一个 Locked 状态导致画面闪烁
+    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
+        ZoneEmitWallpaperState(YES, state, YES);
     }
 }
 
@@ -2594,9 +2584,25 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
-    ZoneAODLog(@"AOD.Progress", @"updateWallpaperAnimationWithProgress progress=%.4f screenOn=%d aodInactive=%d forceNext=%d lastProgress=%.4f", progress, g_isScreenOn, g_isAODInactive, g_forceAcceptNextSystemProgress, g_lastSystemProgress);
+    // 【新增核心修复】：如果引擎当前正在播放纯手写逐帧动画（如 Sleep 唤醒动画），
+    // 绝对禁止外部 Progress 篡改 Portal Alpha，防止出现“倒退滑动”错觉！
+    id existingEngine = objc_getAssociatedObject([%c(SBWallpaperController) sharedInstance], "GlobalZoneEngine");
+    if ([existingEngine respondsToSelector:@selector(isAnimatingState)]) {
+        BOOL isAnimating = [[existingEngine valueForKey:@"isAnimatingState"] boolValue];
+        if (isAnimating) {
+            ZoneAODLog(@"AOD.Progress", @"[FIX] Ignored ALL progress because engine is explicitly animating state.");
+            return; // 直接返回，既不更新 Portal Alpha，也不下发 Progress
+        }
+    }
 
-    // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
+    // 处理 AOD 阻断
+    if (!g_isScreenOn || g_isAODInactive) {
+        ZonePinPortalVisibleForAODSleep();
+        g_lastSystemProgress = progress;
+        return;
+    }
+
+    // 只有在非动画状态下，才允许根据手指滑动进度改变 Portal 透明度
     if (g_portalView && g_isScreenOn && !g_isAODInactive) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -2623,36 +2629,20 @@ static void EnsureEngineViewIsMounted() {
     }
 
     if (g_deferAODWakeWallpaperState && g_isScreenOn && !g_isAODInactive) {
-        ZoneAODLog(@"AOD.Pending", @"ZoneFlushPendingAODWallpaperState onProgress trigger progress=%.4f", progress);
         g_deferAODWakeWallpaperState = NO;
         ZoneFlushPendingAODWallpaperState();
-    }
-
-    // 拦截 ZoneEngineProgress 下发
-    if (!g_isScreenOn || g_isAODInactive) {
-        ZonePinPortalVisibleForAODSleep();
-        ZoneAODLog(@"AOD.Progress", @"blockedByAOD progress=%.4f lastProgress=%.4f", progress, g_lastSystemProgress);
-        g_lastSystemProgress = progress;
-        return;
     }
 
     if (g_forceAcceptNextSystemProgress) {
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = progress;
-        // 【强制吃掉】：开屏第一帧进度直接吞掉，严禁广播给引擎，防止开屏受滑动残值干扰
-        return; 
-    } 
-
-    double delta = progress - g_lastSystemProgress;
-    g_lastSystemProgress = progress;
-
-    // 【强化过滤】：过滤所有大于 0.15 的突兀进度跳变
-    if (ABS(delta) > 0.15) {
-        return;
+    } else {
+        double delta = progress - g_lastSystemProgress;
+        g_lastSystemProgress = progress;
+        if (ABS(delta) > 0.15) return; // 拦截跳跃过大的幽灵进度
     }
 
     EnsureEngineViewIsMounted();
-    ZoneAODLog(@"AOD.Progress", @"post ZoneEngineProgress progress=%.4f", progress);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
 }
 %end
