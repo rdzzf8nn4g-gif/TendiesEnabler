@@ -2659,8 +2659,12 @@ static void EnsureEngineViewIsMounted() {
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive enter inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
         g_isUnlocked = ZoneIsUIDesktopUnlockedSafe();
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!inactive, state, YES);
+        if (!inactive && g_isScreenOn && !g_isAODInactive && g_isUnlocked) {
+            ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive skipDesktopLockedFlash inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
+        } else {
+            NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+            ZoneCommitAODTransition(!inactive, state, YES);
+        }
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive exit inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
