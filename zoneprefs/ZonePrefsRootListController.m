@@ -132,24 +132,39 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
 }
 
 // ========================================================
-// 引擎 2：原有兜底解压引擎 (posix_spawn 调用系统解压)
+// 引擎 2：原有兜底解压引擎 (严格仅调用越狱版 unzip)
 // ========================================================
 static BOOL industrialUnzip(NSString *source, NSString *destination) {
     pid_t pid;
     int status;
-    NSString *unzipBin = @"/usr/bin/unzip";
+    NSString *unzipBin = nil;
+
 #if __has_include(<roothide.h>)
-    unzipBin = jbroot(unzipBin);
+    // 1. Roothide 越狱环境
+    unzipBin = jbroot(@"/usr/bin/unzip");
 #else
+    // 2. Rootless (无根) 越狱环境，检查标准越狱路径
     if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/unzip"]) {
         unzipBin = @"/var/jb/usr/bin/unzip";
+    } 
+    // 3. 兼容老的 Rootful (有根) 越狱环境（很多老越狱会把第三方完整工具放在 local 目录下）
+    else if ([[NSFileManager defaultManager] fileExistsAtPath:@"/usr/local/bin/unzip"]) {
+        unzipBin = @"/usr/local/bin/unzip";
     }
 #endif
+
+    // 【核心修改】：如果没有找到明确的越狱版 unzip 工具，直接返回 NO 拦截。
+    // 彻底切断对苹果系统自带工具 ( /usr/bin/unzip ) 的依赖与调用。
+    if (!unzipBin || ![[NSFileManager defaultManager] fileExistsAtPath:unzipBin]) {
+        // 连越狱版 unzip 都没有，直接宣告第二引擎失败，不瞎调用系统指令
+        return NO;
+    }
 
     const char *argv[] = {"unzip", "-o", "-q", [source UTF8String], "-d", [destination UTF8String], NULL};
     
     if (posix_spawn(&pid, [unzipBin UTF8String], NULL, NULL, (char *const *)argv, environ) == 0) {
         if (waitpid(pid, &status, 0) != -1) {
+            // unzip 命令状态码：0 为完美成功，1 为有警告但提取成功
             return WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 1);
         }
     }
