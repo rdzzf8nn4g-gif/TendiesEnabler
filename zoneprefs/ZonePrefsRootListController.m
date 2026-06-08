@@ -19,7 +19,7 @@ extern char **environ;
 #endif
 
 // ========================================================
-// 引擎 1：微型工业级原生解压引擎 (纯手写、防泄漏、零内存激增)
+// 引擎 1：纯血 C 语言在轨解压引擎 (沙盒穿透级，完美修复 Data Descriptor)
 // ========================================================
 static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
     FILE *fp = fopen([source UTF8String], "rb");
@@ -29,8 +29,22 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
     [fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:nil error:nil];
 
     unsigned char sig[4];
+    BOOL extractedAny = NO;
+
     while (fread(sig, 1, 4, fp) == 4) {
-        if (sig[0] != 0x50 || sig[1] != 0x4B || sig[2] != 0x03 || sig[3] != 0x04) break; 
+        // 1. 智能滑窗扫描：自动跳过由于 macOS 产生的冗余 Data Descriptor 或错位字节
+        if (sig[0] != 0x50 || sig[1] != 0x4B) {
+            fseek(fp, -3, SEEK_CUR); // 没对齐？退回3个字节，相当于每次前进1字节精准扫描
+            continue;
+        }
+        // 0x01 0x02 = Central Directory (已到达文件尾部的中央目录，结束解压)
+        if (sig[2] == 0x01 && sig[3] == 0x02) {
+            break;
+        }
+        // 0x03 0x04 = Local File Header (正常文件头)，如果不是则继续滑窗
+        if (sig[2] != 0x03 || sig[3] != 0x04) {
+            continue; 
+        }
 
         unsigned char header[26];
         if (fread(header, 1, 26, fp) != 26) { fclose(fp); return NO; }
@@ -41,7 +55,9 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
         uint16_t nameLen = header[22] | (header[23] << 8);
         uint16_t extraLen = header[24] | (header[25] << 8);
 
-        if ((flags & 0x01) || (flags & 0x08) || compSize == 0xFFFFFFFF) {
+        // 如果文件被加密，或者触发 ZIP64 超大文件机制，放弃该文件
+        // 注意：这里删除了原版导致罢工的 || (flags & 0x08) 判定！
+        if ((flags & 0x01) || compSize == 0xFFFFFFFF) {
             fclose(fp); return NO; 
         }
 
@@ -52,37 +68,37 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
         if (extraLen > 0) fseek(fp, extraLen, SEEK_CUR);
 
         NSString *fileName = [NSString stringWithUTF8String:name];
-        if (!fileName) { fclose(fp); return NO; }
+        if (!fileName) fileName = @"unknown_file";
         
-        if ([fileName containsString:@"../"]) {
-            fseek(fp, compSize, SEEK_CUR);
-            continue;
-        }
-
+        // 2. 强力屏蔽 macOS 系统的解压垃圾和非法越权路径，防止炸沙盒
+        BOOL isMacTrash = [fileName containsString:@"__MACOSX"] || [fileName hasSuffix:@".DS_Store"] || [fileName containsString:@"../"];
         NSString *outPath = [destination stringByAppendingPathComponent:fileName];
 
         if ([fileName hasSuffix:@"/"]) {
-            [fm createDirectoryAtPath:outPath withIntermediateDirectories:YES attributes:nil error:nil];
+            if (!isMacTrash) {
+                [fm createDirectoryAtPath:outPath withIntermediateDirectories:YES attributes:nil error:nil];
+            }
         } else {
-            [fm createDirectoryAtPath:[outPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+            if (!isMacTrash) {
+                [fm createDirectoryAtPath:[outPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+            }
 
+            FILE *outFp = isMacTrash ? NULL : fopen([outPath UTF8String], "wb");
+            
             if (method == 0) {
-                FILE *outFp = fopen([outPath UTF8String], "wb");
-                if (!outFp) { fclose(fp); return NO; }
+                // 仅存储模式（无压缩）
                 char buf[32768];
                 uint32_t left = compSize;
                 while (left > 0) {
                     size_t toRead = left < sizeof(buf) ? left : sizeof(buf);
                     size_t r = fread(buf, 1, toRead, fp);
                     if (r == 0) break;
-                    fwrite(buf, 1, r, outFp);
+                    if (outFp) fwrite(buf, 1, r, outFp);
                     left -= r;
                 }
-                fclose(outFp);
+                if (outFp) { fclose(outFp); extractedAny = YES; }
             } else if (method == 8) {
-                FILE *outFp = fopen([outPath UTF8String], "wb");
-                if (!outFp) { fclose(fp); return NO; }
-
+                // Deflate 标准压缩模式
                 z_stream strm;
                 strm.zalloc = Z_NULL;
                 strm.zfree = Z_NULL;
@@ -91,44 +107,73 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
                 strm.next_in = Z_NULL;
 
                 if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) {
-                    fclose(outFp); fclose(fp); return NO;
+                    if (outFp) fclose(outFp);
+                    fclose(fp); return NO;
                 }
 
                 unsigned char inBuf[32768];
                 unsigned char outBuf[32768];
-                uint32_t left = compSize;
                 int ret = Z_OK;
+                BOOL done = NO;
+                
+                // 【核心突破 3】：处理 macOS 压缩包独有的 flags & 0x08 尾部标志位
+                // 如果存在此标志位，说明头部记录的 compSize 是 0，我们必须无视大小，一直解压直到 zlib 报告流耗尽
+                BOOL hasDataDescriptor = (flags & 0x08) != 0;
+                uint32_t left = compSize;
 
                 do {
-                    size_t toRead = left < sizeof(inBuf) ? left : sizeof(inBuf);
-                    if (toRead == 0) break;
+                    size_t toRead = hasDataDescriptor ? sizeof(inBuf) : (left < sizeof(inBuf) ? left : sizeof(inBuf));
+                    if (toRead == 0 && !hasDataDescriptor) break;
+                    
                     size_t r = fread(inBuf, 1, toRead, fp);
                     if (r == 0) break;
+                    
                     strm.avail_in = (uInt)r;
                     strm.next_in = inBuf;
-                    left -= r;
+                    if (!hasDataDescriptor) left -= r;
 
                     do {
                         strm.avail_out = sizeof(outBuf);
                         strm.next_out = outBuf;
                         ret = inflate(&strm, Z_NO_FLUSH);
+                        
                         if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
-                            inflateEnd(&strm); fclose(outFp); fclose(fp); return NO;
+                            inflateEnd(&strm);
+                            if (outFp) fclose(outFp);
+                            fclose(fp); return NO;
                         }
+                        
                         unsigned have = sizeof(outBuf) - strm.avail_out;
-                        if (have > 0) fwrite(outBuf, 1, have, outFp);
+                        if (have > 0 && outFp) {
+                            fwrite(outBuf, 1, have, outFp);
+                        }
+                        
+                        // 到达压缩数据流真正的物理尽头，完美结束
+                        if (ret == Z_STREAM_END) {
+                            done = YES;
+                            break;
+                        }
                     } while (strm.avail_out == 0);
-                } while (ret != Z_STREAM_END && left > 0);
+                    
+                } while (!done && (hasDataDescriptor || left > 0));
+
+                // 【核心突破 4：时空回溯】：因为底层 fread 会为了性能多吞入一部分数据，这部分数据属于下一个文件！
+                // 所以我们必须根据 zlib 消化后吐出来的 strm.avail_in，把文件指针精准回拨，保证外层循环严丝合缝。
+                if (done && strm.avail_in > 0) {
+                    fseek(fp, -(long)strm.avail_in, SEEK_CUR);
+                }
 
                 inflateEnd(&strm);
-                fclose(outFp);
+                if (outFp) { fclose(outFp); extractedAny = YES; }
             } else {
+                if (outFp) fclose(outFp);
                 fclose(fp); return NO;
             }
         }
     }
     fclose(fp);
-    return YES;
+    // 只有当压缩包解压出至少一个非垃圾文件时，才算真正成功
+    return extractedAny;
 }
 
 // ========================================================
