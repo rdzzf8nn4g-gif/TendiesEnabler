@@ -1393,7 +1393,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     return nil;
 }
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
-    if ([elementName isEqualToString:@"CALayer"]) {
+    // 【修复】：同时识别普通图层和粒子发射器
+    if ([elementName isEqualToString:@"CALayer"] || [elementName isEqualToString:@"CAEmitterLayer"]) {
         if (!self.rootParsed) {
             self.rootParsed = YES;
             if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
@@ -1919,20 +1920,20 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
         }
-        
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
-            [self.bgView setState:realBgState animated:NO]; 
-            [self.floatingView setState:realFloatState animated:NO]; 
-            [self.fgView setState:realFgState animated:NO];
-        } else {
-            [self.bgView setState:realBgState]; 
-            [self.floatingView setState:realFloatState]; 
-            [self.fgView setState:realFgState];
-        }
-        [CATransaction commit];
+    } // 【修复】：在这里提前闭合 else 分支，让下方的原生指令作为全天候兜底强制执行
+    
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+        [self.bgView setState:realBgState animated:NO]; 
+        [self.floatingView setState:realFloatState animated:NO]; 
+        [self.fgView setState:realFgState animated:NO];
+    } else {
+        [self.bgView setState:realBgState]; 
+        [self.floatingView setState:realFloatState]; 
+        [self.fgView setState:realFgState];
     }
+    [CATransaction commit];
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
