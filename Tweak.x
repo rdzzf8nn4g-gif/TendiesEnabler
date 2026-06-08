@@ -915,6 +915,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, assign) NSInteger animationGeneration;
 @property (nonatomic, strong) UIColor *plistBackgroundColor; 
 @property (nonatomic, strong) UIColor *dynamicSolidColor; // 状态持久化底板颜色
+@property (nonatomic, assign) double lastRenderedProgress; // 【新增防抖属性】
 - (void)reloadWallpaperViews;
 - (void)clearCurrentViewsSafely;
 - (void)lockSolidBackground;
@@ -932,6 +933,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.reloadGeneration = 0;
         self.isAnimatingState = NO;
         self.animationGeneration = 0;
+        self.lastRenderedProgress = -1.0; // 【初始化防抖参数】
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
@@ -1098,6 +1100,12 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
+    
+    // 【核心防御】：防止 AOD 歌词刷新、微小滑动导致的内存泄漏与高频跳帧
+    if (ABS(progress - self.lastRenderedProgress) < 0.005) {
+        return;
+    }
+    self.lastRenderedProgress = progress;
     
     [self ensureAllLayerMaps];
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
@@ -1501,6 +1509,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) NSMutableArray *manualAnimTasks;
 @property (nonatomic, copy) NSString *manualTargetState;
 @property (nonatomic, assign) BOOL manualIsDark;
+@property (nonatomic, assign) double lastRenderedProgress; // 【新增防抖属性】
 // 👆 新增结束 👆
 
 - (void)reloadWallpaperViews;
@@ -1521,6 +1530,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         self.logicalScreenSize = CGSizeZero;
         self.isAnimatingState = NO;
         self.animationGeneration = 0;
+        self.lastRenderedProgress = -1.0; // 【初始化防抖参数】
         
         self.bgLayerMap = [NSMutableDictionary dictionary];
         self.floatLayerMap = [NSMutableDictionary dictionary];
@@ -1849,7 +1859,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
+    // 【核心防御】：拦截 AOD 音乐播放器歌词变动引起的非法帧数刷新，降低占用
+    if (ABS(progress - self.lastRenderedProgress) < 0.005) {
+        return;
+    }
+    self.lastRenderedProgress = progress;
+    
     [self ensureAllLayerMaps];
+    
     [self applyProgress:progress parser:self.bgParser layerMap:self.bgLayerMap];
     [self applyProgress:progress parser:self.floatParser layerMap:self.floatLayerMap];
     [self applyProgress:progress parser:self.fgParser layerMap:self.fgLayerMap];
@@ -2522,9 +2539,19 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     g_isUnlocked = dismissed;
     if (g_enabled && g_isScreenOn && !g_isAODInactive) {
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
-        ZoneAODLog(@"AOD.Hook", @"setDismissed emit state=%@", state);
-        ZoneEmitWallpaperState(YES, state, YES);
+        // 【Bug 2 修复核心】：参考 iOS 14-15 的纯净逻辑。
+        // 当我们在桌面按下电源键时，系统准备息屏，此时锁屏UI会覆盖桌面触发 setDismissed:NO。
+        // 我们必须拦截它，防止它强行把动画拉回 Locked(锁屏)，从而保证完美的 Unlock->Sleep 丝滑过渡。
+        BOOL isScreenOffMode = NO;
+        if ([self respondsToSelector:@selector(isInScreenOffMode)]) {
+            isScreenOffMode = ((BOOL (*)(id, SEL))objc_msgSend)(self, @selector(isInScreenOffMode));
+        }
+        
+        if (!isScreenOffMode) {
+            NSString *state = dismissed ? @"Unlock" : @"Locked";
+            ZoneAODLog(@"AOD.Hook", @"setDismissed emit state=%@", state);
+            ZoneEmitWallpaperState(YES, state, YES);
+        }
     }
     ZoneAODLog(@"AOD.Hook", @"setDismissed exit dismissed=%d screenOn=%d aodInactive=%d unlocked=%d", dismissed, g_isScreenOn, g_isAODInactive, g_isUnlocked);
 }
@@ -2551,8 +2578,12 @@ static void EnsureEngineViewIsMounted() {
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive enter inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
     if (g_enabled) {
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!inactive, state, YES);
+        // 【Bug 1 修复核心】：原逻辑写反了。
+        // inactive == NO 时，代表系统【进入】AOD (视觉上息屏，但底层背光依然微亮以便显示时间)。
+        // inactive == YES 时，代表系统【退出】AOD (用户点亮屏幕)。
+        // 改正后引擎在 AOD 期间将彻底判定为 Sleep 并锁定进程，忽略任何歌词变更引起的重绘。
+        NSString *state = inactive ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+        ZoneCommitAODTransition(inactive, state, YES);
     }
     %orig;
     ZoneAODLog(@"AOD.Hook", @"updateAppearanceForAODTransitionToInactive exit inactive=%d screenOn=%d aodInactive=%d unlocked=%d", inactive, g_isScreenOn, g_isAODInactive, g_isUnlocked);
