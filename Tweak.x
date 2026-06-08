@@ -212,6 +212,32 @@ static CALayer *ZoneFindLayerByName(CALayer *layer, NSString *name) {
 }
 
 // ==========================================
+// 内存优化：递归暂停图层树，彻底冻结渲染与粒子
+// ==========================================
+static void ZoneFreezeLayerTree(CALayer *layer, BOOL freeze) {
+    if (!layer) return;
+    
+    // 切断图层动画速度
+    layer.speed = freeze ? 0.0 : 1.0;
+    
+    if ([layer isKindOfClass:[CAEmitterLayer class]]) {
+        // 如果是粒子引擎，息屏时出生率设为 0，防止后台疯狂堆积内存
+        CAEmitterLayer *emitter = (CAEmitterLayer *)layer;
+        if (freeze) {
+            objc_setAssociatedObject(emitter, "ZoneOrigBirthRate", @(emitter.birthRate), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            emitter.birthRate = 0.0;
+        } else {
+            NSNumber *orig = objc_getAssociatedObject(emitter, "ZoneOrigBirthRate");
+            if (orig) emitter.birthRate = [orig floatValue];
+        }
+    }
+    
+    for (CALayer *sub in layer.sublayers) {
+        ZoneFreezeLayerTree(sub, freeze);
+    }
+}
+
+// ==========================================
 // 绝对安全的底层变量获取函数 (防止 Safe Mode)
 // ==========================================
 static UIView* safelyGetIvarAsView(id object, const char* ivarName) {
@@ -1533,32 +1559,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)clearCurrentViewsSafely;
 - (void)lockSolidBackground;
 @end
-
-// ==========================================
-// 内存优化：递归暂停图层树，彻底冻结渲染与粒子
-// ==========================================
-static void ZoneFreezeLayerTree(CALayer *layer, BOOL freeze) {
-    if (!layer) return;
-    
-    // 切断图层动画速度
-    layer.speed = freeze ? 0.0 : 1.0;
-    
-    if ([layer isKindOfClass:[CAEmitterLayer class]]) {
-        // 如果是粒子引擎，息屏时出生率设为 0，防止后台疯狂堆积内存
-        CAEmitterLayer *emitter = (CAEmitterLayer *)layer;
-        if (freeze) {
-            objc_setAssociatedObject(emitter, "ZoneOrigBirthRate", @(emitter.birthRate), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            emitter.birthRate = 0.0;
-        } else {
-            NSNumber *orig = objc_getAssociatedObject(emitter, "ZoneOrigBirthRate");
-            if (orig) emitter.birthRate = [orig floatValue];
-        }
-    }
-    
-    for (CALayer *sub in layer.sublayers) {
-        ZoneFreezeLayerTree(sub, freeze);
-    }
-}
 
 @implementation ZoneRenderEngineEnhanced
 - (instancetype)initWithFrame:(CGRect)frame {
