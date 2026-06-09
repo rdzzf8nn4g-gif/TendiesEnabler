@@ -1899,6 +1899,11 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     
+    // 【修复】：如果在执行手动动画且目标是 Sleep，绝对不允许进度条横插一脚强行点亮！
+    if ([self.manualTargetState isEqualToString:@"Sleep"] || [self.currentState isEqualToString:@"Sleep"]) {
+        return; 
+    }
+    
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
@@ -2638,7 +2643,11 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
+    
+    // 【修复】：如果正在进行息屏/AOD过渡，绝对不允许 CoverSheet 覆盖壁纸状态！
+    BOOL isTransitioningToSleep = (!g_isScreenOn || g_isAODInactive);
+    
+    if (g_enabled && !isTransitioningToSleep) {
         NSString *state = dismissed ? @"Unlock" : @"Locked";
         ZoneEmitWallpaperState(YES, state, YES);
     }
@@ -2726,8 +2735,17 @@ static void EnsureEngineViewIsMounted() {
         ZoneFlushPendingAODWallpaperState();
     }
 
-    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
-    if (!g_isScreenOn || g_isAODInactive) {
+    // 【修复】：从桌面息屏时，只要 currentState 已经是 Sleep，强制拦截一切后续 Progress！
+    id existingEngine = objc_getAssociatedObject(self, "GlobalZoneEngine");
+    BOOL engineIsAlreadySleeping = NO;
+    if (existingEngine && [existingEngine respondsToSelector:@selector(currentState)]) {
+        NSString *engineState = [existingEngine performSelector:@selector(currentState)];
+        if ([engineState isEqualToString:@"Sleep"]) {
+            engineIsAlreadySleeping = YES;
+        }
+    }
+
+    if (!g_isScreenOn || g_isAODInactive || engineIsAlreadySleeping) {
         ZonePinPortalVisibleForAODSleep();
         g_lastSystemProgress = progress;
         return;
