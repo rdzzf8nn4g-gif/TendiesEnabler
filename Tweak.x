@@ -3153,13 +3153,74 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBBacklightController
-- (void)setBacklightState:(long long)state source:(long long)source {
+
+// 1. 新增：虚拟背光进度发生器，强行模拟 iOS 16 的 updateWallpaperAnimationWithProgress
+%new
+- (void)zone_virtualBacklightTick:(CADisplayLink *)link {
+    if (!g_enabled) return;
+    
+    // 读取头文件中的真实硬件背光亮度 (0.0 = 纯黑, 1.0 = 屏幕最亮)
+    float factor = self.backlightFactor; 
+    double progress = (double)factor;
+    progress = MAX(0.0, MIN(1.0, progress));
+    
+    // 处理 AOD / 黑屏渐变遮罩层，完美匹配背光
+    if (g_portalView) {
+        if (g_isVideoMode) {
+            if (g_portalView.alpha != 1.0) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                g_portalView.alpha = 1.0;
+                [CATransaction commit];
+            }
+        } else {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            // 采用平滑缓动函数映射透明度，防止闪黑
+            double alpha = 0.0;
+            if (progress > 0.7) {
+                alpha = (1.0 - progress) * (0.05 / 0.3);
+            } else if (progress > 0.6) {
+                alpha = 0.05 + (0.7 - progress) * 1.0; 
+            } else {
+                alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+            }
+            g_portalView.alpha = MAX(0.0, MIN(1.0, alpha));
+            [CATransaction commit];
+        }
+    }
+    
+    // 【核心】：源源不断地向渲染引擎发送进度，全版本通杀！
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+}
+
+// 2. 新增：控制发生器生命周期，绝不额外消耗电量
+%new
+- (void)zone_startVirtualProgressWithDuration:(double)duration {
+    if (!g_enabled) return;
+    CADisplayLink *link = objc_getAssociatedObject(self, "ZoneVirtualBacklightLink");
+    if (!link) {
+        link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zone_virtualBacklightTick:)];
+        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        objc_setAssociatedObject(self, "ZoneVirtualBacklightLink", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    link.paused = NO; // 动画开始，启动高频回调
+    
+    // 动画结束时自动挂起，零 CPU 占用
+    double delay = duration > 0.1 ? duration : 0.85; 
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        link.paused = YES;
+    });
+}
+
+// 3. 拦截带动画的背光调整 (例如：按电源键息屏/亮屏)
+- (void)animateBacklightToFactor:(float)factor duration:(double)duration source:(long long)source completion:(id /* block */)completion {
     %orig;
     if (g_enabled) {
-        BOOL screenOn = (state != 0);
+        BOOL screenOn = (factor > 0.0);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
+            g_lastTickProgress = -1;
             
             if (g_isScreenOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
@@ -3170,15 +3231,19 @@ static void EnsureEngineViewIsMounted() {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
+        // 激活连续动画侦听
+        [self zone_startVirtualProgressWithDuration:duration];
     }
 }
-- (void)setBacklightState:(long long)state source:(long long)source animated:(BOOL)animated completion:(id)completion {
+
+// 4. 拦截瞬间的背光调整
+- (void)setBacklightFactor:(float)factor source:(long long)source {
     %orig;
     if (g_enabled) {
-        BOOL screenOn = (state != 0);
+        BOOL screenOn = (factor > 0.0);
         if (screenOn != g_isScreenOn) {
             g_isScreenOn = screenOn;
-            g_lastTickProgress = -1; 
+            g_lastTickProgress = -1;
             
             if (g_isScreenOn) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
@@ -3187,10 +3252,13 @@ static void EnsureEngineViewIsMounted() {
             }
             
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @NO}];
         }
+        // 无动画瞬间切换，仅触发一帧校准
+        [self zone_startVirtualProgressWithDuration:0.0];
     }
 }
+
 %end
 
 %end // 结束 iOS14_15
