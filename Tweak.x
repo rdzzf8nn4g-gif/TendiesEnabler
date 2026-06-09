@@ -300,7 +300,6 @@ static inline BOOL IsSingleVideoMode() {
 }
 
 static BOOL g_isAODInactive = NO;
-static BOOL g_isAODWallpaperStateLocked = NO;
 static NSString *g_lastEmittedScreenState = nil;
 static CFTimeInterval g_lastEmittedScreenStateTime = 0.0;
 static NSString *g_lastEmittedWallpaperState = nil;
@@ -325,7 +324,6 @@ static BOOL ZoneIsDeviceUnlocked() {
 
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
-static inline void ZoneClearPendingAODWallpaperState(void);
 
 static inline void ZoneSetAODScreenState(BOOL screenOn) {
     BOOL wasScreenOn = g_isScreenOn;
@@ -343,8 +341,6 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = 0.0;
         g_deferAODWakeWallpaperState = NO;
-        g_isAODWallpaperStateLocked = YES;
-        ZoneClearPendingAODWallpaperState();
     }
 }
 
@@ -356,7 +352,7 @@ static inline void ZoneClearPendingAODWallpaperState(void) {
 }
 
 static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL animated) {
-    if (!state || [state isEqualToString:@"Sleep"] || ![state isEqualToString:@"Unlock"]) {
+    if (!state || [state isEqualToString:@"Sleep"]) {
         return;
     }
     g_hasPendingAODWallpaperState = YES;
@@ -365,7 +361,7 @@ static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL anima
 }
 
 static inline void ZoneFlushPendingAODWallpaperState(void) {
-    if (g_deferAODWakeWallpaperState || g_isAODWallpaperStateLocked) {
+    if (g_deferAODWakeWallpaperState) {
         return;
     }
     if (!g_hasPendingAODWallpaperState || !g_isScreenOn || g_isAODInactive) {
@@ -402,7 +398,7 @@ static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL 
 }
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
-    return (state >= 0 && state <= 3);
+    return (state == 0 || state == 1);
 }
 
 static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
@@ -432,27 +428,14 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
         finalState = @"Sleep";
     }
 
-    BOOL shouldQueueUnlockOnly = [finalState isEqualToString:@"Unlock"];
-
-    if (g_isAODWallpaperStateLocked && ![finalState isEqualToString:@"Sleep"]) {
-        if (shouldQueueUnlockOnly && screenOn) {
-            ZoneQueuePendingAODWallpaperState(finalState, animated);
-        }
-        return;
-    }
-
-    if (g_deferAODWakeWallpaperState && screenOn && shouldQueueUnlockOnly) {
+    if (g_deferAODWakeWallpaperState && screenOn && ![finalState isEqualToString:@"Sleep"]) {
         ZoneQueuePendingAODWallpaperState(finalState, animated);
         return;
     }
 
-    if ((g_isAODInactive || !g_isScreenOn) && shouldQueueUnlockOnly) {
+    if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
         ZoneQueuePendingAODWallpaperState(finalState, animated);
         return;
-    }
-
-    if (!screenOn && [finalState isEqualToString:@"Sleep"]) {
-        g_isAODWallpaperStateLocked = YES;
     }
 
     CFTimeInterval now = CACurrentMediaTime();
@@ -2778,18 +2761,9 @@ static void EnsureEngineViewIsMounted() {
             return;
         }
         BOOL screenOn = (state == 1);
-        if (screenOn) {
-            g_isAODWallpaperStateLocked = NO;
-            g_deferAODWakeWallpaperState = NO;
-        }
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
-            if (screenOn) {
-                ZoneFlushPendingAODWallpaperState();
-            }
-        } else if (screenOn) {
-            ZoneFlushPendingAODWallpaperState();
         }
     }
 }
@@ -2804,18 +2778,9 @@ static void EnsureEngineViewIsMounted() {
             return;
         }
         BOOL screenOn = (state == 1);
-        if (screenOn) {
-            g_isAODWallpaperStateLocked = NO;
-            g_deferAODWakeWallpaperState = NO;
-        }
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
-            if (screenOn) {
-                ZoneFlushPendingAODWallpaperState();
-            }
-        } else if (screenOn) {
-            ZoneFlushPendingAODWallpaperState();
         }
     }
 }
