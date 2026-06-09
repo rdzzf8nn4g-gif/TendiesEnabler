@@ -2634,14 +2634,10 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 
-// 以锁屏UI的真实视觉状态为基准，但 AOD 期间不允许反向改写壁纸态
+// 以锁屏UI的真实视觉状态为基准
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
-        ZoneEmitWallpaperState(YES, state, YES);
-    }
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
