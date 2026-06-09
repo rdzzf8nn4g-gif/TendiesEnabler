@@ -1560,6 +1560,24 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 - (void)lockSolidBackground;
 @end
 
+static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
+    if (!layer || !keyPath || !value) return;
+    if ([keyPath isEqualToString:@"position.x"]) {
+        CGPoint p = layer.position; p.x = [value doubleValue]; layer.position = p; return;
+    } else if ([keyPath isEqualToString:@"position.y"]) {
+        CGPoint p = layer.position; p.y = [value doubleValue]; layer.position = p; return;
+    } else if ([keyPath isEqualToString:@"bounds.size.width"]) {
+        CGRect b = layer.bounds; b.size.width = [value doubleValue]; layer.bounds = b; return;
+    } else if ([keyPath isEqualToString:@"bounds.size.height"]) {
+        CGRect b = layer.bounds; b.size.height = [value doubleValue]; layer.bounds = b; return;
+    } else if ([keyPath isEqualToString:@"bounds.origin.x"]) {
+        CGRect b = layer.bounds; b.origin.x = [value doubleValue]; layer.bounds = b; return;
+    } else if ([keyPath isEqualToString:@"bounds.origin.y"]) {
+        CGRect b = layer.bounds; b.origin.y = [value doubleValue]; layer.bounds = b; return;
+    }
+    @try { [layer setValue:value forKeyPath:keyPath]; } @catch (NSException *e) {}
+}
+
 @implementation ZoneRenderEngineEnhanced
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -1744,16 +1762,16 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             
             if (lockVal && unlockVal) {
                 [layer removeAnimationForKey:keyPath];
-                if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
+               if ([lockVal isKindOfClass:[NSNumber class]] && [unlockVal isKindOfClass:[NSNumber class]]) {
                     double currentVal = [lockVal doubleValue] + ([unlockVal doubleValue] - [lockVal doubleValue]) * progress;
-                    [layer setValue:@(currentVal) forKeyPath:keyPath];
+                    ZoneSafeSetLayerKVC(layer, keyPath, @(currentVal));
                 } 
                 else if ([lockVal isKindOfClass:[NSValue class]] && [unlockVal isKindOfClass:[NSValue class]]) {
                     CGPoint lockPt = [lockVal CGPointValue];
                     CGPoint unlockPt = [unlockVal CGPointValue];
                     CGPoint currentPt = CGPointMake(lockPt.x + (unlockPt.x - lockPt.x) * progress,
                                                     lockPt.y + (unlockPt.y - lockPt.y) * progress);
-                    [layer setValue:[NSValue valueWithCGPoint:currentPt] forKeyPath:keyPath];
+                    ZoneSafeSetLayerKVC(layer, keyPath, [NSValue valueWithCGPoint:currentPt]);
                 }
             }
         }
@@ -1784,7 +1802,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             id targetVal = targetVals[keyPath];
             if (targetVal) {
                 [layer removeAnimationForKey:keyPath];
-                @try { [layer setValue:targetVal forKeyPath:keyPath]; } @catch(NSException *e) {}
+                ZoneSafeSetLayerKVC(layer, keyPath, targetVal);
             }
         }
     }
@@ -1853,17 +1871,15 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         id startVal = task[@"start"];
         id endVal = task[@"end"];
         
-        @try {
-            if ([startVal isKindOfClass:[NSNumber class]] && [endVal isKindOfClass:[NSNumber class]]) {
-                double s = [startVal doubleValue];
-                double e = [endVal doubleValue];
-                [layer setValue:@(s + (e - s) * easedProgress) forKeyPath:keyPath];
-            } else if ([startVal isKindOfClass:[NSValue class]] && [endVal isKindOfClass:[NSValue class]]) {
-                CGPoint s = [startVal CGPointValue];
-                CGPoint e = [endVal CGPointValue];
-                [layer setValue:[NSValue valueWithCGPoint:CGPointMake(s.x + (e.x - s.x) * easedProgress, s.y + (e.y - s.y) * easedProgress)] forKeyPath:keyPath];
-            }
-        } @catch (NSException *e) {}
+        if ([startVal isKindOfClass:[NSNumber class]] && [endVal isKindOfClass:[NSNumber class]]) {
+            double s = [startVal doubleValue];
+            double e = [endVal doubleValue];
+            ZoneSafeSetLayerKVC(layer, keyPath, @(s + (e - s) * easedProgress));
+        } else if ([startVal isKindOfClass:[NSValue class]] && [endVal isKindOfClass:[NSValue class]]) {
+            CGPoint s = [startVal CGPointValue];
+            CGPoint e = [endVal CGPointValue];
+            ZoneSafeSetLayerKVC(layer, keyPath, [NSValue valueWithCGPoint:CGPointMake(s.x + (e.x - s.x) * easedProgress, s.y + (e.y - s.y) * easedProgress)]);
+        }
     }
     [CATransaction commit];
     
@@ -1886,7 +1902,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             id endVal = task[@"end"];
             if (layer && keyPath && endVal) {
                 [layer removeAnimationForKey:keyPath];
-                @try { [layer setValue:endVal forKeyPath:keyPath]; } @catch (NSException *e) {}
+                ZoneSafeSetLayerKVC(layer, keyPath, endVal);
             }
         }
         [CATransaction commit];
