@@ -2427,27 +2427,22 @@ static NSString * GetPrefsPlistPath() {
     
     NSString *fileName = self.replacingImagePath.lastPathComponent;
     
-    // 【完美修复缩略图不刷新】：直接把裁剪好的原图压缩成缩略图，强行塞进缓存！
-    // 这样 tableView 刷新时瞬间就有图，告别异步读取造成的延迟白屏。
     CGSize targetSize = CGSizeMake(60, 60);
     UIGraphicsBeginImageContextWithOptions(targetSize, NO, [UIScreen mainScreen].scale);
     [croppedImage drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
     UIImage *newThumb = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
+    
     if (newThumb) {
         [self.thumbCache setObject:newThumb forKey:fileName];
-    } else {
-        [self.thumbCache removeObjectForKey:fileName];
     }
     
-    NSUInteger idx = [self.imageFiles indexOfObject:fileName];
-    if (idx != NSNotFound) {
-        NSIndexPath *idxPath = [NSIndexPath indexPathForRow:idx inSection:0];
-        [self.tableView reloadRowsAtIndexPaths:@[idxPath] withRowAnimation:UITableViewRowAnimationFade];
-    }
-    
-    if (self.reloadCallback) self.reloadCallback();
-    self.replacingImagePath = nil;
+    // 【终极修复】：放入主线程异步队列，等弹窗动画彻底结束后调用 loadImages，让它强制触发全局刷新！
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self loadImages];
+        if (self.reloadCallback) self.reloadCallback();
+        self.replacingImagePath = nil;
+    });
 }
 
 - (void)restoreAllImages {
