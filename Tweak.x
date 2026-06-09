@@ -3152,16 +3152,25 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
+// ==========================================
+// 务必将这个 @interface 放在 %hook 的正上方！
+// 这样编译器就能准确知道方法和参数类型，彻底解决编译报错。
+// ==========================================
+@interface SBBacklightController : NSObject
+- (float)backlightFactor;
+- (void)zone_startVirtualProgressWithDuration:(double)duration;
+@end
+
 %hook SBBacklightController
 
-// 1. 新增：虚拟背光进度发生器，强行模拟 iOS 16 的 updateWallpaperAnimationWithProgress
+// 1. 新增：虚拟背光进度发生器
 %new
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
     
-    // 【编译修复】：使用 KVC 绕过 Theos 的 @class 向前声明检查
-    // 直接在运行时获取硬件背光亮度 (0.0 = 纯黑, 1.0 = 屏幕最亮)
-    double progress = [[self valueForKey:@"backlightFactor"] doubleValue];
+    // 此时编译器已经知道 backlightFactor 返回 float，可以直接安全调用
+    float factor = [self backlightFactor]; 
+    double progress = (double)factor;
     progress = MAX(0.0, MIN(1.0, progress));
     
     // 处理 AOD / 黑屏渐变遮罩层，完美匹配背光
@@ -3231,7 +3240,7 @@ static void EnsureEngineViewIsMounted() {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
-        // 激活连续动画侦听
+        // 激活连续动画侦听（编译器有了 @interface，现在知道这是一个 double 参数的方法了）
         [self zone_startVirtualProgressWithDuration:duration];
     }
 }
