@@ -1954,7 +1954,13 @@ static NSString * GetPrefsPlistPath() {
     NSString *wpName = sender.accessibilityIdentifier;
     NSString *wpPath = [GetWallpapersDir() stringByAppendingPathComponent:wpName];
     
-   UITableViewController *vc = [(UITableViewController *)[NSClassFromString(@"ZoneImageReplaceViewController") alloc] initWithStyle:UITableViewStylePlain];
+    // 【UI 现代化】：将子列表升级为 iOS 现代 InsetGrouped 卡片设计，保持和主设置页完美统一
+    UITableViewStyle style = UITableViewStyleGrouped;
+    if (@available(iOS 13.0, *)) {
+        style = UITableViewStyleInsetGrouped;
+    }
+    
+    UITableViewController *vc = [(UITableViewController *)[NSClassFromString(@"ZoneImageReplaceViewController") alloc] initWithStyle:style];
     [vc setValue:wpName forKey:@"wallpaperName"];
     [vc setValue:wpPath forKey:@"wallpaperPath"];
     [vc setValue:^{
@@ -1986,6 +1992,11 @@ static NSString * GetPrefsPlistPath() {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor blackColor];
+    self.title = self.imagePath.lastPathComponent;
+    
+    // 【新增】：现代化的顶部导航栏按钮
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(dismissSelf)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存相册" style:UIBarButtonItemStyleDone target:self action:@selector(saveImageToAlbum)];
     
     self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
     self.scrollView.delegate = self;
@@ -2006,9 +2017,6 @@ static NSString * GetPrefsPlistPath() {
     self.scrollView.minimumZoomScale = minScale;
     self.scrollView.maximumZoomScale = minScale * 3.0;
     self.scrollView.zoomScale = minScale;
-    
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissSelf)];
-    [self.view addGestureRecognizer:tap];
 }
 
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView { return self.imageView; }
@@ -2018,6 +2026,19 @@ static NSString * GetPrefsPlistPath() {
     CGFloat offsetY = MAX((scrollView.bounds.size.height - scrollView.contentSize.height) * 0.5, 0.0);
     self.imageView.center = CGPointMake(scrollView.contentSize.width * 0.5 + offsetX, 
                                         scrollView.contentSize.height * 0.5 + offsetY);
+}
+
+// 【新增】：保存图片到相册的逻辑
+- (void)saveImageToAlbum {
+    if (self.imageView.image) {
+        UIImageWriteToSavedPhotosAlbum(self.imageView.image, self, @selector(image:didFinishSavingWithError:contextInfo:), nil);
+    }
+}
+
+- (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:error ? @"保存失败" : @"保存成功" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)dismissSelf {
@@ -2048,7 +2069,6 @@ static NSString * GetPrefsPlistPath() {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成" style:UIBarButtonItemStyleDone target:self action:@selector(doneAction)];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消" style:UIBarButtonItemStylePlain target:self action:@selector(cancelAction)];
 
-    // 【修复】：大幅增加安全边距，预留出顶部导航栏与底部安全区的位置，同时左右留空方便拖拽
     CGFloat screenW = self.view.bounds.size.width - 40;
     CGFloat screenH = self.view.bounds.size.height - 240; 
     
@@ -2060,7 +2080,6 @@ static NSString * GetPrefsPlistPath() {
         cropW = cropH * targetAspect;
     }
     
-    // 【修复】：将 Y 轴向下偏移，完美居中避开所有异形屏干扰
     self.scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake((self.view.bounds.size.width - cropW)/2, (self.view.bounds.size.height - cropH)/2 + 20, cropW, cropH)];
     self.scrollView.delegate = self;
     self.scrollView.showsHorizontalScrollIndicator = NO;
@@ -2122,6 +2141,11 @@ static NSString * GetPrefsPlistPath() {
     cropRect.size.height = self.scrollView.bounds.size.height / zoom;
     
     UIGraphicsBeginImageContextWithOptions(self.targetSize, NO, 1.0);
+    
+    // 【核心修复】：支持透明图片无损转换！每次绘制前强制清空上下文，保证纯透明通道。
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    CGContextClearRect(context, CGRectMake(0, 0, self.targetSize.width, self.targetSize.height));
+    
     CGFloat scaleX = self.targetSize.width / cropRect.size.width;
     CGFloat scaleY = self.targetSize.height / cropRect.size.height;
     CGRect drawRect = CGRectMake(-cropRect.origin.x * scaleX, 
@@ -2159,7 +2183,6 @@ static NSString * GetPrefsPlistPath() {
     self.thumbCache = [[NSCache alloc] init];
     self.title = self.wallpaperName;
     self.tableView.rowHeight = 80;
-    self.tableView.tableFooterView = [[UIView alloc] init];
     
     UIBarButtonItem *restoreAllBtn = [[UIBarButtonItem alloc] initWithTitle:@"全部恢复" style:UIBarButtonItemStylePlain target:self action:@selector(restoreAllImages)];
     restoreAllBtn.tintColor = [UIColor systemRedColor];
@@ -2208,7 +2231,7 @@ static NSString * GetPrefsPlistPath() {
     
     cell.textLabel.text = imgSubPath.lastPathComponent;
     cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    cell.detailTextLabel.text = hasBackup ? @"已替换(点击可恢复默认/修改)" : @"点击替换壁纸图片";
+    cell.detailTextLabel.text = hasBackup ? @"已替换(点击修改/恢复)" : @"点击替换壁纸图片";
     cell.detailTextLabel.textColor = hasBackup ? [UIColor systemGreenColor] : [UIColor secondaryLabelColor];
     
     cell.imageView.userInteractionEnabled = YES;
@@ -2224,7 +2247,7 @@ static NSString * GetPrefsPlistPath() {
         cell.imageView.image = nil;
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             @autoreleasepool {
-                // 【修复】：用 NSData 取代 imageWithContentsOfFile，彻底破除 iOS 恶心的 UIImage 同名文件强缓存！
+                // 用 NSData 读取彻底破除强缓存
                 NSData *imgData = [NSData dataWithContentsOfFile:fullPath];
                 UIImage *img = [UIImage imageWithData:imgData];
                 if (img) {
@@ -2256,10 +2279,13 @@ static NSString * GetPrefsPlistPath() {
     if (indexPath) {
         NSString *imgSubPath = self.imageFiles[indexPath.row];
         NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:imgSubPath];
+        
+        // 【新增】：带导航栏的预览页，支持保存
         ZoneImagePreviewViewController *vc = [[ZoneImagePreviewViewController alloc] init];
         vc.imagePath = fullPath;
-        vc.modalPresentationStyle = UIModalPresentationFullScreen;
-        [self presentViewController:vc animated:YES completion:nil];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationFullScreen;
+        [self presentViewController:nav animated:YES completion:nil];
     }
 }
 
@@ -2288,7 +2314,8 @@ static NSString * GetPrefsPlistPath() {
             [fm removeItemAtPath:fullPath error:nil];
             [fm moveItemAtPath:[fullPath stringByAppendingString:@".bak"] toPath:fullPath error:nil];
             [self.thumbCache removeObjectForKey:imgSubPath];
-            [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+            // 【修复杂闪】：采用平滑的 Fade 动画单行刷新
+            [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
             if (self.reloadCallback) self.reloadCallback();
         }]];
     }
@@ -2345,16 +2372,15 @@ static NSString * GetPrefsPlistPath() {
 - (void)presentCropViewControllerWithImage:(UIImage *)img {
     if (!img || !self.replacingImagePath) return;
     
-    // 使用 NSData 绕过缓存，并使用 CGImage 读取底层绝对真实像素尺寸
+    // 【核心修复】：直接读取底层图像物理分辨率，无视苹果的 2x/3x 缩放点数机制
     NSData *origData = [NSData dataWithContentsOfFile:self.replacingImagePath];
     UIImage *orig = [UIImage imageWithData:origData];
     if (!orig) return;
-    
     CGSize pixelSize = CGSizeMake(CGImageGetWidth(orig.CGImage), CGImageGetHeight(orig.CGImage));
     
     ZoneImageCropViewController *cropVC = [[ZoneImageCropViewController alloc] init];
     cropVC.pickedImage = img;
-    cropVC.targetSize = pixelSize; // 修复了这里的变量名错误
+    cropVC.targetSize = pixelSize;
     
     __weak typeof(self) weakSelf = self;
     cropVC.cropCompletion = ^(UIImage *croppedImage) {
@@ -2386,8 +2412,12 @@ static NSString * GetPrefsPlistPath() {
     NSString *fileName = self.replacingImagePath.lastPathComponent;
     [self.thumbCache removeObjectForKey:fileName];
     
-    // 【修复】：强制重新加载所有图片，确保状态文本和缩略图彻底刷新
-    [self loadImages];
+    NSUInteger idx = [self.imageFiles indexOfObject:fileName];
+    if (idx != NSNotFound) {
+        NSIndexPath *idxPath = [NSIndexPath indexPathForRow:idx inSection:0];
+        // 【修复杂闪】：采用平滑的 Fade 动画刷新缩略图
+        [self.tableView reloadRowsAtIndexPaths:@[idxPath] withRowAnimation:UITableViewRowAnimationFade];
+    }
     
     if (self.reloadCallback) self.reloadCallback();
     self.replacingImagePath = nil;
@@ -2411,8 +2441,12 @@ static NSString * GetPrefsPlistPath() {
     
     if (didRestore) {
         [self.thumbCache removeAllObjects];
-        [self loadImages];
-        if (self.reloadCallback) self.reloadCallback();
+        // 【防闪烁修复】：列表恢复图片时用优雅的交叉溶解动画代替瞬间白屏
+        [UIView transitionWithView:self.tableView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+            [self loadImages];
+        } completion:^(BOOL finished) {
+            if (self.reloadCallback) self.reloadCallback();
+        }];
     } else {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"该壁纸文件没有被替换过任何图片。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel handler:nil]];
