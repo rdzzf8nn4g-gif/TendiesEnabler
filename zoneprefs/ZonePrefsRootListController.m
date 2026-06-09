@@ -399,14 +399,178 @@ static NSString * GetPrefsPlistPath() {
 }
 
 // =======================================================
-// ================= 独立子页面：替换图片引擎 =================
+// =================== 终极图像预览放大组件 ===================
 // =======================================================
+@interface ZoneImagePreviewViewController : UIViewController <UIScrollViewDelegate>
+@property (nonatomic, strong) UIImage *image;
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIImageView *imageView;
+@end
 
+@implementation ZoneImagePreviewViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor blackColor];
+    self.title = @"查看大图";
+    
+    self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    self.scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.scrollView.delegate = self;
+    self.scrollView.minimumZoomScale = 1.0;
+    self.scrollView.maximumZoomScale = 4.0;
+    [self.view addSubview:self.scrollView];
+    
+    self.imageView = [[UIImageView alloc] initWithFrame:self.scrollView.bounds];
+    self.imageView.contentMode = UIViewContentModeScaleAspectFit;
+    self.imageView.image = self.image;
+    [self.scrollView addSubview:self.imageView];
+    
+    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+    doubleTap.numberOfTapsRequired = 2;
+    [self.view addGestureRecognizer:doubleTap];
+}
+- (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView { return self.imageView; }
+- (void)handleDoubleTap:(UITapGestureRecognizer *)sender {
+    if (self.scrollView.zoomScale > 1.0) {
+        [self.scrollView setZoomScale:1.0 animated:YES];
+    } else {
+        CGPoint point = [sender locationInView:self.imageView];
+        [self.scrollView zoomToRect:CGRectMake(point.x - 40, point.y - 40, 80, 80) animated:YES];
+    }
+}
+@end
+
+// =======================================================
+// ================= 严格等比高保真智能裁剪组件 =================
+// =======================================================
+@interface ZoneImageCropViewController : UIViewController <UIScrollViewDelegate>
+@property (nonatomic, strong) UIImage *imageToCrop;
+@property (nonatomic, assign) CGSize targetSize;
+@property (nonatomic, copy) void (^completionBlock)(UIImage *croppedImage);
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIImageView *imageView;
+@property (nonatomic, strong) UIView *overlayView;
+@property (nonatomic, assign) CGRect cropFrame;
+@end
+
+@implementation ZoneImageCropViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor blackColor];
+    self.title = @"拖动或缩放以裁剪";
+    
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"确定" style:UIBarButtonItemStyleDone target:self action:@selector(doneCrop)];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消" style:UIBarButtonItemStylePlain target:self action:@selector(cancelCrop)];
+    
+    // 计算锁定比例的裁剪框布局
+    CGFloat screenW = self.view.bounds.size.width;
+    CGFloat screenH = self.view.bounds.size.height;
+    CGFloat cropW = screenW - 40;
+    CGFloat cropH = cropW * (self.targetSize.height / self.targetSize.width);
+    
+    if (cropH > screenH - 160) {
+        cropH = screenH - 160;
+        cropW = cropH * (self.targetSize.width / self.targetSize.height);
+    }
+    self.cropFrame = CGRectMake((screenW - cropW)/2.0, (screenH - cropH)/2.0, cropW, cropH);
+    
+    self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    self.scrollView.delegate = self;
+    self.scrollView.minimumZoomScale = 1.0;
+    self.scrollView.maximumZoomScale = 5.0;
+    self.scrollView.showsHorizontalScrollIndicator = NO;
+    self.scrollView.showsVerticalScrollIndicator = NO;
+    if (@available(iOS 11.0, *)) { self.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever; }
+    [self.view addSubview:self.scrollView];
+    
+    self.imageView = [[UIImageView alloc] initWithImage:self.imageToCrop];
+    self.imageView.contentMode = UIViewContentModeScaleAspectFill;
+    [self.scrollView addSubview:self.imageView];
+    
+    // 基础尺寸适配
+    CGFloat imgScaleW = cropW / self.imageToCrop.size.width;
+    CGFloat imgScaleH = cropH / self.imageToCrop.size.height;
+    CGFloat startScale = MAX(imgScaleW, imgScaleH);
+    CGRect imgFrame = CGRectMake(0, 0, self.imageToCrop.size.width * startScale, self.imageToCrop.size.height * startScale);
+    self.imageView.frame = imgFrame;
+    self.scrollView.contentSize = imgFrame.size;
+    
+    // 设置边距使图像可以无死角滑入裁剪框
+    self.scrollView.contentInset = UIEdgeInsetsMake(self.cropFrame.origin.y, self.cropFrame.origin.x, screenH - CGRectGetMaxY(self.cropFrame), screenW - CGRectGetMaxX(self.cropFrame));
+    [self.scrollView setContentOffset:CGPointMake(-self.cropFrame.origin.x + (imgFrame.size.width - cropW)/2.0, -self.cropFrame.origin.y + (imgFrame.size.height - cropH)/2.0)];
+    
+    // 遮罩蒙版绘制
+    self.overlayView = [[UIView alloc] initWithFrame:self.view.bounds];
+    self.overlayView.userInteractionEnabled = NO;
+    [self.view addSubview:self.overlayView];
+    [self drawOverlayMask];
+}
+
+- (void)drawOverlayMask {
+    UIBezierPath *path = [UIBezierPath bezierPathWithRect:self.overlayView.bounds];
+    UIBezierPath *clearPath = [UIBezierPath bezierPathWithRect:self.cropFrame];
+    [path appendPath:clearPath];
+    path.usesEvenOddFillRule = YES;
+    
+    CAShapeLayer *fillLayer = [CAShapeLayer layer];
+    fillLayer.path = path.CGPath;
+    fillLayer.fillRule = kCAFillRuleEvenOdd;
+    fillLayer.fillColor = [UIColor colorWithWhite:0 alpha:0.7].CGColor;
+    [self.overlayView.layer addSublayer:fillLayer];
+    
+    CAShapeLayer *borderLayer = [CAShapeLayer layer];
+    borderLayer.path = [UIBezierPath bezierPathWithRect:self.cropFrame].CGPath;
+    borderLayer.strokeColor = [UIColor systemOrangeColor].CGColor;
+    borderLayer.fillColor = [UIColor clearColor].CGColor;
+    borderLayer.lineWidth = 2.0;
+    [self.overlayView.layer addSublayer:borderLayer];
+}
+
+- (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView { return self.imageView; }
+
+- (void)cancelCrop { [self dismissViewControllerAnimated:YES completion:nil]; }
+
+- (void)doneCrop {
+    // 高精度像素级裁剪算法映射
+    CGRect visibleRect;
+    visibleRect.origin.x = (self.scrollView.contentOffset.x + self.scrollView.contentInset.left) / self.scrollView.zoomScale;
+    visibleRect.origin.y = (self.scrollView.contentOffset.y + self.scrollView.contentInset.top) / self.scrollView.zoomScale;
+    visibleRect.size.width = self.cropFrame.size.width / self.scrollView.zoomScale;
+    visibleRect.size.height = self.cropFrame.size.height / self.scrollView.zoomScale;
+    
+    CGFloat viewToImageScale = self.imageToCrop.size.width / self.imageView.frame.size.width * self.scrollView.zoomScale;
+    CGRect cropRectInImage = CGRectMake(visibleRect.origin.x * viewToImageScale, visibleRect.origin.y * viewToImageScale, visibleRect.size.width * viewToImageScale, visibleRect.size.height * viewToImageScale);
+    
+    @autoreleasepool {
+        CGImageRef imageRef = CGImageCreateWithImageInRect([self.imageToCrop CGImage], cropRectInImage);
+        if (imageRef) {
+            UIImage *cropped = [UIImage imageWithCGImage:imageRef];
+            CGImageRelease(imageRef);
+            
+            // 二阶硬件重绘：保证输出像素绝对吻合原壁纸尺寸
+            UIGraphicsBeginImageContextWithOptions(self.targetSize, NO, 1.0);
+            [cropped drawInRect:CGRectMake(0, 0, self.targetSize.width, self.targetSize.height)];
+            UIImage *finalImage = UIGraphicsGetImageFromCurrentImageContext();
+            UIGraphicsEndImageContext();
+            
+            if (self.completionBlock && finalImage) {
+                self.completionBlock(finalImage);
+            }
+        }
+    }
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
+// =======================================================
+// =================== 替换媒体主控制器页面 ===================
+// =======================================================
 @interface ZoneImageReplaceViewController : UITableViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
 @property (nonatomic, copy) NSString *wallpaperPath;
 @property (nonatomic, strong) NSArray *imageFiles;
 @property (nonatomic, copy) NSString *replacingImagePath;
+@property (nonatomic, strong) NSIndexPath *replacingIndexPath; // 精准锁定需要刷新的单元格，解决闪烁
 @property (nonatomic, copy) void (^reloadCallback)(void);
 @end
 
@@ -417,12 +581,29 @@ static NSString * GetPrefsPlistPath() {
     self.title = self.wallpaperName;
     self.tableView.rowHeight = 80;
     self.tableView.tableFooterView = [[UIView alloc] init];
+    if (@available(iOS 13.0, *)) { self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor]; }
     
     UIBarButtonItem *restoreAllBtn = [[UIBarButtonItem alloc] initWithTitle:@"全部恢复" style:UIBarButtonItemStylePlain target:self action:@selector(restoreAllImages)];
     restoreAllBtn.tintColor = [UIColor systemRedColor];
     self.navigationItem.rightBarButtonItem = restoreAllBtn;
     
     [self loadImages];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // 写入全局状态：当用户按 Home 键挂起设置时，记录当前所处壁纸分支路径
+    g_savedActiveWpName = [self.wallpaperName copy];
+    g_savedActiveWpPath = [self.wallpaperPath copy];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    // 如果用户是手动主动左滑返回的，正常清除恢复栈，防止下次进来引发错乱
+    if (self.isMovingFromParentViewController) {
+        g_savedActiveWpName = nil;
+        g_savedActiveWpPath = nil;
+    }
 }
 
 - (void)loadImages {
@@ -440,7 +621,6 @@ static NSString * GetPrefsPlistPath() {
         }
     }
     self.imageFiles = [images sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
-    [self.tableView reloadData];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -457,6 +637,7 @@ static NSString * GetPrefsPlistPath() {
         cell.imageView.layer.cornerRadius = 8;
         cell.imageView.layer.borderWidth = 0.5;
         cell.imageView.layer.borderColor = [UIColor separatorColor].CGColor;
+        cell.imageView.userInteractionEnabled = YES;
     }
     
     NSString *imgSubPath = self.imageFiles[indexPath.row];
@@ -468,15 +649,20 @@ static NSString * GetPrefsPlistPath() {
     cell.detailTextLabel.text = hasBackup ? @"🟢 已替换 (点击修改/恢复)" : @"⚪️ 原图 (点击替换)";
     cell.detailTextLabel.textColor = hasBackup ? [UIColor systemGreenColor] : [UIColor secondaryLabelColor];
     
-    // 【内存防泄漏】：异步提取缩略图并在后台释放上下文
+    // 头像独立手势绑定：点击直接无延迟放大
+    for (UIGestureRecognizer *g in cell.imageView.gestureRecognizers) { [cell.imageView removeGestureRecognizer:g]; }
+    UITapGestureRecognizer *avatarTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(avatarTapped:)];
+    [cell.imageView addGestureRecognizer:avatarTap];
+    objc_setAssociatedObject(avatarTap, "associatedPath", fullPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    
     cell.imageView.image = nil;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @autoreleasepool {
             UIImage *img = [UIImage imageWithContentsOfFile:fullPath];
             if (img) {
-                CGSize targetSize = CGSizeMake(60, 60);
-                UIGraphicsBeginImageContextWithOptions(targetSize, NO, [UIScreen mainScreen].scale);
-                [img drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
+                CGSize thumbSize = CGSizeMake(60, 60);
+                UIGraphicsBeginImageContextWithOptions(thumbSize, NO, [UIScreen mainScreen].scale);
+                [img drawInRect:CGRectMake(0, 0, thumbSize.width, thumbSize.height)];
                 UIImage *thumb = UIGraphicsGetImageFromCurrentImageContext();
                 UIGraphicsEndImageContext();
                 
@@ -494,6 +680,17 @@ static NSString * GetPrefsPlistPath() {
     return cell;
 }
 
+- (void)avatarTapped:(UITapGestureRecognizer *)sender {
+    NSString *path = objc_getAssociatedObject(sender, "associatedPath");
+    if (!path) return;
+    UIImage *img = [UIImage imageWithContentsOfFile:path];
+    if (img) {
+        ZoneImagePreviewViewController *previewVC = [[ZoneImagePreviewViewController alloc] init];
+        previewVC.image = img;
+        [self.navigationController pushViewController:previewVC animated:YES];
+    }
+}
+
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     
@@ -501,14 +698,16 @@ static NSString * GetPrefsPlistPath() {
     NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:imgSubPath];
     BOOL hasBackup = [[NSFileManager defaultManager] fileExistsAtPath:[fullPath stringByAppendingString:@".bak"]];
     
+    self.replacingIndexPath = indexPath; // 记忆当前行坐标
+    
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图片操作" message:imgSubPath.lastPathComponent preferredStyle:UIAlertControllerStyleActionSheet];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"选图替换此层 (相册)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"选图裁剪替换 (相册)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         self.replacingImagePath = fullPath;
         [self showPickerWithSourceType:UIImagePickerControllerSourceTypePhotoLibrary];
     }]];
     
-    [alert addAction:[UIAlertAction actionWithTitle:@"选图替换此层 (文件)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"选图裁剪替换 (文件)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         self.replacingImagePath = fullPath;
         [self showDocumentPicker];
     }]];
@@ -518,7 +717,9 @@ static NSString * GetPrefsPlistPath() {
             NSFileManager *fm = [NSFileManager defaultManager];
             [fm removeItemAtPath:fullPath error:nil];
             [fm moveItemAtPath:[fullPath stringByAppendingString:@".bak"] toPath:fullPath error:nil];
-            [self loadImages];
+            
+            // 【局部防闪烁革新】：不执行全表 reloadData，仅仅重载特定变动行
+            [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
             if (self.reloadCallback) self.reloadCallback();
         }]];
     }
@@ -530,7 +731,6 @@ static NSString * GetPrefsPlistPath() {
         alert.popoverPresentationController.sourceView = cell;
         alert.popoverPresentationController.sourceRect = cell.bounds;
     }
-    
     [self presentViewController:alert animated:YES completion:nil];
 }
 
@@ -553,14 +753,13 @@ static NSString * GetPrefsPlistPath() {
 
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info {
     UIImage *img = info[UIImagePickerControllerOriginalImage];
+    __weak typeof(self) weakSelf = self;
     [picker dismissViewControllerAnimated:YES completion:^{
-        [self processReplacementImage:img];
+        if (img) [weakSelf openCropperWithImage:img];
     }];
 }
 
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-    [picker dismissViewControllerAnimated:YES completion:nil];
-}
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker { [picker dismissViewControllerAnimated:YES completion:nil]; }
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
@@ -569,60 +768,58 @@ static NSString * GetPrefsPlistPath() {
     NSData *data = [NSData dataWithContentsOfURL:url];
     UIImage *img = [UIImage imageWithData:data];
     [url stopAccessingSecurityScopedResource];
-    [self processReplacementImage:img];
+    if (img) [self openCropperWithImage:img];
 }
 
-- (void)processReplacementImage:(UIImage *)pickedImage {
-    if (!pickedImage || !self.replacingImagePath) return;
+- (void)openCropperWithImage:(UIImage *)sourceImage {
+    UIImage *originalWpImage = [UIImage imageWithContentsOfFile:self.replacingImagePath];
+    if (!originalWpImage) return;
+    
+    ZoneImageCropViewController *cropVC = [[ZoneImageCropViewController alloc] init];
+    cropVC.imageToCrop = sourceImage;
+    cropVC.targetSize = originalWpImage.size; // 完美绑定原有分辨率
+    
+    __weak typeof(self) weakSelf = self;
+    cropVC.completionBlock = ^(UIImage *croppedImage) {
+        if (croppedImage) [weakSelf saveFinalCroppedImage:croppedImage];
+    };
+    
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:cropVC];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:nav animated:YES completion:nil];
+}
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在裁剪并替换..." message:nil preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:loadingAlert animated:YES completion:^{
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-            @autoreleasepool {
-                NSFileManager *fm = [NSFileManager defaultManager];
-                NSString *backupPath = [self.replacingImagePath stringByAppendingString:@".bak"];
-
-                UIImage *originalImage = [UIImage imageWithContentsOfFile:self.replacingImagePath];
-                if (originalImage) {
-                    CGSize targetSize = originalImage.size;
-
-                    // 备份原图
-                    if (![fm fileExistsAtPath:backupPath]) {
-                        [fm copyItemAtPath:self.replacingImagePath toPath:backupPath error:nil];
-                    }
-
-                    // 强制拉伸缩放
-                    UIGraphicsBeginImageContextWithOptions(targetSize, NO, 1.0);
-                    [pickedImage drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
-                    UIImage *resizedImage = UIGraphicsGetImageFromCurrentImageContext();
-                    UIGraphicsEndImageContext();
-
-                    // 覆盖写入
-                    NSString *ext = self.replacingImagePath.pathExtension.lowercaseString;
-                    NSData *data = nil;
-                    if ([ext isEqualToString:@"png"]) {
-                        data = UIImagePNGRepresentation(resizedImage);
-                    } else {
-                        data = UIImageJPEGRepresentation(resizedImage, 1.0);
-                    }
-
-                    if (data) {
-                        [data writeToFile:self.replacingImagePath atomically:YES];
-                        chown(self.replacingImagePath.UTF8String, 501, 501);
-                        chmod(self.replacingImagePath.UTF8String, 0777);
-                    }
-                }
-            }
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                    [self loadImages];
-                    if (self.reloadCallback) self.reloadCallback();
-                    self.replacingImagePath = nil;
-                }];
-            });
-        });
-    }];
+- (void)saveFinalCroppedImage:(UIImage *)finalImage {
+    if (!finalImage || !self.replacingImagePath) return;
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *backupPath = [self.replacingImagePath stringByAppendingString:@".bak"];
+    
+    // 如果无备份则生成备份
+    if (![fm fileExistsAtPath:backupPath]) {
+        [fm copyItemAtPath:self.replacingImagePath toPath:backupPath error:nil];
+    }
+    
+    NSString *ext = self.replacingImagePath.pathExtension.lowercaseString;
+    NSData *data = nil;
+    if ([ext isEqualToString:@"png"]) {
+        data = UIImagePNGRepresentation(finalImage);
+    } else {
+        data = UIImageJPEGRepresentation(finalImage, 1.0);
+    }
+    
+    if (data) {
+        [data writeToFile:self.replacingImagePath atomically:YES];
+        chown(self.replacingImagePath.UTF8String, 501, 501);
+        chmod(self.replacingImagePath.UTF8String, 0777);
+        
+        // 精准无闪烁单元格行局部重载刷新
+        if (self.replacingIndexPath) {
+            [self.tableView reloadRowsAtIndexPaths:@[self.replacingIndexPath] withRowAnimation:UITableViewRowAnimationNone];
+        }
+        if (self.reloadCallback) self.reloadCallback();
+    }
+    self.replacingImagePath = nil;
 }
 
 - (void)restoreAllImages {
@@ -642,7 +839,8 @@ static NSString * GetPrefsPlistPath() {
     }
     
     if (didRestore) {
-        [self loadImages];
+        // 恢复全部时仅刷新列表视图，绝不闪烁其它不相干控制器
+        [self.tableView reloadData];
         if (self.reloadCallback) self.reloadCallback();
     } else {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"该壁纸包没有被替换过任何图片，已经是默认状态。" preferredStyle:UIAlertControllerStyleAlert];
@@ -652,10 +850,39 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 
+// =======================================================
+// 主列表控制台路由入口挂载
+// =======================================================
+- (void)openReplaceImageController:(UIButton *)sender {
+    NSString *wpName = sender.accessibilityIdentifier;
+    if (!wpName) return;
+    NSString *wpPath = [GetWallpapersDir() stringByAppendingPathComponent:wpName];
+    
+    ZoneImageReplaceViewController *vc = [[ZoneImageReplaceViewController alloc] initWithStyle:UITableViewStyleGrouped];
+    vc.wallpaperName = wpName;
+    vc.wallpaperPath = wpPath;
+    vc.reloadCallback = ^{
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    };
+    
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:nav animated:YES completion:nil];
+    }
+}
+
+@end
+
 @interface ZonePrefsRootListController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, assign) BOOL isVideoMode;
 @property (nonatomic, assign) NSInteger currentVideoTarget;
 @end
+
+// 全局静态变量，用于完美持久化后台恢复状态
+static NSString *g_savedActiveWpName = nil;
+static NSString *g_savedActiveWpPath = nil;
 
 @implementation ZonePrefsRootListController
 
@@ -677,6 +904,19 @@ static NSString * GetPrefsPlistPath() {
     [super viewDidLoad];
     [self updateRightMenu];
     [self setupHeaderView];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // 如果存在后台保存的页面状态，自动无缝重新推入替换页面
+    if (g_savedActiveWpName && g_savedActiveWpPath) {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if ([fm fileExistsAtPath:g_savedActiveWpPath]) {
+            UIButton *dummyBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+            dummyBtn.accessibilityIdentifier = g_savedActiveWpName;
+            [self openReplaceImageController:dummyBtn];
+        }
+    }
 }
 
 - (void)setupHeaderView {
