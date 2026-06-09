@@ -1068,6 +1068,12 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)showReplaceImageInfo {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启替换图片可在每个素材右边按钮点击替换按钮替换壁纸图片。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (id)getWallpaperSize:(PSSpecifier *)spec { return @""; }
 - (id)getDummyValue:(PSSpecifier *)spec { return @""; }
 
@@ -1239,6 +1245,18 @@ static NSString * GetPrefsPlistPath() {
             infoBtn.frame = CGRectMake(100, (cell.bounds.size.height - 22) / 2.0, 22, 22);
             infoBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
             [infoBtn addTarget:self action:@selector(showDoubleTapLockInfo) forControlEvents:UIControlEventTouchUpInside];
+            [cell.contentView addSubview:infoBtn];
+        }
+    }
+
+    if ([specKey isEqualToString:@"EnableReplaceImage"]) {
+        UIButton *existingBtn = [cell.contentView viewWithTag:885];
+        if (!existingBtn) {
+            UIButton *infoBtn = [UIButton buttonWithType:UIButtonTypeInfoLight];
+            infoBtn.tag = 885;
+            infoBtn.frame = CGRectMake(100, (cell.bounds.size.height - 22) / 2.0, 22, 22);
+            infoBtn.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
+            [infoBtn addTarget:self action:@selector(showReplaceImageInfo) forControlEvents:UIControlEventTouchUpInside];
             [cell.contentView addSubview:infoBtn];
         }
     }
@@ -2327,7 +2345,7 @@ static NSString * GetPrefsPlistPath() {
 - (void)presentCropViewControllerWithImage:(UIImage *)img {
     if (!img || !self.replacingImagePath) return;
     
-    // 【修复】：使用 NSData 绕过缓存，且直接通过 CGImage 读取底层绝对真实像素尺寸 (无视 2x/3x 缩放)
+    // 使用 NSData 绕过缓存，并使用 CGImage 读取底层绝对真实像素尺寸
     NSData *origData = [NSData dataWithContentsOfFile:self.replacingImagePath];
     UIImage *orig = [UIImage imageWithData:origData];
     if (!orig) return;
@@ -2336,9 +2354,7 @@ static NSString * GetPrefsPlistPath() {
     
     ZoneImageCropViewController *cropVC = [[ZoneImageCropViewController alloc] init];
     cropVC.pickedImage = img;
-    cropVC.targetSize = pixelSize;
-    cropVC.pickedImage = img;
-    cropVC.targetSize = targetSize;
+    cropVC.targetSize = pixelSize; // 修复了这里的变量名错误
     
     __weak typeof(self) weakSelf = self;
     cropVC.cropCompletion = ^(UIImage *croppedImage) {
