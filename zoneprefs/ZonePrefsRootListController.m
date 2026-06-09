@@ -2030,8 +2030,9 @@ static NSString * GetPrefsPlistPath() {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成" style:UIBarButtonItemStyleDone target:self action:@selector(doneAction)];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消" style:UIBarButtonItemStylePlain target:self action:@selector(cancelAction)];
 
-    CGFloat screenW = self.view.bounds.size.width;
-    CGFloat screenH = self.view.bounds.size.height - 100;
+    // 【修复】：大幅增加安全边距，预留出顶部导航栏与底部安全区的位置，同时左右留空方便拖拽
+    CGFloat screenW = self.view.bounds.size.width - 40;
+    CGFloat screenH = self.view.bounds.size.height - 240; 
     
     CGFloat targetAspect = self.targetSize.width / self.targetSize.height;
     CGFloat cropW = screenW;
@@ -2041,7 +2042,8 @@ static NSString * GetPrefsPlistPath() {
         cropW = cropH * targetAspect;
     }
     
-    self.scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake((self.view.bounds.size.width - cropW)/2, (self.view.bounds.size.height - cropH)/2, cropW, cropH)];
+    // 【修复】：将 Y 轴向下偏移，完美居中避开所有异形屏干扰
+    self.scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake((self.view.bounds.size.width - cropW)/2, (self.view.bounds.size.height - cropH)/2 + 20, cropW, cropH)];
     self.scrollView.delegate = self;
     self.scrollView.showsHorizontalScrollIndicator = NO;
     self.scrollView.showsVerticalScrollIndicator = NO;
@@ -2188,7 +2190,7 @@ static NSString * GetPrefsPlistPath() {
     
     cell.textLabel.text = imgSubPath.lastPathComponent;
     cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    cell.detailTextLabel.text = hasBackup ? @"🟢 已替换 (点击修改/恢复)" : @"⚪️ 原图 (点击替换)";
+    cell.detailTextLabel.text = hasBackup ? @"已替换(点击可恢复默认/修改)" : @"点击替换壁纸图片";
     cell.detailTextLabel.textColor = hasBackup ? [UIColor systemGreenColor] : [UIColor secondaryLabelColor];
     
     cell.imageView.userInteractionEnabled = YES;
@@ -2204,7 +2206,9 @@ static NSString * GetPrefsPlistPath() {
         cell.imageView.image = nil;
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             @autoreleasepool {
-                UIImage *img = [UIImage imageWithContentsOfFile:fullPath];
+                // 【修复】：用 NSData 取代 imageWithContentsOfFile，彻底破除 iOS 恶心的 UIImage 同名文件强缓存！
+                NSData *imgData = [NSData dataWithContentsOfFile:fullPath];
+                UIImage *img = [UIImage imageWithData:imgData];
                 if (img) {
                     CGSize targetSize = CGSizeMake(60, 60);
                     UIGraphicsBeginImageContextWithOptions(targetSize, NO, [UIScreen mainScreen].scale);
@@ -2322,11 +2326,17 @@ static NSString * GetPrefsPlistPath() {
 
 - (void)presentCropViewControllerWithImage:(UIImage *)img {
     if (!img || !self.replacingImagePath) return;
-    UIImage *orig = [UIImage imageWithContentsOfFile:self.replacingImagePath];
+    
+    // 【修复】：使用 NSData 绕过缓存，且直接通过 CGImage 读取底层绝对真实像素尺寸 (无视 2x/3x 缩放)
+    NSData *origData = [NSData dataWithContentsOfFile:self.replacingImagePath];
+    UIImage *orig = [UIImage imageWithData:origData];
     if (!orig) return;
-    CGSize targetSize = orig.size;
+    
+    CGSize pixelSize = CGSizeMake(CGImageGetWidth(orig.CGImage), CGImageGetHeight(orig.CGImage));
     
     ZoneImageCropViewController *cropVC = [[ZoneImageCropViewController alloc] init];
+    cropVC.pickedImage = img;
+    cropVC.targetSize = pixelSize;
     cropVC.pickedImage = img;
     cropVC.targetSize = targetSize;
     
@@ -2360,11 +2370,8 @@ static NSString * GetPrefsPlistPath() {
     NSString *fileName = self.replacingImagePath.lastPathComponent;
     [self.thumbCache removeObjectForKey:fileName];
     
-    NSUInteger idx = [self.imageFiles indexOfObject:fileName];
-    if (idx != NSNotFound) {
-        NSIndexPath *idxPath = [NSIndexPath indexPathForRow:idx inSection:0];
-        [self.tableView reloadRowsAtIndexPaths:@[idxPath] withRowAnimation:UITableViewRowAnimationNone];
-    }
+    // 【修复】：强制重新加载所有图片，确保状态文本和缩略图彻底刷新
+    [self loadImages];
     
     if (self.reloadCallback) self.reloadCallback();
     self.replacingImagePath = nil;
@@ -2391,7 +2398,7 @@ static NSString * GetPrefsPlistPath() {
         [self loadImages];
         if (self.reloadCallback) self.reloadCallback();
     } else {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"该壁纸包没有被替换过任何图片，已经是默认状态。" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"该壁纸文件没有被替换过任何图片。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
     }
