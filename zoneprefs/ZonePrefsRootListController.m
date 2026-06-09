@@ -2107,7 +2107,7 @@ for (NSString *name in lockContents) {
         UIImagePickerController *picker = [[UIImagePickerController alloc] init];
         picker.delegate = self;
         picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-        picker.mediaTypes = @[(NSString *)kUTTypeImage];
+        picker.mediaTypes = @[@"public.image"];
         
         UIViewController *topVC = self.view.window.rootViewController ?: self;
         while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
