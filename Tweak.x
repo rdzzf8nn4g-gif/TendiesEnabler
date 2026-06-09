@@ -398,8 +398,7 @@ static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL 
 }
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
-    // 【核心修复】：涵盖 iOS 16+ 的 AOD 状态 (2) 及可能的过渡态 (3)
-    return (state >= 0 && state <= 3);
+    return (state == 0 || state == 1);
 }
 
 static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
@@ -1900,11 +1899,6 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         return;
     }
     
-    // 【修复】：如果在执行手动动画且目标是 Sleep，绝对不允许进度条横插一脚强行点亮！
-    if ([self.manualTargetState isEqualToString:@"Sleep"] || [self.currentState isEqualToString:@"Sleep"]) {
-        return; 
-    }
-    
     double progress = [note.userInfo[@"progress"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
@@ -2644,37 +2638,26 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    
-    if (g_enabled) {
-        // 【终极硬件测谎仪】：直接查询底层背光物理状态
-        id blc = [%c(SBBacklightController) sharedInstance];
-        if ([blc respondsToSelector:@selector(backlightState)]) {
-            long long blState = (long long)[blc performSelector:@selector(backlightState)];
-            // blState == 1 为屏幕完全高亮。如果是 0(黑屏) 或 2/3(AOD)，坚决拦截 UI 层的假亮屏信号！
-            if (blState != 1) return;
-        }
-        
-        if (g_isScreenOn && !g_isAODInactive) {
-            NSString *state = dismissed ? @"Unlock" : @"Locked";
-            ZoneEmitWallpaperState(YES, state, YES);
-        }
+    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
+        NSString *state = dismissed ? @"Unlock" : @"Locked";
+        ZoneEmitWallpaperState(YES, state, YES);
     }
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
-    %orig;
-    if (g_enabled && mode) {
-        // 【终极修复 1】：只信任息屏指令 (mode=YES)。
-        // 绝不信任这里的亮屏指令，防止在桌面瞬间息屏时，锁屏 UI 的后台初始化准备工作发出错误的亮屏信号。
-        ZoneCommitAODTransition(NO, @"Sleep", YES);
+    if (g_enabled) {
+        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
+        ZoneCommitAODTransition(!mode, state, YES);
     }
+    %orig;
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
+    if (g_enabled) {
+        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
+        ZoneCommitAODTransition(YES, state, YES);
+    }
     %orig;
-    // 【终极修复 2】：彻底删除这里的 Wake (亮屏) 触发逻辑。
-    // iOS 16+ 在桌面息屏时，系统会为了准备底层的锁屏视图而疯狂调用 FadeIn。
-    // 真正的唤醒工作已由 SBBacklightController 完美接管，这里无需画蛇添足，否则必闪。
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
@@ -2743,17 +2726,8 @@ static void EnsureEngineViewIsMounted() {
         ZoneFlushPendingAODWallpaperState();
     }
 
-    // 【修复】：从桌面息屏时，只要 currentState 已经是 Sleep，强制拦截一切后续 Progress！
-    id existingEngine = objc_getAssociatedObject(self, "GlobalZoneEngine");
-    BOOL engineIsAlreadySleeping = NO;
-    if (existingEngine && [existingEngine respondsToSelector:@selector(currentState)]) {
-        NSString *engineState = [existingEngine performSelector:@selector(currentState)];
-        if ([engineState isEqualToString:@"Sleep"]) {
-            engineIsAlreadySleeping = YES;
-        }
-    }
-
-    if (!g_isScreenOn || g_isAODInactive || engineIsAlreadySleeping) {
+    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
+    if (!g_isScreenOn || g_isAODInactive) {
         ZonePinPortalVisibleForAODSleep();
         g_lastSystemProgress = progress;
         return;
