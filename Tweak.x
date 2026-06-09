@@ -398,7 +398,8 @@ static inline void ZoneCommitAODTransition(BOOL screenOn, NSString *state, BOOL 
 }
 
 static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
-    return (state == 0 || state == 1);
+    // 【核心修复】：涵盖 iOS 16+ 的 AOD 状态 (2) 及可能的过渡态 (3)
+    return (state >= 0 && state <= 3);
 }
 
 static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
@@ -2644,12 +2645,19 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     g_isUnlocked = dismissed;
     
-    // 【修复】：如果正在进行息屏/AOD过渡，绝对不允许 CoverSheet 覆盖壁纸状态！
-    BOOL isTransitioningToSleep = (!g_isScreenOn || g_isAODInactive);
-    
-    if (g_enabled && !isTransitioningToSleep) {
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
-        ZoneEmitWallpaperState(YES, state, YES);
+    if (g_enabled) {
+        // 【终极硬件测谎仪】：直接查询底层背光物理状态
+        id blc = [%c(SBBacklightController) sharedInstance];
+        if ([blc respondsToSelector:@selector(backlightState)]) {
+            long long blState = (long long)[blc performSelector:@selector(backlightState)];
+            // blState == 1 为屏幕完全高亮。如果是 0(黑屏) 或 2/3(AOD)，坚决拦截 UI 层的假亮屏信号！
+            if (blState != 1) return;
+        }
+        
+        if (g_isScreenOn && !g_isAODInactive) {
+            NSString *state = dismissed ? @"Unlock" : @"Locked";
+            ZoneEmitWallpaperState(YES, state, YES);
+        }
     }
 }
 
