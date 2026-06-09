@@ -3159,9 +3159,9 @@ static void EnsureEngineViewIsMounted() {
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
     
-    // 读取头文件中的真实硬件背光亮度 (0.0 = 纯黑, 1.0 = 屏幕最亮)
-    float factor = self.backlightFactor; 
-    double progress = (double)factor;
+    // 【编译修复】：使用 KVC 绕过 Theos 的 @class 向前声明检查
+    // 直接在运行时获取硬件背光亮度 (0.0 = 纯黑, 1.0 = 屏幕最亮)
+    double progress = [[self valueForKey:@"backlightFactor"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
     // 处理 AOD / 黑屏渐变遮罩层，完美匹配背光
