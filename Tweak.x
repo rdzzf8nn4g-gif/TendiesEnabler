@@ -309,8 +309,6 @@ static BOOL g_pendingAODWallpaperAnimated = YES;
 static BOOL g_hasPendingAODWallpaperState = NO;
 static BOOL g_deferAODWakeWallpaperState = NO;
 static BOOL g_forceAcceptNextSystemProgress = NO;
-static BOOL g_suppressWallpaperStateUntilStableWake = NO;
-static BOOL g_backlightWakeConfirmed = NO;
 
 // 【核心修复】：绕过生命周期，直接从底层 SBLockScreenManager 获取当前真实锁屏状态
 static BOOL ZoneIsDeviceUnlocked() {
@@ -343,8 +341,7 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
         g_forceAcceptNextSystemProgress = NO;
         g_lastSystemProgress = 0.0;
         g_deferAODWakeWallpaperState = NO;
-        g_suppressWallpaperStateUntilStableWake = YES;
-        g_backlightWakeConfirmed = NO;
+        ZoneClearPendingAODWallpaperState();
     }
 }
 
@@ -366,9 +363,6 @@ static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL anima
 
 static inline void ZoneFlushPendingAODWallpaperState(void) {
     if (g_deferAODWakeWallpaperState) {
-        return;
-    }
-    if (g_suppressWallpaperStateUntilStableWake && !g_backlightWakeConfirmed) {
         return;
     }
     if (!g_hasPendingAODWallpaperState || !g_isScreenOn || g_isAODInactive) {
@@ -435,17 +429,17 @@ static inline void ZoneEmitWallpaperState(BOOL screenOn, NSString *state, BOOL a
         finalState = @"Sleep";
     }
 
-    if (g_suppressWallpaperStateUntilStableWake && !g_backlightWakeConfirmed && ![finalState isEqualToString:@"Sleep"]) {
-        return;
-    }
+    BOOL shouldQueuePendingState = [finalState isEqualToString:@"Unlock"];
 
-    if (g_deferAODWakeWallpaperState && screenOn && ![finalState isEqualToString:@"Sleep"]) {
+    if (g_deferAODWakeWallpaperState && screenOn && shouldQueuePendingState) {
         ZoneQueuePendingAODWallpaperState(finalState, animated);
         return;
     }
 
-    if ((g_isAODInactive || !g_isScreenOn) && ![finalState isEqualToString:@"Sleep"]) {
-        ZoneQueuePendingAODWallpaperState(finalState, animated);
+    if ((g_isAODInactive || !g_isScreenOn)) {
+        if (shouldQueuePendingState) {
+            ZoneQueuePendingAODWallpaperState(finalState, animated);
+        }
         return;
     }
 
@@ -2772,13 +2766,6 @@ static void EnsureEngineViewIsMounted() {
             return;
         }
         BOOL screenOn = (state == 1);
-        if (screenOn) {
-            g_backlightWakeConfirmed = YES;
-            g_suppressWallpaperStateUntilStableWake = NO;
-        } else {
-            g_backlightWakeConfirmed = NO;
-            g_suppressWallpaperStateUntilStableWake = YES;
-        }
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
@@ -2796,13 +2783,6 @@ static void EnsureEngineViewIsMounted() {
             return;
         }
         BOOL screenOn = (state == 1);
-        if (screenOn) {
-            g_backlightWakeConfirmed = YES;
-            g_suppressWallpaperStateUntilStableWake = NO;
-        } else {
-            g_backlightWakeConfirmed = NO;
-            g_suppressWallpaperStateUntilStableWake = YES;
-        }
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
