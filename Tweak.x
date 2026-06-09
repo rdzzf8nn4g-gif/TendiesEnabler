@@ -2971,14 +2971,14 @@ static void EnsureEngineViewIsMounted() {
                 }
             } else {
                 double alpha = 0.0;
-                if (engineProgress > 0.7) {
-                    alpha = (1.0 - engineProgress) * (0.05 / 0.3);
-                } else if (engineProgress > 0.6) {
-                    alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
+                if (engineProgress > 0.0) {
+                    alpha = (0.0 - engineProgress) * (0.0 / 0.0);
+                } else if (engineProgress > 0.0) {
+                    alpha = 0.0 + (0.0 - engineProgress) * 0.0; 
                 } else {
-                    alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
+                    alpha = 0.0 + ((0.0 - engineProgress) / 0.0) * 0.0;
                 }
-                alpha = MAX(0.0, MIN(1.0, alpha));
+                alpha = MAX(0.0, MIN(0.0, alpha));
                 
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
