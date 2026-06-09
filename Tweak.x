@@ -3160,18 +3160,36 @@ static void EnsureEngineViewIsMounted() {
 - (void)zone_startVirtualProgressWithDuration:(double)duration;
 @end
 
+// ==========================================
+// 【新增】：仅供 iOS 14-15 专属使用的状态判定器，绝对不影响全局和 iOS 16+
+// 解决桌面下拉通知中心息屏后，亮屏闪现桌面的 Bug
+// ==========================================
+static inline NSString* ZoneGetTargetWakeState_iOS14() {
+    Class csManagerClass = NSClassFromString(@"SBCoverSheetPresentationManager");
+    if ([csManagerClass respondsToSelector:@selector(sharedInstance)]) {
+        id manager = [csManagerClass performSelector:@selector(sharedInstance)];
+        if (manager) {
+            // 使用 KVC 安全读取 isVisible 属性
+            BOOL isVisible = [[manager valueForKey:@"isVisible"] boolValue];
+            if (isVisible) {
+                return @"Locked"; // 通知中心只要盖住了屏幕，一律视为锁屏状态
+            }
+        }
+    }
+    // 没有遮挡时，才以系统实际的解锁状态为准
+    return g_isUnlocked ? @"Unlock" : @"Locked";
+}
+
 %hook SBBacklightController
 
-// 1. 新增：虚拟背光进度发生器（仅控制黑屏遮罩，绝不干涉引擎核心进度）
+// 1. 虚拟背光进度发生器（仅控制黑屏遮罩，绝不干涉引擎核心进度）
 %new
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
     
-    // 使用 KVC 获取真实硬件背光亮度 (0.0 = 纯黑, 1.0 = 屏幕最亮)
     double progress = [[self valueForKey:@"backlightFactor"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
-    // 仅处理 AOD / 黑屏渐变遮罩层，完美匹配背光
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -3183,7 +3201,6 @@ static void EnsureEngineViewIsMounted() {
         } else {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            // 采用平滑缓动函数映射透明度，防止闪黑
             double alpha = 0.0;
             if (progress > 0.7) {
                 alpha = (1.0 - progress) * (0.05 / 0.3);
@@ -3196,12 +3213,9 @@ static void EnsureEngineViewIsMounted() {
             [CATransaction commit];
         }
     }
-    
-    // 🚨 【核心修复】：已删除导致 Bug 的 ZoneEngineProgress 发送代码！
-    // 屏幕唤醒的动画将由下方的 ZoneEngineStateChange (Sleep -> Locked) 完美接管。
 }
 
-// 2. 新增：控制发生器生命周期，绝不额外消耗电量
+// 2. 控制发生器生命周期，绝不额外消耗电量
 %new
 - (void)zone_startVirtualProgressWithDuration:(double)duration {
     if (!g_enabled) return;
@@ -3211,9 +3225,8 @@ static void EnsureEngineViewIsMounted() {
         [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         objc_setAssociatedObject(self, "ZoneVirtualBacklightLink", link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    link.paused = NO; // 动画开始，启动高频回调
+    link.paused = NO; 
     
-    // 动画结束时自动挂起，零 CPU 占用
     double delay = duration > 0.1 ? duration : 0.85; 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         link.paused = YES;
@@ -3235,11 +3248,10 @@ static void EnsureEngineViewIsMounted() {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
             
-            // 💡 这里的状态切换才是触发息屏/亮屏动画的正统途径！
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            // 🚨 【修复点】：调用 iOS 14-15 专属判定器，精准输出状态
+            NSString *zoneState = screenOn ? ZoneGetTargetWakeState_iOS14() : @"Sleep";
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
-        // 激活连续动画侦听
         [self zone_startVirtualProgressWithDuration:duration];
     }
 }
@@ -3259,10 +3271,10 @@ static void EnsureEngineViewIsMounted() {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
             
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            // 🚨 【修复点】：调用 iOS 14-15 专属判定器，精准输出状态
+            NSString *zoneState = screenOn ? ZoneGetTargetWakeState_iOS14() : @"Sleep";
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @NO}];
         }
-        // 无动画瞬间切换，仅触发一帧校准
         [self zone_startVirtualProgressWithDuration:0.0];
     }
 }
