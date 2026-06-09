@@ -1936,13 +1936,12 @@ static NSString * GetPrefsPlistPath() {
     NSString *wpName = sender.accessibilityIdentifier;
     NSString *wpPath = [GetWallpapersDir() stringByAppendingPathComponent:wpName];
     
-    // Class ZoneImageReplaceViewController will be declared below
-    UIViewController *vc = [[NSClassFromString(@"ZoneImageReplaceViewController") alloc] initWithStyle:UITableViewStylePlain];
-    [vc setValue:wpName forKey:@"wallpaperName"];
-    [vc setValue:wpPath forKey:@"wallpaperPath"];
-    [vc setValue:^{
+   ZoneImageReplaceViewController *vc = [[ZoneImageReplaceViewController alloc] initWithStyle:UITableViewStylePlain];
+    vc.wallpaperName = wpName;
+    vc.wallpaperPath = wpPath;
+    vc.reloadCallback = ^{
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    } forKey:@"reloadCallback"];
+    };
     
     if (self.navigationController) {
         [self.navigationController pushViewController:vc animated:YES];
