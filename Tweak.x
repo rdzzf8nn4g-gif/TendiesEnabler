@@ -379,14 +379,6 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
 
 static inline void ZonePinPortalVisibleForAODSleep(void) {
     if (!g_portalView) return;
-    
-    // 【桌面息屏防闪烁核心 1】：
-    // 如果当前在桌面（g_isUnlocked == YES），按下电源键时绝不能瞬间将壁纸透明度拉到 1.0！
-    // 直接 return，让它保持透明，原生桌面自然淡出变黑。
-    if (g_isUnlocked) {
-        return;
-    }
-
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     g_portalView.hidden = NO;
@@ -2547,16 +2539,12 @@ static void EnsureEngineViewIsMounted() {
         }
 
         if (freezeAODLayout) {
-        // 【桌面息屏防闪烁核心 2】：
-        // 防止系统在息屏布局刷新时，再次把本来应该是透明的壁纸强行拉回可见状态
-        if (!g_isUnlocked) {
-            portalView.hidden = NO;
-            if (portalView.alpha != 1.0) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                portalView.alpha = 1.0;
-                [CATransaction commit];
-            }
+        portalView.hidden = NO;
+        if (portalView.alpha != 1.0) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            portalView.alpha = 1.0;
+            [CATransaction commit];
         }
     } else if (sourceForPortal) {
             portalView.hidden = NO;
