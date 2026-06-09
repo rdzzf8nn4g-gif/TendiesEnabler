@@ -2645,27 +2645,21 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
-    if (g_enabled) {
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!mode, state, YES);
-    }
     %orig;
+    if (g_enabled && mode) {
+        ZoneCommitAODTransition(NO, @"Sleep", YES);
+    }
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
-    if (g_enabled) {
-        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        ZoneCommitAODTransition(YES, state, YES);
-    }
     %orig;
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
-    if (g_enabled) {
-        NSString *state = inactive ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!inactive, state, YES);
-    }
     %orig;
+    if (g_enabled && inactive) {
+        ZoneCommitAODTransition(NO, @"Sleep", YES);
+    }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
