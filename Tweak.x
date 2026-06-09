@@ -2654,19 +2654,19 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
-    if (g_enabled) {
-        NSString *state = mode ? @"Sleep" : (g_isUnlocked ? @"Unlock" : @"Locked");
-        ZoneCommitAODTransition(!mode, state, YES);
-    }
     %orig;
+    if (g_enabled && mode) {
+        // 【终极修复 1】：只信任息屏指令 (mode=YES)。
+        // 绝不信任这里的亮屏指令，防止在桌面瞬间息屏时，锁屏 UI 的后台初始化准备工作发出错误的亮屏信号。
+        ZoneCommitAODTransition(NO, @"Sleep", YES);
+    }
 }
 
 - (void)_startFadeInAnimationForSource:(int)source {
-    if (g_enabled) {
-        NSString *state = g_isUnlocked ? @"Unlock" : @"Locked";
-        ZoneCommitAODTransition(YES, state, YES);
-    }
     %orig;
+    // 【终极修复 2】：彻底删除这里的 Wake (亮屏) 触发逻辑。
+    // iOS 16+ 在桌面息屏时，系统会为了准备底层的锁屏视图而疯狂调用 FadeIn。
+    // 真正的唤醒工作已由 SBBacklightController 完美接管，这里无需画蛇添足，否则必闪。
 }
 
 - (void)_updateAppearanceForAODTransitionToInactive:(BOOL)inactive {
