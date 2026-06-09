@@ -315,7 +315,7 @@ static BOOL ZoneIsAODEnabledInSystem() {
     if (@available(iOS 16.0, *)) {
         NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.springboard"];
         if ([defaults objectForKey:@"AlwaysOnDisplayEnabled"]) {
-            return [defaults boolValueForKey:@"AlwaysOnDisplayEnabled"];
+            return [defaults boolForKey:@"AlwaysOnDisplayEnabled"];
         }
     }
     return NO;
