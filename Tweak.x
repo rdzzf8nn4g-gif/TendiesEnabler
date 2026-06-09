@@ -310,17 +310,6 @@ static BOOL g_hasPendingAODWallpaperState = NO;
 static BOOL g_deferAODWakeWallpaperState = NO;
 static BOOL g_forceAcceptNextSystemProgress = NO;
 
-// 【新增】：获取系统真实 AOD 开关状态判断
-static BOOL ZoneIsAODEnabledInSystem() {
-    if (@available(iOS 16.0, *)) {
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.springboard"];
-        if ([defaults objectForKey:@"AlwaysOnDisplayEnabled"]) {
-            return [defaults boolForKey:@"AlwaysOnDisplayEnabled"];
-        }
-    }
-    return NO;
-}
-
 // 【核心修复】：绕过生命周期，直接从底层 SBLockScreenManager 获取当前真实锁屏状态
 static BOOL ZoneIsDeviceUnlocked() {
     Class lockManagerClass = NSClassFromString(@"SBLockScreenManager");
@@ -391,19 +380,16 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
 static inline void ZonePinPortalVisibleForAODSleep(void) {
     if (!g_portalView) return;
     [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    g_portalView.hidden = NO;
     
-    // 【AOD 状态与桌面防闪现核心判断】
-    if (!ZoneIsAODEnabledInSystem() || g_isUnlocked) {
-        // 如果系统未开 AOD，或者是从桌面直接息屏：
-        // 开启 0.35 秒渐变，并将 Alpha 设为 0。彻底放权给系统原生黑屏过渡，防止生硬遮挡桌面
-        [CATransaction setAnimationDuration:0.35];
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
-        g_portalView.hidden = NO;
+    // 【iOS16+ 桌面息屏防闪现核心】
+    // g_isUnlocked 为 YES 说明当前设备处于解锁桌面状态。
+    // 从桌面按电源键时，系统原生会有平滑变暗的过渡，此时绝对不能让壁纸图层瞬间变为 1.0 产生霸道遮挡。
+    // 只有在锁屏界面进入 AOD 时（g_isUnlocked == NO），才允许瞬间接管曝光。
+    if (g_isUnlocked) {
         g_portalView.alpha = 0.0;
     } else {
-        // 正常锁屏界面的 AOD 睡眠，瞬间接管曝光
-        [CATransaction setDisableActions:YES];
-        g_portalView.hidden = NO;
         g_portalView.alpha = 1.0;
     }
     
