@@ -1909,6 +1909,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self completeManualTransition];
         } else if (progress >= 0.99 && ZoneIsDeviceUnlocked()) {
             // 2. 已经秒解锁进入桌面：终止残余亮屏动画，瞬间到位
+            
+            // 【AOD 防闪烁终极修复】：如果是 AOD 免密宽限期内直接亮屏
+            // 引擎的目标本身就是展现桌面 (Unlock)，此时绝不能强杀动画！
+            // 让它把 0.85 秒的亮屏渐变优雅地播完，无视系统的 1.0 催促指令。
+            if ([self.manualTargetState isEqualToString:@"Unlock"]) {
+                return; 
+            }
+            
             [self completeManualTransition];
         } else {
             // 3. 亮息屏瞬间的 0.0/1.0 假进度：坚决拦截防闪烁
@@ -2531,14 +2539,14 @@ static void EnsureEngineViewIsMounted() {
         }
 
         if (freezeAODLayout) {
-            portalView.hidden = NO;
-            if (portalView.alpha != 1.0) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                portalView.alpha = 1.0;
-                [CATransaction commit];
-            }
-        } else if (sourceForPortal) {
+        portalView.hidden = NO;
+        if (portalView.alpha != 1.0) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            portalView.alpha = 1.0;
+            [CATransaction commit];
+        }
+    } else if (sourceForPortal) {
             portalView.hidden = NO;
             if (IsSingleVideoMode()) {
                 if (portalView.matchesPosition != YES) portalView.matchesPosition = YES;
