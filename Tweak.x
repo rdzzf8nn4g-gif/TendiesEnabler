@@ -2548,6 +2548,23 @@ static void EnsureEngineViewIsMounted() {
             g_portalView = portalView;
         }
 
+// ------------------ 新增：注入真正的防穿透毛玻璃 ------------------
+        UIVisualEffectView *blurView = objc_getAssociatedObject(self, "ZoneBlurView");
+        if (!blurView) {
+            // 这里可以选风格：UIBlurEffectStyleDark(深色毛玻璃) 或 UIBlurEffectStyleRegular(随系统深浅色的毛玻璃)
+            UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]; 
+            blurView = [[UIVisualEffectView alloc] initWithEffect:effect];
+            blurView.userInteractionEnabled = NO; // 不阻挡手势
+            objc_setAssociatedObject(self, "ZoneBlurView", blurView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        
+        // 确保毛玻璃永远垫底，且和屏幕一样大
+        if (blurView.superview != self.view) {
+            [self.view insertSubview:blurView atIndex:0]; // 塞在最底层
+        }
+        blurView.frame = self.view.bounds;
+        // --------------------------------------------------------------
+
         if (sourceForPortal && portalView.sourceView != sourceForPortal && !freezeAODLayout) {
             portalView.sourceView = sourceForPortal; 
         } else if (sourceForPortal && !portalView.sourceView) {
@@ -2602,10 +2619,10 @@ static void EnsureEngineViewIsMounted() {
             }
         } else {
             if (portalView.superview != self.view) {
-                [self.view insertSubview:portalView atIndex:0];
+                // 确保传送门永远插在毛玻璃的上面
+                [self.view insertSubview:portalView aboveSubview:objc_getAssociatedObject(self, "ZoneBlurView")];
             }
             portalView.frame = self.view.bounds;
-            [self.view sendSubviewToBack:portalView];
         }
 
         if (!freezeAODLayout) {
@@ -2971,14 +2988,14 @@ static void EnsureEngineViewIsMounted() {
                 }
             } else {
                 double alpha = 0.0;
-                if (engineProgress > 0.0) {
-                    alpha = (0.0 - engineProgress) * (0.0 / 0.0);
-                } else if (engineProgress > 0.0) {
-                    alpha = 0.0 + (0.0 - engineProgress) * 0.0; 
+                if (engineProgress > 0.7) {
+                    alpha = (1.0 - engineProgress) * (0.05 / 0.3);
+                } else if (engineProgress > 0.6) {
+                    alpha = 0.05 + (0.7 - engineProgress) * 1.0; 
                 } else {
-                    alpha = 0.0 + ((0.0 - engineProgress) / 0.0) * 0.0;
+                    alpha = 0.15 + ((0.6 - engineProgress) / 0.6) * 0.85;
                 }
-                alpha = MAX(0.0, MIN(0.0, alpha));
+                alpha = MAX(0.0, MIN(1.0, alpha));
                 
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
@@ -3100,14 +3117,11 @@ static void EnsureEngineViewIsMounted() {
                     }
                 }
             }
+        // ✅ 正确的代码：
         } else {
             if (portalView.superview != self.view) {
-                [self.view insertSubview:portalView atIndex:0];
-            } else {
-                NSInteger index = [self.view.subviews indexOfObject:portalView];
-                if (index != 0) {
-                    [self.view sendSubviewToBack:portalView];
-                }
+                // 确保传送门永远插在毛玻璃的上面
+                [self.view insertSubview:portalView aboveSubview:objc_getAssociatedObject(self, "ZoneBlurView")];
             }
             portalView.frame = self.view.bounds;
         }
