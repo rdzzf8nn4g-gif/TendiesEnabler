@@ -379,14 +379,6 @@ static inline void ZoneFlushPendingAODWallpaperState(void) {
 
 static inline void ZonePinPortalVisibleForAODSleep(void) {
     if (!g_portalView) return;
-    
-    // 【防闪现核心】：g_lastSystemProgress 记录了系统的视觉进度。
-    // 如果 > 0.05，说明我们是从桌面按下的电源键。
-    // 此时绝对禁止瞬间把透明度强行拉满到 1.0！必须把控制权交给进度条去平滑渐隐。
-    if (g_lastSystemProgress > 0.05) {
-        return; 
-    }
-
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     g_portalView.hidden = NO;
@@ -2702,10 +2694,9 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     if (!g_enabled) return;
 
-    // 【iOS16 防闪现终极修复】：去除了 g_isScreenOn 的限制！
-    // 让透明度永远忠实地跟随系统进度条 (progress) 的变化！
-    // 桌面息屏时，progress 会随背光平滑变小，透明度也会完美平滑变大，彻底告别瞬间闪现！
-    if (g_portalView) {
+    // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
+    // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
+    if (g_portalView && g_isScreenOn && !g_isAODInactive) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
                 [CATransaction begin];
@@ -2735,8 +2726,9 @@ static void EnsureEngineViewIsMounted() {
         ZoneFlushPendingAODWallpaperState();
     }
 
+    // 只有拦截 ZoneEngineProgress 才需要 return，保留上面的 portal 透明度过渡
     if (!g_isScreenOn || g_isAODInactive) {
-        // 这里不再强制调用霸王图层曝光函数，全权由上面的自然渐变主导！
+        ZonePinPortalVisibleForAODSleep();
         g_lastSystemProgress = progress;
         return;
     }
