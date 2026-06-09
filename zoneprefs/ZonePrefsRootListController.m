@@ -2229,9 +2229,25 @@ static NSString * GetPrefsPlistPath() {
     NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:imgSubPath];
     BOOL hasBackup = [[NSFileManager defaultManager] fileExistsAtPath:[fullPath stringByAppendingString:@".bak"]];
     
+    // 获取图片真实物理尺寸 (极速读取文件头，不加载整图，无惧内存堆积与卡顿)
+    CGSize imgSize = CGSizeZero;
+    NSURL *imgURL = [NSURL fileURLWithPath:fullPath];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)imgURL, NULL);
+    if (source) {
+        CFDictionaryRef props = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+        if (props) {
+            NSNumber *w = (__bridge NSNumber *)CFDictionaryGetValue(props, kCGImagePropertyPixelWidth);
+            NSNumber *h = (__bridge NSNumber *)CFDictionaryGetValue(props, kCGImagePropertyPixelHeight);
+            imgSize = CGSizeMake(w.doubleValue, h.doubleValue);
+            CFRelease(props);
+        }
+        CFRelease(source);
+    }
+    NSString *sizeStr = [NSString stringWithFormat:@"[%.0fx%.0f]", imgSize.width, imgSize.height];
+    
     cell.textLabel.text = imgSubPath.lastPathComponent;
     cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    cell.detailTextLabel.text = hasBackup ? @"已替换(点击修改/恢复)" : @"点击替换壁纸图片";
+    cell.detailTextLabel.text = hasBackup ? [NSString stringWithFormat:@"已替换(点击修改/恢复) %@", sizeStr] : [NSString stringWithFormat:@"点击替换壁纸图片%@", sizeStr];
     cell.detailTextLabel.textColor = hasBackup ? [UIColor systemGreenColor] : [UIColor secondaryLabelColor];
     
     cell.imageView.userInteractionEnabled = YES;
@@ -2410,12 +2426,23 @@ static NSString * GetPrefsPlistPath() {
     }
     
     NSString *fileName = self.replacingImagePath.lastPathComponent;
-    [self.thumbCache removeObjectForKey:fileName];
+    
+    // 【完美修复缩略图不刷新】：直接把裁剪好的原图压缩成缩略图，强行塞进缓存！
+    // 这样 tableView 刷新时瞬间就有图，告别异步读取造成的延迟白屏。
+    CGSize targetSize = CGSizeMake(60, 60);
+    UIGraphicsBeginImageContextWithOptions(targetSize, NO, [UIScreen mainScreen].scale);
+    [croppedImage drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
+    UIImage *newThumb = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    if (newThumb) {
+        [self.thumbCache setObject:newThumb forKey:fileName];
+    } else {
+        [self.thumbCache removeObjectForKey:fileName];
+    }
     
     NSUInteger idx = [self.imageFiles indexOfObject:fileName];
     if (idx != NSNotFound) {
         NSIndexPath *idxPath = [NSIndexPath indexPathForRow:idx inSection:0];
-        // 【修复杂闪】：采用平滑的 Fade 动画刷新缩略图
         [self.tableView reloadRowsAtIndexPaths:@[idxPath] withRowAnimation:UITableViewRowAnimationFade];
     }
     
