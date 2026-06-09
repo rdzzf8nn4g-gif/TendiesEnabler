@@ -3154,7 +3154,6 @@ static void EnsureEngineViewIsMounted() {
 
 // ==========================================
 // 务必将这个 @interface 放在 %hook 的正上方！
-// 这样编译器就能准确知道方法和参数类型，彻底解决编译报错。
 // ==========================================
 @interface SBBacklightController : NSObject
 - (float)backlightFactor;
@@ -3163,17 +3162,16 @@ static void EnsureEngineViewIsMounted() {
 
 %hook SBBacklightController
 
-// 1. 新增：虚拟背光进度发生器
+// 1. 新增：虚拟背光进度发生器（仅控制黑屏遮罩，绝不干涉引擎核心进度）
 %new
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
     
-    // 此时编译器已经知道 backlightFactor 返回 float，可以直接安全调用
-    float factor = [self backlightFactor]; 
-    double progress = (double)factor;
+    // 使用 KVC 获取真实硬件背光亮度 (0.0 = 纯黑, 1.0 = 屏幕最亮)
+    double progress = [[self valueForKey:@"backlightFactor"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
-    // 处理 AOD / 黑屏渐变遮罩层，完美匹配背光
+    // 仅处理 AOD / 黑屏渐变遮罩层，完美匹配背光
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -3199,8 +3197,8 @@ static void EnsureEngineViewIsMounted() {
         }
     }
     
-    // 【核心】：源源不断地向渲染引擎发送进度，全版本通杀！
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineProgress" object:nil userInfo:@{@"progress": @(progress)}];
+    // 🚨 【核心修复】：已删除导致 Bug 的 ZoneEngineProgress 发送代码！
+    // 屏幕唤醒的动画将由下方的 ZoneEngineStateChange (Sleep -> Locked) 完美接管。
 }
 
 // 2. 新增：控制发生器生命周期，绝不额外消耗电量
@@ -3237,10 +3235,11 @@ static void EnsureEngineViewIsMounted() {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
             
+            // 💡 这里的状态切换才是触发息屏/亮屏动画的正统途径！
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
-        // 激活连续动画侦听（编译器有了 @interface，现在知道这是一个 double 参数的方法了）
+        // 激活连续动画侦听
         [self zone_startVirtualProgressWithDuration:duration];
     }
 }
