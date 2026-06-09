@@ -1936,7 +1936,7 @@ static NSString * GetPrefsPlistPath() {
     NSString *wpName = sender.accessibilityIdentifier;
     NSString *wpPath = [GetWallpapersDir() stringByAppendingPathComponent:wpName];
     
-   UITableViewController *vc = [[NSClassFromString(@"ZoneImageReplaceViewController") alloc] initWithStyle:UITableViewStylePlain];
+   UITableViewController *vc = [(UITableViewController *)[NSClassFromString(@"ZoneImageReplaceViewController") alloc] initWithStyle:UITableViewStylePlain];
     [vc setValue:wpName forKey:@"wallpaperName"];
     [vc setValue:wpPath forKey:@"wallpaperPath"];
     [vc setValue:^{
