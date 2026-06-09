@@ -2638,10 +2638,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)setDismissed:(BOOL)dismissed {
     %orig;
     g_isUnlocked = dismissed;
-    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
-        NSString *state = dismissed ? @"Unlock" : @"Locked";
-        ZoneEmitWallpaperState(YES, state, YES);
-    }
 }
 
 - (void)setInScreenOffMode:(BOOL)mode {
