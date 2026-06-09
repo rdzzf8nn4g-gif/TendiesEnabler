@@ -969,15 +969,6 @@ for (NSString *name in lockContents) {
 }
 
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info {
-    // 【拦截替换图片的相册返回】
-    if (self.isPickingForReplacement) {
-        UIImage *img = info[UIImagePickerControllerOriginalImage];
-        [picker dismissViewControllerAnimated:YES completion:^{
-            [self processReplacementImage:img];
-        }];
-        return;
-    }
-    
     NSURL *videoURL = info[UIImagePickerControllerMediaURL];
     [picker dismissViewControllerAnimated:YES completion:^{
         if (videoURL) [self processVideoURL:videoURL target:self.currentVideoTarget];
@@ -1493,17 +1484,6 @@ for (NSString *name in lockContents) {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
 
-    // 【拦截替换图片的文件返回】
-    if (self.isPickingForReplacement) {
-        NSURL *url = urls.firstObject;
-        [url startAccessingSecurityScopedResource];
-        NSData *data = [NSData dataWithContentsOfURL:url];
-        UIImage *img = [UIImage imageWithData:data];
-        [url stopAccessingSecurityScopedResource];
-        [self processReplacementImage:img];
-        return;
-    }
-
     if (self.isVideoMode) {
         [self processVideoURL:urls.firstObject target:self.currentVideoTarget];
         return;
@@ -2017,16 +1997,35 @@ for (NSString *name in lockContents) {
 }
 
 // =======================================================
-// =================== 替换图片引擎核心 ===================
+// ================= 独立子页面：替换图片引擎 =================
 // =======================================================
 
-- (void)openReplaceImageController:(UIButton *)sender {
-    NSString *wpName = sender.accessibilityIdentifier;
-    NSString *wpPath = [GetWallpapersDir() stringByAppendingPathComponent:wpName];
-    NSFileManager *fm = [NSFileManager defaultManager];
+@interface ZoneImageReplaceViewController : UITableViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate>
+@property (nonatomic, copy) NSString *wallpaperName;
+@property (nonatomic, copy) NSString *wallpaperPath;
+@property (nonatomic, strong) NSArray *imageFiles;
+@property (nonatomic, copy) NSString *replacingImagePath;
+@property (nonatomic, copy) void (^reloadCallback)(void);
+@end
 
-    // 递归获取内部所有可替换的图片 (排除系统缓存文件)
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:wpPath];
+@implementation ZoneImageReplaceViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = self.wallpaperName;
+    self.tableView.rowHeight = 80;
+    self.tableView.tableFooterView = [[UIView alloc] init];
+    
+    UIBarButtonItem *restoreAllBtn = [[UIBarButtonItem alloc] initWithTitle:@"全部恢复" style:UIBarButtonItemStylePlain target:self action:@selector(restoreAllImages)];
+    restoreAllBtn.tintColor = [UIColor systemRedColor];
+    self.navigationItem.rightBarButtonItem = restoreAllBtn;
+    
+    [self loadImages];
+}
+
+- (void)loadImages {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:self.wallpaperPath];
     NSMutableArray *images = [NSMutableArray array];
     NSString *sub;
     while ((sub = [enumerator nextObject])) {
@@ -2038,50 +2037,78 @@ for (NSString *name in lockContents) {
             }
         }
     }
-
-    if (images.count == 0) {
-        UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"未找到图片" message:@"该壁纸包内没有任何可以替换的图层文件。" preferredStyle:UIAlertControllerStyleAlert];
-        [errAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:errAlert animated:YES completion:nil];
-        return;
-    }
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"替换内部图层" message:[NSString stringWithFormat:@"当前壁纸: %@", wpName] preferredStyle:UIAlertControllerStyleActionSheet];
-
-    for (NSString *imgSubPath in images) {
-        NSString *fullPath = [wpPath stringByAppendingPathComponent:imgSubPath];
-        BOOL hasBackup = [fm fileExistsAtPath:[fullPath stringByAppendingString:@".bak"]];
-        NSString *title = [NSString stringWithFormat:@"%@ %@", hasBackup ? @"🟢[已改]" : @"⚪️[原图]", imgSubPath.lastPathComponent];
-
-        [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [self showOptionsForImage:fullPath hasBackup:hasBackup wallpaperName:wpName];
-        }]];
-    }
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"全部恢复默认" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [self restoreAllImagesForWallpaper:wpPath];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-
-    // 适配 iPad 防止崩溃
-    if (alert.popoverPresentationController) {
-        alert.popoverPresentationController.sourceView = sender;
-        alert.popoverPresentationController.sourceRect = sender.bounds;
-    }
-    
-    UIViewController *topVC = self.view.window.rootViewController ?: self;
-    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-    [topVC presentViewController:alert animated:YES completion:nil];
+    self.imageFiles = [images sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+    [self.tableView reloadData];
 }
 
-- (void)showOptionsForImage:(NSString *)fullPath hasBackup:(BOOL)hasBackup wallpaperName:(NSString *)wpName {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图片操作" message:fullPath.lastPathComponent preferredStyle:UIAlertControllerStyleActionSheet];
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return self.imageFiles.count;
+}
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"选图替换此层" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *CellIdentifier = @"ZoneImageCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:CellIdentifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:CellIdentifier];
+        cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
+        cell.imageView.clipsToBounds = YES;
+        cell.imageView.layer.cornerRadius = 8;
+        cell.imageView.layer.borderWidth = 0.5;
+        cell.imageView.layer.borderColor = [UIColor separatorColor].CGColor;
+    }
+    
+    NSString *imgSubPath = self.imageFiles[indexPath.row];
+    NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:imgSubPath];
+    BOOL hasBackup = [[NSFileManager defaultManager] fileExistsAtPath:[fullPath stringByAppendingString:@".bak"]];
+    
+    cell.textLabel.text = imgSubPath.lastPathComponent;
+    cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    cell.detailTextLabel.text = hasBackup ? @"🟢 已替换 (点击修改/恢复)" : @"⚪️ 原图 (点击替换)";
+    cell.detailTextLabel.textColor = hasBackup ? [UIColor systemGreenColor] : [UIColor secondaryLabelColor];
+    
+    // 【内存防泄漏】：异步提取缩略图并在后台释放上下文
+    cell.imageView.image = nil;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @autoreleasepool {
+            UIImage *img = [UIImage imageWithContentsOfFile:fullPath];
+            if (img) {
+                CGSize targetSize = CGSizeMake(60, 60);
+                UIGraphicsBeginImageContextWithOptions(targetSize, NO, [UIScreen mainScreen].scale);
+                [img drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
+                UIImage *thumb = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+                
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    UITableViewCell *updateCell = [tableView cellForRowAtIndexPath:indexPath];
+                    if (updateCell) {
+                        updateCell.imageView.image = thumb;
+                        [updateCell setNeedsLayout];
+                    }
+                });
+            }
+        }
+    });
+    
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    
+    NSString *imgSubPath = self.imageFiles[indexPath.row];
+    NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:imgSubPath];
+    BOOL hasBackup = [[NSFileManager defaultManager] fileExistsAtPath:[fullPath stringByAppendingString:@".bak"]];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图片操作" message:imgSubPath.lastPathComponent preferredStyle:UIAlertControllerStyleActionSheet];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"选图替换此层 (相册)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         self.replacingImagePath = fullPath;
-        self.replacingWallpaperName = wpName;
-        self.isPickingForReplacement = YES;
-        [self showImageSourcePickerForReplacement];
+        [self showPickerWithSourceType:UIImagePickerControllerSourceTypePhotoLibrary];
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"选图替换此层 (文件)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        self.replacingImagePath = fullPath;
+        [self showDocumentPicker];
     }]];
 
     if (hasBackup) {
@@ -2089,112 +2116,123 @@ for (NSString *name in lockContents) {
             NSFileManager *fm = [NSFileManager defaultManager];
             [fm removeItemAtPath:fullPath error:nil];
             [fm moveItemAtPath:[fullPath stringByAppendingString:@".bak"] toPath:fullPath error:nil];
-            [self notifyEngineToReload];
+            [self loadImages];
+            if (self.reloadCallback) self.reloadCallback();
         }]];
     }
 
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     
-    UIViewController *topVC = self.view.window.rootViewController ?: self;
-    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-    [topVC presentViewController:alert animated:YES completion:nil];
+    if (alert.popoverPresentationController) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        alert.popoverPresentationController.sourceView = cell;
+        alert.popoverPresentationController.sourceRect = cell.bounds;
+    }
+    
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)showImageSourcePickerForReplacement {
-    UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"选择新图片" message:@"所选图片将被强制拉伸/压缩至原图的绝对尺寸，防止组件错位崩溃。" preferredStyle:UIAlertControllerStyleActionSheet];
-    
-    [menu addAction:[UIAlertAction actionWithTitle:@"从相册选择" style:UIAlertActionStyleDefault handler:^(id action) {
-        UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+- (void)showPickerWithSourceType:(UIImagePickerControllerSourceType)type {
+    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+    picker.delegate = self;
+    picker.sourceType = type;
+    picker.mediaTypes = @[@"public.image"];
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)showDocumentPicker {
+    if (@available(iOS 14.0, *)) {
+        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[[UTType typeWithIdentifier:@"public.image"]]];
         picker.delegate = self;
-        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-        picker.mediaTypes = @[@"public.image"];
-        
-        UIViewController *topVC = self.view.window.rootViewController ?: self;
-        while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-        [topVC presentViewController:picker animated:YES completion:nil];
-    }]];
-    
-    [menu addAction:[UIAlertAction actionWithTitle:@"从文件选择" style:UIAlertActionStyleDefault handler:^(id action) {
-        if (@available(iOS 14.0, *)) {
-            UTType *imageType = [UTType typeWithIdentifier:@"public.image"];
-            UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[imageType]];
-            picker.delegate = self;
-            picker.allowsMultipleSelection = NO;
-            
-            UIViewController *topVC = self.view.window.rootViewController ?: self;
-            while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-            [topVC presentViewController:picker animated:YES completion:nil];
-        }
-    }]];
-    
-    [menu addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(id action){
-        self.isPickingForReplacement = NO;
-    }]];
-    
-    UIViewController *topVC = self.view.window.rootViewController ?: self;
-    while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-    [topVC presentViewController:menu animated:YES completion:nil];
+        picker.allowsMultipleSelection = NO;
+        [self presentViewController:picker animated:YES completion:nil];
+    }
+}
+
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info {
+    UIImage *img = info[UIImagePickerControllerOriginalImage];
+    [picker dismissViewControllerAnimated:YES completion:^{
+        [self processReplacementImage:img];
+    }];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count == 0) return;
+    NSURL *url = urls.firstObject;
+    [url startAccessingSecurityScopedResource];
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    UIImage *img = [UIImage imageWithData:data];
+    [url stopAccessingSecurityScopedResource];
+    [self processReplacementImage:img];
 }
 
 - (void)processReplacementImage:(UIImage *)pickedImage {
-    if (!pickedImage || !self.replacingImagePath) {
-        self.isPickingForReplacement = NO;
-        return;
-    }
+    if (!pickedImage || !self.replacingImagePath) return;
 
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *backupPath = [self.replacingImagePath stringByAppendingString:@".bak"];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在裁剪并替换..." message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:loadingAlert animated:YES completion:^{
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+            @autoreleasepool {
+                NSFileManager *fm = [NSFileManager defaultManager];
+                NSString *backupPath = [self.replacingImagePath stringByAppendingString:@".bak"];
 
-    // 【1】抓取原图的绝对尺寸 (核心安全机制，防卡死)
-    UIImage *originalImage = [UIImage imageWithContentsOfFile:self.replacingImagePath];
-    if (!originalImage) {
-        self.isPickingForReplacement = NO;
-        return;
-    }
-    CGSize targetSize = originalImage.size;
+                UIImage *originalImage = [UIImage imageWithContentsOfFile:self.replacingImagePath];
+                if (originalImage) {
+                    CGSize targetSize = originalImage.size;
 
-    // 【2】备份原图 (如果没有备份过)
-    if (![fm fileExistsAtPath:backupPath]) {
-        [fm copyItemAtPath:self.replacingImagePath toPath:backupPath error:nil];
-    }
+                    // 备份原图
+                    if (![fm fileExistsAtPath:backupPath]) {
+                        [fm copyItemAtPath:self.replacingImagePath toPath:backupPath error:nil];
+                    }
 
-    // 【3】强制缩放所选图片到原图绝对像素
-    UIGraphicsBeginImageContextWithOptions(targetSize, NO, 1.0);
-    [pickedImage drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
-    UIImage *resizedImage = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
+                    // 强制拉伸缩放
+                    UIGraphicsBeginImageContextWithOptions(targetSize, NO, 1.0);
+                    [pickedImage drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
+                    UIImage *resizedImage = UIGraphicsGetImageFromCurrentImageContext();
+                    UIGraphicsEndImageContext();
 
-    // 【4】覆盖写入沙盒
-    NSString *ext = self.replacingImagePath.pathExtension.lowercaseString;
-    NSData *data = nil;
-    if ([ext isEqualToString:@"png"]) {
-        data = UIImagePNGRepresentation(resizedImage);
-    } else {
-        data = UIImageJPEGRepresentation(resizedImage, 1.0);
-    }
+                    // 覆盖写入
+                    NSString *ext = self.replacingImagePath.pathExtension.lowercaseString;
+                    NSData *data = nil;
+                    if ([ext isEqualToString:@"png"]) {
+                        data = UIImagePNGRepresentation(resizedImage);
+                    } else {
+                        data = UIImageJPEGRepresentation(resizedImage, 1.0);
+                    }
 
-    if (data) {
-        [data writeToFile:self.replacingImagePath atomically:YES];
-        chown(self.replacingImagePath.UTF8String, 501, 501);
-        chmod(self.replacingImagePath.UTF8String, 0777);
-        [self notifyEngineToReload];
-    }
-
-    self.isPickingForReplacement = NO;
-    self.replacingImagePath = nil;
-    self.replacingWallpaperName = nil;
+                    if (data) {
+                        [data writeToFile:self.replacingImagePath atomically:YES];
+                        chown(self.replacingImagePath.UTF8String, 501, 501);
+                        chmod(self.replacingImagePath.UTF8String, 0777);
+                    }
+                }
+            }
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [loadingAlert dismissViewControllerAnimated:YES completion:^{
+                    [self loadImages];
+                    if (self.reloadCallback) self.reloadCallback();
+                    self.replacingImagePath = nil;
+                }];
+            });
+        });
+    }];
 }
 
-- (void)restoreAllImagesForWallpaper:(NSString *)wpPath {
+- (void)restoreAllImages {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:wpPath];
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:self.wallpaperPath];
     NSString *sub;
     BOOL didRestore = NO;
     
     while ((sub = [enumerator nextObject])) {
         if ([sub hasSuffix:@".bak"]) {
-            NSString *backupFullPath = [wpPath stringByAppendingPathComponent:sub];
-            NSString *originalFullPath = [backupFullPath substringToIndex:backupFullPath.length - 4]; // 切掉.bak
+            NSString *backupFullPath = [self.wallpaperPath stringByAppendingPathComponent:sub];
+            NSString *originalFullPath = [backupFullPath substringToIndex:backupFullPath.length - 4];
             [fm removeItemAtPath:originalFullPath error:nil];
             [fm moveItemAtPath:backupFullPath toPath:originalFullPath error:nil];
             didRestore = YES;
@@ -2202,20 +2240,36 @@ for (NSString *name in lockContents) {
     }
     
     if (didRestore) {
-        [self notifyEngineToReload];
+        [self loadImages];
+        if (self.reloadCallback) self.reloadCallback();
     } else {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"该壁纸包没有被替换过任何图片，已经是默认状态。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel handler:nil]];
-        UIViewController *topVC = self.view.window.rootViewController ?: self;
-        while (topVC.presentedViewController) { topVC = topVC.presentedViewController; }
-        [topVC presentViewController:alert animated:YES completion:nil];
+        [self presentViewController:alert animated:YES completion:nil];
     }
 }
+@end
 
-- (void)notifyEngineToReload {
-    // 强制发送通知，让锁屏 .x 代码销毁重建 CA Layer 从而读取新图片
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    [self reloadSpecifiers];
+// =======================================================
+// 主列表调用入口 (挂载在新页面)
+// =======================================================
+- (void)openReplaceImageController:(UIButton *)sender {
+    NSString *wpName = sender.accessibilityIdentifier;
+    NSString *wpPath = [GetWallpapersDir() stringByAppendingPathComponent:wpName];
+    
+    ZoneImageReplaceViewController *vc = [[ZoneImageReplaceViewController alloc] initWithStyle:UITableViewStylePlain];
+    vc.wallpaperName = wpName;
+    vc.wallpaperPath = wpPath;
+    vc.reloadCallback = ^{
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    };
+    
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 @end
