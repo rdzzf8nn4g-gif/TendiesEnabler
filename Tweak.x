@@ -324,6 +324,7 @@ static BOOL ZoneIsDeviceUnlocked() {
 
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
+static inline void ZoneClearPendingAODWallpaperState(void);
 
 static inline void ZoneSetAODScreenState(BOOL screenOn) {
     BOOL wasScreenOn = g_isScreenOn;
