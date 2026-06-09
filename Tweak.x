@@ -2548,23 +2548,6 @@ static void EnsureEngineViewIsMounted() {
             g_portalView = portalView;
         }
 
-// ------------------ 新增：注入真正的防穿透毛玻璃 ------------------
-        UIVisualEffectView *blurView = objc_getAssociatedObject(self, "ZoneBlurView");
-        if (!blurView) {
-            // 这里可以选风格：UIBlurEffectStyleDark(深色毛玻璃) 或 UIBlurEffectStyleRegular(随系统深浅色的毛玻璃)
-            UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]; 
-            blurView = [[UIVisualEffectView alloc] initWithEffect:effect];
-            blurView.userInteractionEnabled = NO; // 不阻挡手势
-            objc_setAssociatedObject(self, "ZoneBlurView", blurView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        
-        // 确保毛玻璃永远垫底，且和屏幕一样大
-        if (blurView.superview != self.view) {
-            [self.view insertSubview:blurView atIndex:0]; // 塞在最底层
-        }
-        blurView.frame = self.view.bounds;
-        // --------------------------------------------------------------
-
         if (sourceForPortal && portalView.sourceView != sourceForPortal && !freezeAODLayout) {
             portalView.sourceView = sourceForPortal; 
         } else if (sourceForPortal && !portalView.sourceView) {
@@ -2619,10 +2602,10 @@ static void EnsureEngineViewIsMounted() {
             }
         } else {
             if (portalView.superview != self.view) {
-                // 确保传送门永远插在毛玻璃的上面
-                [self.view insertSubview:portalView aboveSubview:objc_getAssociatedObject(self, "ZoneBlurView")];
+                [self.view insertSubview:portalView atIndex:0];
             }
             portalView.frame = self.view.bounds;
+            [self.view sendSubviewToBack:portalView];
         }
 
         if (!freezeAODLayout) {
@@ -3117,11 +3100,14 @@ static void EnsureEngineViewIsMounted() {
                     }
                 }
             }
-        // ✅ 正确的代码：
         } else {
             if (portalView.superview != self.view) {
-                // 确保传送门永远插在毛玻璃的上面
-                [self.view insertSubview:portalView aboveSubview:objc_getAssociatedObject(self, "ZoneBlurView")];
+                [self.view insertSubview:portalView atIndex:0];
+            } else {
+                NSInteger index = [self.view.subviews indexOfObject:portalView];
+                if (index != 0) {
+                    [self.view sendSubviewToBack:portalView];
+                }
             }
             portalView.frame = self.view.bounds;
         }
