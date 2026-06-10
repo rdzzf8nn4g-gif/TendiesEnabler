@@ -3253,8 +3253,14 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
 %new
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
-    double progress = [[self valueForKey:@"backlightFactor"] doubleValue];
-    progress = MAX(0.0, MIN(1.0, progress));
+    
+    // 获取真实硬件背光亮度 (1.0 = 屏幕最亮, 0.0 = 纯黑)
+    double backlight = [[self valueForKey:@"backlightFactor"] doubleValue];
+    backlight = MAX(0.0, MIN(1.0, backlight));
+    
+    // 🚨 【核心修复】：将背光值反转为 AOD 渐变进度！
+    // 因为原公式期望的是：0.0=完全亮起，1.0=彻底息屏。
+    double aodProgress = 1.0 - backlight; 
     
     if (g_portalView) {
         if (g_isVideoMode) {
@@ -3268,12 +3274,13 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             double alpha = 0.0;
-            if (progress > 0.7) {
-                alpha = (1.0 - progress) * (0.05 / 0.3);
-            } else if (progress > 0.6) {
-                alpha = 0.05 + (0.7 - progress) * 1.0; 
+            // 现在的 aodProgress 在亮屏时是 0.0，代入公式后 alpha 会完美计算为 1.0（不透明）
+            if (aodProgress > 0.7) {
+                alpha = (1.0 - aodProgress) * (0.05 / 0.3);
+            } else if (aodProgress > 0.6) {
+                alpha = 0.05 + (0.7 - aodProgress) * 1.0; 
             } else {
-                alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
+                alpha = 0.15 + ((0.6 - aodProgress) / 0.6) * 0.85;
             }
             g_portalView.alpha = MAX(0.0, MIN(1.0, alpha));
             [CATransaction commit];
