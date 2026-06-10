@@ -325,11 +325,6 @@ static BOOL ZoneIsDeviceUnlocked() {
 
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
 
-// ==========================================
-// 提前声明函数，解决编译器的 "implicit declaration" 报错
-// ==========================================
-static inline void ZoneFlushPendingAODWallpaperState(void);
-
 static inline void ZoneSetAODScreenState(BOOL screenOn) {
     BOOL wasScreenOn = g_isScreenOn;
     BOOL wasAODInactive = g_isAODInactive;
@@ -341,14 +336,6 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
         g_lastSystemProgress = -1.0;
         if (!wasScreenOn && wasAODInactive) {
             g_deferAODWakeWallpaperState = YES;
-            
-            // 🚨 【核心修复】：为未开启 AOD 的设备添加超时安全锁！
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (g_deferAODWakeWallpaperState && g_isScreenOn) {
-                    g_deferAODWakeWallpaperState = NO;
-                    ZoneFlushPendingAODWallpaperState(); // 现在编译器认识它了！
-                }
-            });
         }
     } else {
         g_forceAcceptNextSystemProgress = NO;
@@ -1862,21 +1849,19 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
 }
 
 // ========================================================
-// 【全天候终极修复】：脱离主线程 CPU 束缚，使用 GPU 硬件级原生动画渲染
-// 完美穿透 AOD 降频锁死机制，无论开不开 AOD 均丝滑播放！
+// 【全天候终极修复】：完全脱离 CAAnimation 的纯手写逐帧插值引擎
 // ========================================================
 - (void)startManualDisplayLinkTransitionToState:(NSString *)stateName isDark:(BOOL)isDark {
     if (self.manualAnimLink) { [self.manualAnimLink invalidate]; self.manualAnimLink = nil; }
     self.manualAnimTasks = [NSMutableArray array];
     self.manualTargetState = stateName;
     self.manualIsDark = isDark;
-    self.isAnimatingState = YES;
     
     NSString *realBgState = [self.bgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFloatState = [self.floatParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     NSString *realFgState = [self.fgParser resolveRealStateNameFor:stateName isDark:isDark] ?: stateName;
     
-    void (^applyNativeAnim)(ZoneCAMLParserEnhanced *, NSDictionary *, NSString *) = ^(ZoneCAMLParserEnhanced *parser, NSDictionary *layerMap, NSString *realState) {
+    void (^buildTasks)(ZoneCAMLParserEnhanced *, NSDictionary *, NSString *) = ^(ZoneCAMLParserEnhanced *parser, NSDictionary *layerMap, NSString *realState) {
         if (!parser || layerMap.count == 0) return;
         for (NSString *targetId in parser.statesData) {
             CALayer *layer = layerMap[targetId]; if (!layer) continue;
@@ -1885,51 +1870,59 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
             
             for (NSString *keyPath in targetVals) {
                 id endVal = targetVals[keyPath];
-                // 优先读取正在展现层的即时数值，确保打断不生硬
+                // 抓取动画开始时的当前真实呈现值(Presentation Layer)，解决半路打断反弹问题
                 id startVal = [[layer presentationLayer] ?: layer valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
                 
                 if (startVal && endVal) {
-                    [layer removeAnimationForKey:keyPath]; 
-                    
-                    // 🚨 【核心降维打击】：生成底层 CABasicAnimation，移交硬件接管！
-                    // CoreAnimation 底层原生支持 "position.x" 和 "bounds.size.width" 这种路径
-                    CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:keyPath];
-                    anim.fromValue = startVal;
-                    anim.toValue = endVal;
-                    anim.duration = (g_animDuration > 0) ? g_animDuration : 0.85;
-                    anim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-                    anim.fillMode = kCAFillModeForwards;
-                    anim.removedOnCompletion = YES; // 动画结束后由下方的 KVC 同步接管
-                    
-                    [layer addAnimation:anim forKey:keyPath];
-                    
-                    // 必须同步修改模型树，防止动画播放结束的一瞬间弹回起点
-                    ZoneSafeSetLayerKVC(layer, keyPath, endVal);
-                    
-                    // 把修改过的图层装进数组，供随时打断使用
-                    [self.manualAnimTasks addObject:@{ @"layer": layer, @"keyPath": keyPath }];
+                    [layer removeAnimationForKey:keyPath]; // 瞬间杀掉系统原生 CAAnimation
+                    [self.manualAnimTasks addObject:@{ @"layer": layer, @"keyPath": keyPath, @"start": startVal, @"end": endVal }];
                 }
             }
         }
     };
     
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    applyNativeAnim(self.bgParser, self.bgLayerMap, realBgState);
-    applyNativeAnim(self.floatParser, self.floatLayerMap, realFloatState);
-    applyNativeAnim(self.fgParser, self.fgLayerMap, realFgState);
-    [CATransaction commit];
+    buildTasks(self.bgParser, self.bgLayerMap, realBgState);
+    buildTasks(self.floatParser, self.floatLayerMap, realFloatState);
+    buildTasks(self.fgParser, self.fgLayerMap, realFgState);
     
-    // 动画结束后清理标记
-    double duration = (g_animDuration > 0) ? g_animDuration : 0.85;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        self.isAnimatingState = NO;
-        self.manualAnimTasks = nil;
-    });
+    if (self.manualAnimTasks.count > 0) {
+        self.manualAnimStartTime = CACurrentMediaTime();
+        self.manualAnimLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(manualTick:)];
+        [self.manualAnimLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    } else {
+        [self completeManualTransition];
+    }
 }
 
 - (void)manualTick:(CADisplayLink *)link {
-    // 【已废弃】：原主线程逐帧引擎已被上方 CABasicAnimation 硬件替代，彻底解放 CPU
+    double duration = (g_animDuration > 0) ? g_animDuration : 0.85;
+    double progress = (CACurrentMediaTime() - self.manualAnimStartTime) / duration;
+    if (progress >= 1.0) progress = 1.0;
+    
+    // 模拟苹果原生的 EaseInOut 缓动曲线
+    double easedProgress = progress * progress * (3.0 - 2.0 * progress);
+    
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (NSDictionary *task in self.manualAnimTasks) {
+        CALayer *layer = task[@"layer"];
+        NSString *keyPath = task[@"keyPath"];
+        id startVal = task[@"start"];
+        id endVal = task[@"end"];
+        
+        if ([startVal isKindOfClass:[NSNumber class]] && [endVal isKindOfClass:[NSNumber class]]) {
+            double s = [startVal doubleValue];
+            double e = [endVal doubleValue];
+            ZoneSafeSetLayerKVC(layer, keyPath, @(s + (e - s) * easedProgress));
+        } else if ([startVal isKindOfClass:[NSValue class]] && [endVal isKindOfClass:[NSValue class]]) {
+            CGPoint s = [startVal CGPointValue];
+            CGPoint e = [endVal CGPointValue];
+            ZoneSafeSetLayerKVC(layer, keyPath, [NSValue valueWithCGPoint:CGPointMake(s.x + (e.x - s.x) * easedProgress, s.y + (e.y - s.y) * easedProgress)]);
+        }
+    }
+    [CATransaction commit];
+    
+    if (progress >= 1.0) [self completeManualTransition];
 }
 
 - (void)completeManualTransition {
@@ -1945,13 +1938,10 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
         for (NSDictionary *task in finishedTasks) {
             CALayer *layer = task[@"layer"];
             NSString *keyPath = task[@"keyPath"];
-            if (layer && keyPath) {
-                // 【丝滑打断】：如果手指滑动，瞬间抓取硬件正在渲染的中间值，无缝悬停！
-                id presVal = [[layer presentationLayer] valueForKeyPath:keyPath];
+            id endVal = task[@"end"];
+            if (layer && keyPath && endVal) {
                 [layer removeAnimationForKey:keyPath];
-                if (presVal) {
-                    ZoneSafeSetLayerKVC(layer, keyPath, presVal);
-                }
+                ZoneSafeSetLayerKVC(layer, keyPath, endVal);
             }
         }
         [CATransaction commit];
@@ -3263,14 +3253,8 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
 %new
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
-    
-    // 获取真实硬件背光亮度 (1.0 = 屏幕最亮, 0.0 = 纯黑)
-    double backlight = [[self valueForKey:@"backlightFactor"] doubleValue];
-    backlight = MAX(0.0, MIN(1.0, backlight));
-    
-    // 🚨 【核心修复】：将背光值反转为 AOD 渐变进度！
-    // 因为原公式期望的是：0.0=完全亮起，1.0=彻底息屏。
-    double aodProgress = 1.0 - backlight; 
+    double progress = [[self valueForKey:@"backlightFactor"] doubleValue];
+    progress = MAX(0.0, MIN(1.0, progress));
     
     if (g_portalView) {
         if (g_isVideoMode) {
@@ -3284,13 +3268,12 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             double alpha = 0.0;
-            // 现在的 aodProgress 在亮屏时是 0.0，代入公式后 alpha 会完美计算为 1.0（不透明）
-            if (aodProgress > 0.7) {
-                alpha = (1.0 - aodProgress) * (0.05 / 0.3);
-            } else if (aodProgress > 0.6) {
-                alpha = 0.05 + (0.7 - aodProgress) * 1.0; 
+            if (progress > 0.7) {
+                alpha = (1.0 - progress) * (0.05 / 0.3);
+            } else if (progress > 0.6) {
+                alpha = 0.05 + (0.7 - progress) * 1.0; 
             } else {
-                alpha = 0.15 + ((0.6 - aodProgress) / 0.6) * 0.85;
+                alpha = 0.15 + ((0.6 - progress) / 0.6) * 0.85;
             }
             g_portalView.alpha = MAX(0.0, MIN(1.0, alpha));
             [CATransaction commit];
