@@ -642,10 +642,6 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (void)cycleAnimSpeed:(UIButton *)sender {
-    if (@available(iOS 16.0, *)) {
-    } else {
-        return;
-    }
     NSString *name = sender.accessibilityIdentifier;
     if (!name) return;
     
@@ -799,14 +795,12 @@ static NSString * GetPrefsPlistPath() {
             replaceImageSpec->action = @selector(setReplaceImageEnableValue:specifier:);
             [mutRoot insertObject:replaceImageSpec atIndex:baseInsertIndex + 1];
 
-            if (@available(iOS 16.0, *)) {
-                PSSpecifier *animSpec = [PSSpecifier preferenceSpecifierNamed:@"动画速度" target:self set:@selector(setAnimEnableValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
-                [animSpec setProperty:@"EnableAnimSpeed" forKey:@"key"];
-                [animSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
-                [animSpec setProperty:@YES forKey:@"default"];
-                animSpec->action = @selector(setAnimEnableValue:specifier:);
-                [mutRoot insertObject:animSpec atIndex:baseInsertIndex + 2]; 
-            }
+            PSSpecifier *animSpec = [PSSpecifier preferenceSpecifierNamed:@"动画速度" target:self set:@selector(setAnimEnableValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+            [animSpec setProperty:@"EnableAnimSpeed" forKey:@"key"];
+            [animSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+            [animSpec setProperty:@YES forKey:@"default"];
+            animSpec->action = @selector(setAnimEnableValue:specifier:);
+            [mutRoot insertObject:animSpec atIndex:baseInsertIndex + 2];
 
             rootSpecs = mutRoot;
         }
@@ -1275,10 +1269,8 @@ static NSString * GetPrefsPlistPath() {
             cell.textLabel.textColor = [UIColor labelColor];
         }
         
-        BOOL isAnimEnabled = NO;
-        if (@available(iOS 16.0, *)) {
-            isAnimEnabled = prefs[@"EnableAnimSpeed"] ? [prefs[@"EnableAnimSpeed"] boolValue] : YES;
-        }
+        // 全版本直接读取开关状态，默认开启
+        BOOL isAnimEnabled = prefs[@"EnableAnimSpeed"] ? [prefs[@"EnableAnimSpeed"] boolValue] : YES;
         BOOL isReplaceEnabled = prefs[@"EnableReplaceImage"] ? [prefs[@"EnableReplaceImage"] boolValue] : NO;
         
         CGFloat targetAccWidth = 140;
