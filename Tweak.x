@@ -3161,20 +3161,31 @@ static void EnsureEngineViewIsMounted() {
 @end
 
 // ==========================================
-// iOS 14-15 专属状态判定器
+// iOS 14-15 专属状态判定器 (竞态条件绝杀版)
 // ==========================================
 static inline NSString* ZoneGetTargetWakeState_iOS14() {
+    BOOL isCoverSheetEffectivelyVisible = YES; // 默认假设被锁屏盖住
+    
     Class csManagerClass = NSClassFromString(@"SBCoverSheetPresentationManager");
     if ([csManagerClass respondsToSelector:@selector(sharedInstance)]) {
         id manager = [csManagerClass performSelector:@selector(sharedInstance)];
         if (manager) {
-            BOOL isVisible = [[manager valueForKey:@"isVisible"] boolValue];
-            if (isVisible) {
-                return @"Locked"; 
+            // 【神来之笔】：完美过滤掉“正在解锁/正在退场”的瞬间
+            if ([manager respondsToSelector:@selector(isVisibleAndNotDisappearing)]) {
+                // 使用 KVC 动态获取，防止任何编译报错，并且 Foundation 会安全处理 BOOL 转换
+                isCoverSheetEffectivelyVisible = [[manager valueForKey:@"isVisibleAndNotDisappearing"] boolValue];
+            } else {
+                isCoverSheetEffectivelyVisible = [[manager valueForKey:@"isVisible"] boolValue];
             }
         }
     }
-    return g_isUnlocked ? @"Unlock" : @"Locked";
+    
+    // 如果锁屏没显示（或者正在向上退场消失），且底层设备认证已经解锁，那绝对是桌面！
+    if (!isCoverSheetEffectivelyVisible && ZoneIsDeviceUnlocked()) {
+        return @"Unlock";
+    }
+    
+    return @"Locked";
 }
 
 %hook SBBacklightController
