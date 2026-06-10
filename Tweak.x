@@ -1150,15 +1150,38 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     
-    //  【核心修复：桌面息屏去动画】 
+    // 【终极修复：全版本桌面息屏防闪烁】 
     if ([stateName isEqualToString:@"Sleep"]) {
-        // 如果当前是桌面状态，或者刚按下电源键导致正在向锁屏过渡，强行关掉动画
-        if ([self.currentState isEqualToString:@"Unlock"] || 
-            (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"])) {
-            animated = NO;
+        if ([self.currentState isEqualToString:@"Unlock"]) {
+            // 如果当前是桌面，绝不立刻切 AOD 睡眠图！保持桌面画面自然随背光变黑
+            self.currentState = @"Sleep";
+            double delay = (g_animDuration > 0 ? g_animDuration : 0.85);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                // 等屏幕彻底黑透了，再在黑暗中神不知鬼不觉地切到 Sleep 状态
+                if (!g_isScreenOn || g_isAODInactive) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+                    
+                    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+                        [self.bgView setState:@"Sleep" animated:NO]; 
+                        [self.floatingView setState:@"Sleep" animated:NO]; 
+                        [self.fgView setState:@"Sleep" animated:NO];
+                    } else {
+                        [self.bgView setState:@"Sleep"]; 
+                        [self.floatingView setState:@"Sleep"]; 
+                        [self.fgView setState:@"Sleep"];
+                    }
+                    [CATransaction commit];
+                }
+            });
+            return; // 拦截执行，下方的即时切换不再触发
+        } else if (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"]) {
+            animated = NO; // 刚按下点亮又马上息屏，强行去动画防残影
         }
     }
-    //  核心修复结束 
 
     self.currentState = [stateName copy];
     
@@ -1956,16 +1979,45 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     
-    //  【核心修复：桌面息屏去动画】 
+    // 【终极修复：全版本桌面息屏防闪烁】 
     if ([stateName isEqualToString:@"Sleep"]) {
-        // 如果当前是桌面状态，或者刚按下电源键导致正在向锁屏过渡，强行关掉动画
-        if ([self.currentState isEqualToString:@"Unlock"] || 
-            (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"])) {
+        if ([self.currentState isEqualToString:@"Unlock"]) {
+            self.currentState = @"Sleep";
+            [self completeManualTransition]; // 杀掉可能存在的残余手写动画
+            
+            BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+            NSString *realBgState = [self.bgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+            NSString *realFloatState = [self.floatParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+            NSString *realFgState = [self.fgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+            
+            double delay = (g_animDuration > 0 ? g_animDuration : 0.85);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!g_isScreenOn || g_isAODInactive) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+                    
+                    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+                        [self.bgView setState:realBgState animated:NO]; 
+                        [self.floatingView setState:realFloatState animated:NO]; 
+                        [self.fgView setState:realFgState animated:NO];
+                    } else {
+                        [self.bgView setState:realBgState]; 
+                        [self.floatingView setState:realFloatState]; 
+                        [self.fgView setState:realFgState];
+                    }
+                    [CATransaction commit];
+                }
+            });
+            return;
+        } else if (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"]) {
             animated = NO;
-            [self completeManualTransition]; // 瞬间干掉正在播放的残余手写动画
+            [self completeManualTransition];
         }
     }
-    //  核心修复结束 
+    
     self.currentState = [stateName copy];
 
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -1978,8 +2030,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (animated) {
         self.animationGeneration++;
         self.isAnimatingState = YES;
-        // 【核心劫持】：一旦需要动画，启动纯手写逐帧渲染
-        // 全天候 AOD 再也杀不掉你的动画了！它和正常开息屏视觉效果一模一样！
         [self startManualDisplayLinkTransitionToState:stateName isDark:isDark];
     } else {
         if ([stateName isEqualToString:@"Unlock"]) {
@@ -1997,7 +2047,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
             [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
             [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
         }
-    } // 【修复】：在这里提前闭合 else 分支，让下方的原生指令作为全天候兜底强制执行
+    } 
     
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -3161,26 +3211,22 @@ static void EnsureEngineViewIsMounted() {
 @end
 
 // ==========================================
-// iOS 14-15 专属状态判定器 (竞态条件绝杀版)
+// iOS 14-15 专属状态判定器
 // ==========================================
 static inline NSString* ZoneGetTargetWakeState_iOS14() {
-    BOOL isCoverSheetEffectivelyVisible = YES; // 默认假设被锁屏盖住
-    
+    BOOL isCoverSheetVisible = YES;
     Class csManagerClass = NSClassFromString(@"SBCoverSheetPresentationManager");
     if ([csManagerClass respondsToSelector:@selector(sharedInstance)]) {
         id manager = [csManagerClass performSelector:@selector(sharedInstance)];
         if (manager) {
-            // 完美过滤掉“正在解锁/正在退场”的瞬间
             if ([manager respondsToSelector:@selector(isVisibleAndNotDisappearing)]) {
-                isCoverSheetEffectivelyVisible = [[manager valueForKey:@"isVisibleAndNotDisappearing"] boolValue];
+                isCoverSheetVisible = [[manager valueForKey:@"isVisibleAndNotDisappearing"] boolValue];
             } else {
-                isCoverSheetEffectivelyVisible = [[manager valueForKey:@"isVisible"] boolValue];
+                isCoverSheetVisible = [[manager valueForKey:@"isVisible"] boolValue];
             }
         }
     }
-    
-    // 只有当锁屏彻底不显示，且底层设备已解锁，才是真正的桌面
-    if (!isCoverSheetEffectivelyVisible && ZoneIsDeviceUnlocked()) {
+    if (!isCoverSheetVisible && ZoneIsDeviceUnlocked()) {
         return @"Unlock";
     }
     return @"Locked";
@@ -3188,15 +3234,12 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
 
 %hook SBBacklightController
 
-// 1. 虚拟背光进度发生器（🚨 已彻底移除造成 Bug 的 ZoneEngineProgress 发送代码！）
 %new
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
-    
     double progress = [[self valueForKey:@"backlightFactor"] doubleValue];
     progress = MAX(0.0, MIN(1.0, progress));
     
-    // 现在这个 Tick 只专注于管理黑屏遮罩的过渡，绝不越权干涉引擎动画
     if (g_portalView) {
         if (g_isVideoMode) {
             if (g_portalView.alpha != 1.0) {
@@ -3222,7 +3265,6 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
     }
 }
 
-// 2. 控制发生器生命周期
 %new
 - (void)zone_startVirtualProgressWithDuration:(double)duration {
     if (!g_enabled) return;
@@ -3240,7 +3282,6 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
     });
 }
 
-// 3. 拦截带动画的背光调整 (按电源键息屏/亮屏的核心)
 - (void)animateBacklightToFactor:(float)factor duration:(double)duration source:(long long)source completion:(id /* block */)completion {
     %orig;
     if (g_enabled) {
@@ -3255,32 +3296,14 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
             
-            NSString *currentState = ZoneGetTargetWakeState_iOS14();
-            
-            if (screenOn) {
-                // 亮屏：精准推入目标状态，不再受亮度值干扰
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": currentState, @"animated": @YES}];
-            } else {
-                // 息屏
-                if ([currentState isEqualToString:@"Unlock"]) {
-                    // 【绝杀修复】：桌面息屏时，引擎维持 Unlock 原状，绝不立刻切换 Sleep 导致闪图。
-                    // 仅当屏幕（背光）彻底黑透后，再在黑暗中悄悄切回 Sleep 就绪。
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        if (!g_isScreenOn) {
-                            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @NO}];
-                        }
-                    });
-                } else {
-                    // 锁屏息屏：正常播放渐黑动画
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @YES}];
-                }
-            }
+            // 引擎已有免疫力，这里如实发送系统指令即可
+            NSString *zoneState = screenOn ? ZoneGetTargetWakeState_iOS14() : @"Sleep";
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
         }
         [self zone_startVirtualProgressWithDuration:duration];
     }
 }
 
-// 4. 拦截瞬间的背光调整
 - (void)setBacklightFactor:(float)factor source:(long long)source {
     %orig;
     if (g_enabled) {
@@ -3295,26 +3318,12 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
             
-            NSString *currentState = ZoneGetTargetWakeState_iOS14();
-            
-            if (screenOn) {
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": currentState, @"animated": @NO}];
-            } else {
-                if ([currentState isEqualToString:@"Unlock"]) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        if (!g_isScreenOn) {
-                            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @NO}];
-                        }
-                    });
-                } else {
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @NO}];
-                }
-            }
+            NSString *zoneState = screenOn ? ZoneGetTargetWakeState_iOS14() : @"Sleep";
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @NO}];
         }
         [self zone_startVirtualProgressWithDuration:0.0];
     }
 }
-
 %end
 
 %end // 结束 iOS14_15
