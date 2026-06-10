@@ -977,6 +977,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
     
+    // 🛡️【百分百绝对防御之墙】🛡️
+    // 只要系统处于黑屏或 AOD 状态，任何企图唤醒壁纸的“内鬼通知”(0.3秒延迟等) 统统被拦截丢弃！
+    if (!g_isScreenOn || g_isAODInactive) {
+        if (![state isEqualToString:@"Sleep"]) {
+            return; // 强行拉黑，绝不放行！
+        }
+    }
+    
     if (state) {
         [self transitionToState:state animated:animated];
     }
@@ -1634,6 +1642,14 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     NSString *state = note.userInfo[@"state"];
     NSNumber *animNum = note.userInfo[@"animated"];
     BOOL animated = animNum ? [animNum boolValue] : YES;
+    
+    // 🛡️【百分百绝对防御之墙】🛡️
+    // 保护 AOD 息屏图不被 0.3 秒后的系统级清理动画破坏
+    if (!g_isScreenOn || g_isAODInactive) {
+        if (![state isEqualToString:@"Sleep"]) {
+            return; // 强行拉黑，绝不放行！
+        }
+    }
     
     if (state) {
         [self transitionToState:state animated:animated];
@@ -3348,8 +3364,9 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
 - (void)updateWakeEffectsForWake:(BOOL)wake animated:(BOOL)animated completion:(id)completion {
     %orig;
     if (g_enabled) {
+        // 【修复】：不再直接暴力广播通知，而是使用自带状态缓冲队列的 ZoneEmit 发射器
         NSString *state = wake ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": state, @"animated": @(animated)}];
+        ZoneEmitWallpaperState(wake, state, animated);
     }
 }
 %end
