@@ -336,6 +336,15 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
         g_lastSystemProgress = -1.0;
         if (!wasScreenOn && wasAODInactive) {
             g_deferAODWakeWallpaperState = YES;
+            
+            // 🚨 【核心修复】：为未开启 AOD 的设备添加超时安全锁！
+            // 如果系统 0.15 秒内没有 AOD 进度输出（说明没开AOD），强行解除锁定并推送亮屏状态
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (g_deferAODWakeWallpaperState && g_isScreenOn) {
+                    g_deferAODWakeWallpaperState = NO;
+                    ZoneFlushPendingAODWallpaperState();
+                }
+            });
         }
     } else {
         g_forceAcceptNextSystemProgress = NO;
