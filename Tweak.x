@@ -369,20 +369,35 @@ static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL anima
     g_pendingAODWallpaperAnimated = animated;
 }
 
-static inline void ZoneFlushPendingAODWallpaperState(void) {
-    if (g_deferAODWakeWallpaperState) {
-        return;
-    }
-    if (!g_hasPendingAODWallpaperState || !g_isScreenOn || g_isAODInactive) {
-        return;
-    }
-    NSString *pendingState = [g_pendingAODWallpaperState copy];
-    BOOL pendingAnimated = g_pendingAODWallpaperAnimated;
-    ZoneClearPendingAODWallpaperState();
-    if (pendingState) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
-                                                            object:nil
-                                                          userInfo:@{@"state": pendingState, @"animated": @(pendingAnimated)}];
+// ==========================================
+// 提前声明函数，解决编译器的 "implicit declaration" 报错
+// ==========================================
+static inline void ZoneFlushPendingAODWallpaperState(void);
+
+static inline void ZoneSetAODScreenState(BOOL screenOn) {
+    BOOL wasScreenOn = g_isScreenOn;
+    BOOL wasAODInactive = g_isAODInactive;
+    g_isScreenOn = screenOn;
+    g_isAODInactive = !screenOn;
+    g_lastTickProgress = -1;
+    if (screenOn) {
+        g_forceAcceptNextSystemProgress = YES;
+        g_lastSystemProgress = -1.0;
+        if (!wasScreenOn && wasAODInactive) {
+            g_deferAODWakeWallpaperState = YES;
+            
+            // 🚨 【核心修复】：为未开启 AOD 的设备添加超时安全锁！
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (g_deferAODWakeWallpaperState && g_isScreenOn) {
+                    g_deferAODWakeWallpaperState = NO;
+                    ZoneFlushPendingAODWallpaperState(); // 现在编译器认识它了！
+                }
+            });
+        }
+    } else {
+        g_forceAcceptNextSystemProgress = NO;
+        g_lastSystemProgress = 0.0;
+        g_deferAODWakeWallpaperState = NO;
     }
 }
 
