@@ -336,15 +336,6 @@ static inline void ZoneSetAODScreenState(BOOL screenOn) {
         g_lastSystemProgress = -1.0;
         if (!wasScreenOn && wasAODInactive) {
             g_deferAODWakeWallpaperState = YES;
-            
-            // 🚨 【核心修复】：为未开启 AOD 的设备添加超时安全锁！
-            // 如果系统 0.15 秒内没有 AOD 进度输出（说明没开AOD），强行解除锁定并推送亮屏状态
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (g_deferAODWakeWallpaperState && g_isScreenOn) {
-                    g_deferAODWakeWallpaperState = NO;
-                    ZoneFlushPendingAODWallpaperState();
-                }
-            });
         }
     } else {
         g_forceAcceptNextSystemProgress = NO;
@@ -369,35 +360,20 @@ static inline void ZoneQueuePendingAODWallpaperState(NSString *state, BOOL anima
     g_pendingAODWallpaperAnimated = animated;
 }
 
-// ==========================================
-// 提前声明函数，解决编译器的 "implicit declaration" 报错
-// ==========================================
-static inline void ZoneFlushPendingAODWallpaperState(void);
-
-static inline void ZoneSetAODScreenState(BOOL screenOn) {
-    BOOL wasScreenOn = g_isScreenOn;
-    BOOL wasAODInactive = g_isAODInactive;
-    g_isScreenOn = screenOn;
-    g_isAODInactive = !screenOn;
-    g_lastTickProgress = -1;
-    if (screenOn) {
-        g_forceAcceptNextSystemProgress = YES;
-        g_lastSystemProgress = -1.0;
-        if (!wasScreenOn && wasAODInactive) {
-            g_deferAODWakeWallpaperState = YES;
-            
-            // 🚨 【核心修复】：为未开启 AOD 的设备添加超时安全锁！
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (g_deferAODWakeWallpaperState && g_isScreenOn) {
-                    g_deferAODWakeWallpaperState = NO;
-                    ZoneFlushPendingAODWallpaperState(); // 现在编译器认识它了！
-                }
-            });
-        }
-    } else {
-        g_forceAcceptNextSystemProgress = NO;
-        g_lastSystemProgress = 0.0;
-        g_deferAODWakeWallpaperState = NO;
+static inline void ZoneFlushPendingAODWallpaperState(void) {
+    if (g_deferAODWakeWallpaperState) {
+        return;
+    }
+    if (!g_hasPendingAODWallpaperState || !g_isScreenOn || g_isAODInactive) {
+        return;
+    }
+    NSString *pendingState = [g_pendingAODWallpaperState copy];
+    BOOL pendingAnimated = g_pendingAODWallpaperAnimated;
+    ZoneClearPendingAODWallpaperState();
+    if (pendingState) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange"
+                                                            object:nil
+                                                          userInfo:@{@"state": pendingState, @"animated": @(pendingAnimated)}];
     }
 }
 
@@ -1182,9 +1158,37 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     
-    // 🚨 【大扫除】：删除桌面息屏强行变 animated = NO 的硬编码拦截
-    if ([stateName isEqualToString:@"Sleep"] && self.isAnimatingState && [self.currentState isEqualToString:@"Locked"]) {
-        animated = NO;
+    // 【终极修复：全版本桌面息屏防闪烁】 
+    if ([stateName isEqualToString:@"Sleep"]) {
+        if ([self.currentState isEqualToString:@"Unlock"]) {
+            // 如果当前是桌面，绝不立刻切 AOD 睡眠图！保持桌面画面自然随背光变黑
+            self.currentState = @"Sleep";
+            double delay = (g_animDuration > 0 ? g_animDuration : 0.0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                // 等屏幕彻底黑透了，再在黑暗中神不知鬼不觉地切到 Sleep 状态
+                if (!g_isScreenOn || g_isAODInactive) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+                    
+                    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+                        [self.bgView setState:@"Sleep" animated:NO]; 
+                        [self.floatingView setState:@"Sleep" animated:NO]; 
+                        [self.fgView setState:@"Sleep" animated:NO];
+                    } else {
+                        [self.bgView setState:@"Sleep"]; 
+                        [self.floatingView setState:@"Sleep"]; 
+                        [self.fgView setState:@"Sleep"];
+                    }
+                    [CATransaction commit];
+                }
+            });
+            return; // 拦截执行，下方的即时切换不再触发
+        } else if (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"]) {
+            animated = NO; // 刚按下点亮又马上息屏，强行去动画防残影
+        }
     }
 
     self.currentState = [stateName copy];
@@ -1991,12 +1995,43 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (!g_enableAnimSpeed) animated = NO; 
     if ([self.currentState isEqualToString:stateName]) return;
     
-    // 🚨 【大扫除】：删除之前写的 dispatch_after 0.85 秒延迟冻结！
-    // 既然我们有了 GPU 硬件动画，就让它大大方方地从 Unlock 平滑变形到 Sleep 吧！
-    // 开启 AOD 时，它会完美收缩；不开 AOD 时，它会伴随屏幕渐黑自然隐去，绝不再闪烁定格！
-    if ([stateName isEqualToString:@"Sleep"] && self.isAnimatingState && [self.currentState isEqualToString:@"Locked"]) {
-        // 唯一的拦截：如果是锁屏秒开秒关，需要打断并反转动画
-        [self completeManualTransition];
+    // 【终极修复：全版本桌面息屏防闪烁】 
+    if ([stateName isEqualToString:@"Sleep"]) {
+        if ([self.currentState isEqualToString:@"Unlock"]) {
+            self.currentState = @"Sleep";
+            [self completeManualTransition]; // 杀掉可能存在的残余手写动画
+            
+            BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+            NSString *realBgState = [self.bgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+            NSString *realFloatState = [self.floatParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+            NSString *realFgState = [self.fgParser resolveRealStateNameFor:@"Sleep" isDark:isDark] ?: @"Sleep";
+            
+            double delay = (g_animDuration > 0 ? g_animDuration : 0.0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!g_isScreenOn || g_isAODInactive) {
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    [self applyExplicitState:@"Sleep" parser:self.bgParser layerMap:self.bgLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.floatParser layerMap:self.floatLayerMap animated:NO];
+                    [self applyExplicitState:@"Sleep" parser:self.fgParser layerMap:self.fgLayerMap animated:NO];
+                    
+                    if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
+                        [self.bgView setState:realBgState animated:NO]; 
+                        [self.floatingView setState:realFloatState animated:NO]; 
+                        [self.fgView setState:realFgState animated:NO];
+                    } else {
+                        [self.bgView setState:realBgState]; 
+                        [self.floatingView setState:realFloatState]; 
+                        [self.fgView setState:realFgState];
+                    }
+                    [CATransaction commit];
+                }
+            });
+            return;
+        } else if (self.isAnimatingState && [self.currentState isEqualToString:@"Locked"]) {
+            animated = NO;
+            [self completeManualTransition];
+        }
     }
     
     self.currentState = [stateName copy];
