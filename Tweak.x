@@ -3161,28 +3161,25 @@ static void EnsureEngineViewIsMounted() {
 @end
 
 // ==========================================
-// 【新增】：仅供 iOS 14-15 专属使用的状态判定器，绝对不影响全局和 iOS 16+
-// 解决桌面下拉通知中心息屏后，亮屏闪现桌面的 Bug
+// iOS 14-15 专属状态判定器
 // ==========================================
 static inline NSString* ZoneGetTargetWakeState_iOS14() {
     Class csManagerClass = NSClassFromString(@"SBCoverSheetPresentationManager");
     if ([csManagerClass respondsToSelector:@selector(sharedInstance)]) {
         id manager = [csManagerClass performSelector:@selector(sharedInstance)];
         if (manager) {
-            // 使用 KVC 安全读取 isVisible 属性
             BOOL isVisible = [[manager valueForKey:@"isVisible"] boolValue];
             if (isVisible) {
-                return @"Locked"; // 通知中心只要盖住了屏幕，一律视为锁屏状态
+                return @"Locked"; 
             }
         }
     }
-    // 没有遮挡时，才以系统实际的解锁状态为准
     return g_isUnlocked ? @"Unlock" : @"Locked";
 }
 
 %hook SBBacklightController
 
-// 1. 虚拟背光进度发生器（仅控制黑屏遮罩，绝不干涉引擎核心进度）
+// 1. 虚拟背光进度发生器
 %new
 - (void)zone_virtualBacklightTick:(CADisplayLink *)link {
     if (!g_enabled) return;
@@ -3215,7 +3212,7 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
     }
 }
 
-// 2. 控制发生器生命周期，绝不额外消耗电量
+// 2. 控制发生器生命周期
 %new
 - (void)zone_startVirtualProgressWithDuration:(double)duration {
     if (!g_enabled) return;
@@ -3233,7 +3230,7 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
     });
 }
 
-// 3. 拦截带动画的背光调整 (例如：按电源键息屏/亮屏)
+// 3. 拦截带动画的背光调整 (按电源键息屏/亮屏的核心)
 - (void)animateBacklightToFactor:(float)factor duration:(double)duration source:(long long)source completion:(id /* block */)completion {
     %orig;
     if (g_enabled) {
@@ -3248,15 +3245,38 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
             
-            // 🚨 【修复点】：调用 iOS 14-15 专属判定器，精准输出状态
-            NSString *zoneState = screenOn ? ZoneGetTargetWakeState_iOS14() : @"Sleep";
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @YES}];
+            NSString *currentState = ZoneGetTargetWakeState_iOS14();
+            
+            if (screenOn) {
+                // --- 亮屏时 ---
+                // 正常按照判定器给出的状态播放亮屏动画
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": currentState, @"animated": @YES}];
+            } else {
+                // --- 息屏时 ---
+                if ([currentState isEqualToString:@"Unlock"]) {
+                    // 【核心修复】：在桌面息屏
+                    // 1. 强行保持 Unlock 桌面状态，绝对不切 AOD 息屏图，让屏幕自然黑下去
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock", @"animated": @NO}];
+                    
+                    // 2. 等屏幕彻底黑透了 (背光动画结束)，再神不知鬼不觉地切到 Sleep
+                    double delay = duration > 0 ? duration : 0.85;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (!g_isScreenOn) { // 确保在这期间没有重新亮屏
+                            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @NO}];
+                        }
+                    });
+                } else {
+                    // 【正常】：在锁屏息屏
+                    // 正常切到 Sleep，播放那段好看的渐黑过渡动画
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @YES}];
+                }
+            }
         }
         [self zone_startVirtualProgressWithDuration:duration];
     }
 }
 
-// 4. 拦截瞬间的背光调整
+// 4. 拦截瞬间的背光调整 (例如自动锁屏断电)
 - (void)setBacklightFactor:(float)factor source:(long long)source {
     %orig;
     if (g_enabled) {
@@ -3271,9 +3291,23 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineSleep" object:nil];
             }
             
-            // 🚨 【修复点】：调用 iOS 14-15 专属判定器，精准输出状态
-            NSString *zoneState = screenOn ? ZoneGetTargetWakeState_iOS14() : @"Sleep";
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": zoneState, @"animated": @NO}];
+            NSString *currentState = ZoneGetTargetWakeState_iOS14();
+            
+            if (screenOn) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": currentState, @"animated": @NO}];
+            } else {
+                if ([currentState isEqualToString:@"Unlock"]) {
+                    // 瞬间黑屏时，同样延迟 0.1 秒再重置状态，防止残影
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock", @"animated": @NO}];
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (!g_isScreenOn) {
+                            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @NO}];
+                        }
+                    });
+                } else {
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Sleep", @"animated": @NO}];
+                }
+            }
         }
         [self zone_startVirtualProgressWithDuration:0.0];
     }
