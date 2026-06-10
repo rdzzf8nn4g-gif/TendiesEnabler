@@ -327,6 +327,7 @@ static BOOL ZoneIsDeviceUnlocked() {
 // 提前声明函数，解决编译器的 "implicit declaration" 报错
 // ==========================================
 static inline void ZoneFlushPendingAODWallpaperState(void);
+static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
 
 static inline void ZoneSetAODScreenState(BOOL screenOn) {
     BOOL wasScreenOn = g_isScreenOn;
