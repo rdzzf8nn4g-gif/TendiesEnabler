@@ -3561,16 +3561,17 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
         return; 
     }
 
-    // 【终极防假死守护程序】：监听 SpringBoard 重新夺回屏幕控制权（如挂断电话、关闭全屏闹钟等）
+    // 【终极防假死守护程序】：监听 SpringBoard 重新夺回屏幕控制权
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
         if (g_enabled && (!g_isScreenOn || g_isAODInactive)) {
-            // 检查物理屏幕是否真正亮起
             id blc = [%c(SBBacklightController) sharedInstance];
-            BOOL isPhysicalScreenOn = NO;
+            BOOL isPhysicalScreenOn = YES; // 默认兜底为亮屏
+            
+            // 【编译修复】：使用 valueForKey: KVC 语法，彻底绕过编译器的严格方法检查
             if ([blc respondsToSelector:@selector(backlightFactor)]) {
-                isPhysicalScreenOn = ([blc backlightFactor] > 0.1); // 背光大于10%绝对是亮屏
+                isPhysicalScreenOn = ([[blc valueForKey:@"backlightFactor"] doubleValue] > 0.1); 
             } else if ([blc respondsToSelector:@selector(screenIsOn)]) {
-                isPhysicalScreenOn = [blc screenIsOn];
+                isPhysicalScreenOn = [[blc valueForKey:@"screenIsOn"] boolValue];
             }
             
             // 如果底层屏幕亮着，但引擎被电话界面卡在了假死状态，立刻强制唤醒解冻！
