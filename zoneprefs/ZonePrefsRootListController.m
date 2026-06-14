@@ -2609,12 +2609,39 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:self.bottomToolbar];
 }
 
+- (UIView *)createPackageViewWithURL:(NSURL *)url {
+    dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
+    Class BSUIPackageClass = NSClassFromString(@"BSUICAPackageView");
+    // iOS 16+ 优先尝试 BSUICAPackageView
+    if (BSUIPackageClass && [BSUIPackageClass instancesRespondToSelector:@selector(initWithURL:)]) {
+        return [[BSUIPackageClass alloc] performSelector:@selector(initWithURL:) withObject:url];
+    }
+    
+    // iOS 14/15 完美降级兼容：使用 _UICAPackageView
+    Class UICPClass = NSClassFromString(@"_UICAPackageView");
+    if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
+        // 利用 NSInvocation 安全调用多参数私有方法，防编译报错
+        id packageView = [UICPClass alloc];
+        SEL sel = @selector(initWithContentsOfURL:publishedObjectViewClassMap:);
+        NSMethodSignature *sig = [packageView methodSignatureForSelector:sel];
+        if (sig) {
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setSelector:sel];
+            [inv setTarget:packageView];
+            [inv setArgument:&url atIndex:2];
+            id nilArg = nil;
+            [inv setArgument:&nilArg atIndex:3];
+            [inv invoke];
+            [inv getReturnValue:&packageView];
+            return packageView;
+        }
+    }
+    
+    return nil;
+}
+
 - (void)loadWallpaperEngine {
     [self.previewContainer.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
-    
-    dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
-    Class PkgClass = NSClassFromString(@"BSUICAPackageView");
-    if (!PkgClass) return;
     
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *dirEnum = [fm enumeratorAtPath:self.wallpaperPath];
@@ -2632,16 +2659,17 @@ static NSString * GetPrefsPlistPath() {
         }
     }
     
+    // 使用安全方法创建 PackageView
     if (bgPath) {
-        self.bgView = [[PkgClass alloc] initWithURL:[NSURL fileURLWithPath:bgPath isDirectory:YES]];
+        self.bgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:bgPath isDirectory:YES]];
         [self setupPackageView:self.bgView];
     }
     if (floatPath) {
-        self.floatingView = [[PkgClass alloc] initWithURL:[NSURL fileURLWithPath:floatPath isDirectory:YES]];
+        self.floatingView = [self createPackageViewWithURL:[NSURL fileURLWithPath:floatPath isDirectory:YES]];
         [self setupPackageView:self.floatingView];
     }
     if (fgPath) {
-        self.fgView = [[PkgClass alloc] initWithURL:[NSURL fileURLWithPath:fgPath isDirectory:YES]];
+        self.fgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:fgPath isDirectory:YES]];
         [self setupPackageView:self.fgView];
     }
     
