@@ -2724,6 +2724,14 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
+        // 【新增自愈机制】：挂断电话退回锁屏时，强制解冻引擎！
+        if (!g_isScreenOn || g_isAODInactive) {
+            g_isScreenOn = YES;
+            g_isAODInactive = NO;
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
+        }
+        
         g_lastTickProgress = -1;
     }
 }
@@ -3183,7 +3191,14 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
+    if (g_enabled) {
+        // 【新增自愈机制】：挂断电话退回锁屏时，强制解冻引擎！
+        if (!g_isScreenOn || g_isAODInactive) {
+            g_isScreenOn = YES;
+            g_isAODInactive = NO;
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
+        }
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
     }
@@ -3510,6 +3525,19 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
 - (void)viewDidLoad {
     %orig;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_forceIconRefresh) name:@"ZoneForceIconRefresh" object:nil];
+}
+
+// 【新增自愈机制】：挂断电话退回桌面时，强制解冻引擎！
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (g_enabled) {
+        if (!g_isScreenOn || g_isAODInactive) {
+            g_isScreenOn = YES;
+            g_isAODInactive = NO;
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock", @"animated": @YES}];
+        }
+    }
 }
 
 - (void)dealloc {
