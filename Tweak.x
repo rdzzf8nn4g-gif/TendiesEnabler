@@ -413,6 +413,10 @@ static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
     return (state == 0 || state == 1);
 }
 
+static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
+    return (g_isAODInactive && state == 1);
+}
+
 static inline void ZoneEmitScreenEvent(BOOL screenOn) {
     CFTimeInterval now = CACurrentMediaTime();
     if (g_lastEmittedScreenState && g_lastEmittedScreenStateTime > 0.0 &&
@@ -2806,20 +2810,12 @@ static void EnsureEngineViewIsMounted() {
         if (!ZoneIsDefinitiveBacklightState(state)) {
             return;
         }
-        
-        BOOL screenOn = (state == 1);
-        
-        // 💡 修复核心：只要硬件背光是 1，强制校准全局变量，打破来电时的状态脱节
-        if (screenOn && (!g_isScreenOn || g_isAODInactive)) {
-            g_isScreenOn = YES;
-            g_isAODInactive = NO;
-            NSString *zoneState = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
-            ZoneCommitAODTransition(YES, zoneState, YES);
+        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
             return;
         }
-        
+        BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
-            NSString *zoneState = screenOn ? (ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked") : @"Sleep";
+            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
@@ -2831,20 +2827,12 @@ static void EnsureEngineViewIsMounted() {
         if (!ZoneIsDefinitiveBacklightState(state)) {
             return;
         }
-        
-        BOOL screenOn = (state == 1);
-        
-        // 💡 确保完成阶段再次兜底
-        if (screenOn && (!g_isScreenOn || g_isAODInactive)) {
-            g_isScreenOn = YES;
-            g_isAODInactive = NO;
-            NSString *zoneState = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
-            ZoneCommitAODTransition(YES, zoneState, YES);
+        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
             return;
         }
-        
+        BOOL screenOn = (state == 1);
         if (screenOn != g_isScreenOn) {
-            NSString *zoneState = screenOn ? (ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked") : @"Sleep";
+            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
