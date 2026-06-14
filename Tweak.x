@@ -359,7 +359,8 @@ static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *stat
 - (void)callObserver:(CXCallObserver *)callObserver callChanged:(CXCall *)call {
     if (!g_enabled) return;
 
-    if (call.isIncoming && !call.hasConnected && !call.hasEnded) {
+    // 🚨 修复点：CXCall 只有 isOutgoing 属性，!call.isOutgoing 即代表来电 (Incoming)
+    if (!call.isOutgoing && !call.hasConnected && !call.hasEnded) {
         // 1. 来电响铃阶段：屏幕亮起，强制唤醒所有引擎
         g_isScreenOn = YES;
         g_isAODInactive = NO;
