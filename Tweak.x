@@ -413,13 +413,6 @@ static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
     return (state == 0 || state == 1);
 }
 
-static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
-    // 🚨 修复来电死锁：只要系统硬件发出 state == 1 (彻底亮屏)，
-    // 无论是来电还是按电源键，我们都绝对不能忽略！
-    // 将原先的 (g_isAODInactive && state == 1) 废弃，返回 NO 予以放行。
-    return NO; 
-}
-
 static inline void ZoneEmitScreenEvent(BOOL screenOn) {
     CFTimeInterval now = CACurrentMediaTime();
     if (g_lastEmittedScreenState && g_lastEmittedScreenStateTime > 0.0 &&
