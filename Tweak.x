@@ -2803,36 +2803,19 @@ static void EnsureEngineViewIsMounted() {
 }
 %end
 
-// 记录硬件背光的真实物理状态
-static long long zone_currentPhysicalBacklightState = -1;
 
 %hook SBBacklightController
-
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
-    zone_currentPhysicalBacklightState = state; // 实时记录物理背光
-    
     if (g_enabled && !g_isVideoMode) {
         if (!ZoneIsDefinitiveBacklightState(state)) {
             return;
         }
+        
+        // 🚨 删除了 ZoneShouldIgnoreAODBacklightWakeState 拦截
+        // 让状态机无论如何都能感知到硬件屏幕的亮起
+
         BOOL screenOn = (state == 1);
-        
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
-            // 【核心破局点】：AOD 唤醒时正常拦截以防闪烁。
-            // 但若是来电，系统锁屏会被 CallKit 屏蔽导致永久假死！
-            // 启动 0.5 秒超时守护机制：
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                // 0.5秒后，如果物理背光依然是亮着(1)，但壁纸引擎依然在睡觉(g_isScreenOn == NO)
-                // 说明是被来电屏蔽了，强行打醒引擎！
-                if (g_enabled && !g_isScreenOn && zone_currentPhysicalBacklightState == 1) {
-                    NSString *zoneState = g_isUnlocked ? @"Unlock" : @"Locked";
-                    ZoneCommitAODTransition(YES, zoneState, YES);
-                }
-            });
-            return;
-        }
-        
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
@@ -2842,25 +2825,15 @@ static long long zone_currentPhysicalBacklightState = -1;
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    zone_currentPhysicalBacklightState = state; // 实时记录物理背光
-    
     if (g_enabled && !g_isVideoMode) {
         if (!ZoneIsDefinitiveBacklightState(state)) {
             return;
         }
+        
+        // 🚨 删除了 ZoneShouldIgnoreAODBacklightWakeState 拦截
+        // 解决来电导致的永久息屏卡死 Bug
+
         BOOL screenOn = (state == 1);
-        
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
-            // 同上，补充兜底逻辑
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (g_enabled && !g_isScreenOn && zone_currentPhysicalBacklightState == 1) {
-                    NSString *zoneState = g_isUnlocked ? @"Unlock" : @"Locked";
-                    ZoneCommitAODTransition(YES, zoneState, YES);
-                }
-            });
-            return;
-        }
-        
         if (screenOn != g_isScreenOn) {
             NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
