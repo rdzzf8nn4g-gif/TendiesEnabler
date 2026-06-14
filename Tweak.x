@@ -5,7 +5,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h> 
 #import <stdarg.h>
-#import <CallKit/CallKit.h>
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -329,68 +328,6 @@ static BOOL ZoneIsDeviceUnlocked() {
 // ==========================================
 static inline void ZoneFlushPendingAODWallpaperState(void);
 static inline void ZoneEmitScreenAndWallpaperState(BOOL screenOn, NSString *state, BOOL animated);
-
-// =========================================================================
-// 【核心修复】：全局来电状态守护者 (完美脱离 SpringBoard UI 层级)
-// =========================================================================
-@interface ZoneCallMonitor : NSObject <CXCallObserverDelegate>
-@property (nonatomic, strong) CXCallObserver *callObserver;
-+ (instancetype)sharedInstance;
-@end
-
-@implementation ZoneCallMonitor
-+ (instancetype)sharedInstance {
-    static ZoneCallMonitor *instance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[ZoneCallMonitor alloc] init];
-    });
-    return instance;
-}
-
-- (instancetype)init {
-    if (self = [super init]) {
-        _callObserver = [[CXCallObserver alloc] init];
-        [_callObserver setDelegate:self queue:dispatch_get_main_queue()];
-    }
-    return self;
-}
-
-- (void)callObserver:(CXCallObserver *)callObserver callChanged:(CXCall *)call {
-    if (!g_enabled) return;
-
-    // 🚨 修复点：CXCall 只有 isOutgoing 属性，!call.isOutgoing 即代表来电 (Incoming)
-    if (!call.isOutgoing && !call.hasConnected && !call.hasEnded) {
-        // 1. 来电响铃阶段：屏幕亮起，强制唤醒所有引擎
-        g_isScreenOn = YES;
-        g_isAODInactive = NO;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            NSString *state = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" 
-                                                                object:nil 
-                                                              userInfo:@{@"state": state, @"animated": @YES}];
-        });
-    } 
-    else if (call.hasEnded || call.hasConnected) {
-        // 2. 接听或挂断阶段：此时 UI 层级正在发生剧烈变动。
-        // 我们延迟 0.5 秒，等通话界面退下、锁屏或桌面露出来后，强制重新校准一次视觉状态！
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (g_isScreenOn) {
-                // 重新推送唤醒和真实状态，打破 Sleep 死锁
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-                NSString *state = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" 
-                                                                    object:nil 
-                                                                  userInfo:@{@"state": state, @"animated": @YES}];
-                // 强制刷新一次布局，防止高斯模糊或 Portal 错位
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
-            }
-        });
-    }
-}
-@end
-// =========================================================================
 
 static inline void ZoneSetAODScreenState(BOOL screenOn) {
     BOOL wasScreenOn = g_isScreenOn;
@@ -3626,9 +3563,6 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
 
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
-    
-    // 【新增】：启动全局来电监听守护进程
-    [ZoneCallMonitor sharedInstance];
     
     if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
         %init(iOS16Plus);
