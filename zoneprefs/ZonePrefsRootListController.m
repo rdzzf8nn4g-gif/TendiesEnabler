@@ -9,6 +9,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <zlib.h> 
+#import <dlfcn.h> // <--- 加上这一行！！！
 
 extern char **environ;
 
@@ -2791,7 +2792,7 @@ static NSString * GetPrefsPlistPath() {
 - (void)modifyCAMLState:(NSString *)state keyPath:(NSString *)keyPath value:(NSString *)value {
     if (value.length == 0) return;
     NSString *camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
-    NSString *camlContent = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8String encoding:nil];
+    NSString *camlContent = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
     if (!camlContent) return;
     
     // 正则匹配并替换：寻找对应 targetId 和 keyPath 下的 <value> 节点
@@ -2801,10 +2802,7 @@ static NSString * GetPrefsPlistPath() {
     // 如果匹配到了，直接替换
     if ([regex numberOfMatchesInString:camlContent options:0 range:NSMakeRange(0, camlContent.length)] > 0) {
         NSString *newContent = [regex stringByReplacingMatchesInString:camlContent options:0 range:NSMakeRange(0, camlContent.length) withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
-        [newContent writeToFile:camlPath atomically:YES encoding:NSUTF8String error:nil];
-    } else {
-        // 如果原 CAML 没有该属性的动画记录，可以通过附加新节点进行注入 (此功能为防止破坏文件结构，保守处理跳过)
-        NSLog(@"[ZoneEditor] 警告：原 CAML 中未找到对应的动画状态节点，无法替换。");
+        [newContent writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -2815,7 +2813,7 @@ static NSString * GetPrefsPlistPath() {
 - (void)modifyLayerZPosition:(int)direction {
     // 为避免破坏复杂的 XML 树形嵌套结构，此处采用修改 CAML 初始 zPosition 属性来实现层级改变
     NSString *camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
-    NSString *camlContent = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8String encoding:nil];
+    NSString *camlContent = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
     
     // 简化版：在 <CALayer ... id="selectedName"> 标签内动态增删 zPosition
     NSString *searchPattern = [NSString stringWithFormat:@"<CALayer([^>]*)id=\"%@\"([^>]*)>", self.selectedLayerName];
