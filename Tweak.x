@@ -2676,7 +2676,8 @@ static void EnsureEngineViewIsMounted() {
             id bl = [blClass performSelector:@selector(sharedInstance)];
             if ([bl respondsToSelector:@selector(backlightState)]) {
                 // iOS 16/17 底层状态: 0 = 息屏, 1 = 正常亮屏, 2 = AOD 变暗
-                long long state = [[bl performSelector:@selector(backlightState)] longLongValue];
+                // 【核心修复】：使用 valueForKey: 安全地将基础数据类型自动装箱为 NSNumber
+                long long state = [[bl valueForKey:@"backlightState"] longLongValue];
                 isScreenPhysicallyOn = (state == 1); 
             }
         }
