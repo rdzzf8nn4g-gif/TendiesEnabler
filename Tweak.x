@@ -46,7 +46,7 @@ typedef struct {
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
 @end
 
-@interface CSCoverSheetViewController : UIViewController
+@interface CSCoverSheetViewController : UIViewController <UIGestureRecognizerDelegate>
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 @end
@@ -2492,9 +2492,27 @@ static void EnsureEngineViewIsMounted() {
     // 【新增】：锁屏双击手势注入
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_handleLockScreenDoubleTap:)];
     doubleTap.numberOfTapsRequired = 2;
-    doubleTap.cancelsTouchesInView = NO; // 极其重要：设为 NO 才能保证不影响原生的向上滑动解锁、右滑相机等手势！
+    doubleTap.cancelsTouchesInView = NO; 
     doubleTap.delaysTouchesBegan = NO;
+    doubleTap.delegate = self; // 【绑定代理】
     [self.view addGestureRecognizer:doubleTap];
+}
+
+// 【核心修复】：为密码键盘发“免死金牌”，彻底解决打字卡顿
+%new
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
+    
+    UIView *view = touch.view;
+    while (view) {
+        NSString *className = NSStringFromClass([view class]);
+        // 遇到密码键盘或系统键盘区域，直接放行，绝不拦截！
+        if ([className containsString:@"Passcode"] || [className containsString:@"Keyboard"]) {
+            return NO; 
+        }
+        view = view.superview;
+    }
+    return YES;
 }
 
 %new
@@ -2945,9 +2963,27 @@ static void EnsureEngineViewIsMounted() {
     // 【新增】：锁屏双击手势注入
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_handleLockScreenDoubleTap:)];
     doubleTap.numberOfTapsRequired = 2;
-    doubleTap.cancelsTouchesInView = NO; // 极其重要：设为 NO 才能保证不影响原生的向上滑动解锁、右滑相机等手势！
+    doubleTap.cancelsTouchesInView = NO; 
     doubleTap.delaysTouchesBegan = NO;
+    doubleTap.delegate = self; // 【绑定代理】
     [self.view addGestureRecognizer:doubleTap];
+}
+
+// 【核心修复】：为密码键盘发“免死金牌”，彻底解决打字卡顿
+%new
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
+    
+    UIView *view = touch.view;
+    while (view) {
+        NSString *className = NSStringFromClass([view class]);
+        // 遇到密码键盘或系统键盘区域，直接放行，绝不拦截！
+        if ([className containsString:@"Passcode"] || [className containsString:@"Keyboard"]) {
+            return NO; 
+        }
+        view = view.superview;
+    }
+    return YES;
 }
 
 %new
