@@ -12,7 +12,7 @@ TWEAK_NAME = Zone
 Zone_FILES = Tweak.x
 Zone_CFLAGS = -fobjc-arc
 # 【修改这里】：追加了 AVFoundation
-Zone_FRAMEWORKS = Foundation UIKit AVFoundation
+Zone_FRAMEWORKS = Foundation UIKit AVFoundation CallKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 # 在文件末尾添加或者修改 SUBPROJECTS
