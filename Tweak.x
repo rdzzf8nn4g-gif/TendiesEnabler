@@ -2724,14 +2724,6 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (g_enabled) {
-        // 【新增自愈机制】：挂断电话退回锁屏时，强制解冻引擎！
-        if (!g_isScreenOn || g_isAODInactive) {
-            g_isScreenOn = YES;
-            g_isAODInactive = NO;
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
-        }
-        
         g_lastTickProgress = -1;
     }
 }
@@ -3191,14 +3183,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (g_enabled) {
-        // 【新增自愈机制】：挂断电话退回锁屏时，强制解冻引擎！
-        if (!g_isScreenOn || g_isAODInactive) {
-            g_isScreenOn = YES;
-            g_isAODInactive = NO;
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Locked", @"animated": @YES}];
-        }
+    if (g_enabled && g_isScreenOn && !g_isAODInactive) {
         g_isUnlocked = NO;
         g_lastTickProgress = -1; 
     }
@@ -3527,19 +3512,6 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zone_forceIconRefresh) name:@"ZoneForceIconRefresh" object:nil];
 }
 
-// 【新增自愈机制】：挂断电话退回桌面时，强制解冻引擎！
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    if (g_enabled) {
-        if (!g_isScreenOn || g_isAODInactive) {
-            g_isScreenOn = YES;
-            g_isAODInactive = NO;
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": @"Unlock", @"animated": @YES}];
-        }
-    }
-}
-
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ZoneForceIconRefresh" object:nil];
     %orig;
@@ -3588,6 +3560,28 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
     if (![processName isEqualToString:@"SpringBoard"] && ![bundleId isEqualToString:@"com.apple.springboard"]) {
         return; 
     }
+
+    // 【终极防假死守护程序】：监听 SpringBoard 重新夺回屏幕控制权（如挂断电话、关闭全屏闹钟等）
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
+        if (g_enabled && (!g_isScreenOn || g_isAODInactive)) {
+            // 检查物理屏幕是否真正亮起
+            id blc = [%c(SBBacklightController) sharedInstance];
+            BOOL isPhysicalScreenOn = NO;
+            if ([blc respondsToSelector:@selector(backlightFactor)]) {
+                isPhysicalScreenOn = ([blc backlightFactor] > 0.1); // 背光大于10%绝对是亮屏
+            } else if ([blc respondsToSelector:@selector(screenIsOn)]) {
+                isPhysicalScreenOn = [blc screenIsOn];
+            }
+            
+            // 如果底层屏幕亮着，但引擎被电话界面卡在了假死状态，立刻强制唤醒解冻！
+            if (isPhysicalScreenOn) {
+                g_isScreenOn = YES;
+                g_isAODInactive = NO;
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" object:nil userInfo:@{@"state": ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked", @"animated": @YES}];
+            }
+        }
+    }];
 
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
