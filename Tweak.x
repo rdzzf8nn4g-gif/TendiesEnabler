@@ -5,6 +5,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h> 
 #import <stdarg.h>
+#import <CallKit/CallKit.h>
 
 #if __has_include(<roothide.h>)
 #import <roothide.h>
@@ -46,7 +47,7 @@ typedef struct {
 - (void)updateWallpaperAnimationWithProgress:(double)progress;
 @end
 
-@interface CSCoverSheetViewController : UIViewController
+@interface CSCoverSheetViewController : UIViewController <UIGestureRecognizerDelegate>
 - (void)setInScreenOffMode:(BOOL)mode; 
 - (void)setDismissed:(BOOL)dismissed;
 @end
@@ -2327,9 +2328,64 @@ static void EnsureEngineViewIsMounted() {
 }
 
 // =========================================================================
+// 📞 CallKit 全局来电监听模块 (无损修复 iOS16-17 息屏接电话卡死)
+// =========================================================================
+@interface ZoneCallMonitor : NSObject <CXCallObserverDelegate>
+@property (nonatomic, strong) CXCallObserver *callObserver;
++ (instancetype)sharedMonitor;
+@end
+
+@implementation ZoneCallMonitor
++ (instancetype)sharedMonitor {
+    static ZoneCallMonitor *shared = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        shared = [[self alloc] init];
+    });
+    return shared;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _callObserver = [[CXCallObserver alloc] init];
+        [_callObserver setDelegate:self queue:dispatch_get_main_queue()];
+    }
+    return self;
+}
+
+- (void)callObserver:(CXCallObserver *)callObserver callChanged:(CXCall *)call {
+    // 根据系统头文件精准判定：只要电话未挂断且不是打出的（即正在响铃或已接通的来电）
+    if (!call.hasEnded && !call.isOutgoing) {
+        // 如果当前引擎被系统底层的假进度欺骗，认为还是息屏状态，直接强行唤醒！
+        if (!g_isScreenOn || g_isAODInactive) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (g_enabled) {
+                    NSString *zoneState = g_isUnlocked ? @"Unlock" : @"Locked";
+                    // 强行点亮引擎，彻底打破状态机死锁！
+                    ZoneCommitAODTransition(YES, zoneState, YES);
+                }
+            });
+        }
+    }
+}
+@end
+
+// =========================================================================
 // ==================== 【iOS 16+ 专属 Hook 区域】===========================
 // =========================================================================
 %group iOS16Plus
+
+// ==========================================
+// 仅在 iOS 16-17 激活来电守护进程
+// ==========================================
+%hook SpringBoard
+- (void)applicationDidFinishLaunching:(id)application {
+    %orig;
+    if (g_enabled) {
+        [ZoneCallMonitor sharedMonitor];
+    }
+}
+%end
 
 %hook PBUIWallpaperView
 
@@ -2492,9 +2548,27 @@ static void EnsureEngineViewIsMounted() {
     // 【新增】：锁屏双击手势注入
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_handleLockScreenDoubleTap:)];
     doubleTap.numberOfTapsRequired = 2;
-    doubleTap.cancelsTouchesInView = NO; // 极其重要：设为 NO 才能保证不影响原生的向上滑动解锁、右滑相机等手势！
+    doubleTap.cancelsTouchesInView = NO; 
     doubleTap.delaysTouchesBegan = NO;
+    doubleTap.delegate = self; // 【绑定代理】
     [self.view addGestureRecognizer:doubleTap];
+}
+
+// 【核心修复】：为密码键盘发“免死金牌”，彻底解决打字卡顿
+%new
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
+    
+    UIView *view = touch.view;
+    while (view) {
+        NSString *className = NSStringFromClass([view class]);
+        // 遇到密码键盘或系统键盘区域，直接放行，绝不拦截！
+        if ([className containsString:@"Passcode"] || [className containsString:@"Keyboard"]) {
+            return NO; 
+        }
+        view = view.superview;
+    }
+    return YES;
 }
 
 %new
@@ -2945,9 +3019,27 @@ static void EnsureEngineViewIsMounted() {
     // 【新增】：锁屏双击手势注入
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zone_handleLockScreenDoubleTap:)];
     doubleTap.numberOfTapsRequired = 2;
-    doubleTap.cancelsTouchesInView = NO; // 极其重要：设为 NO 才能保证不影响原生的向上滑动解锁、右滑相机等手势！
+    doubleTap.cancelsTouchesInView = NO; 
     doubleTap.delaysTouchesBegan = NO;
+    doubleTap.delegate = self; // 【绑定代理】
     [self.view addGestureRecognizer:doubleTap];
+}
+
+// 【核心修复】：为密码键盘发“免死金牌”，彻底解决打字卡顿
+%new
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
+    
+    UIView *view = touch.view;
+    while (view) {
+        NSString *className = NSStringFromClass([view class]);
+        // 遇到密码键盘或系统键盘区域，直接放行，绝不拦截！
+        if ([className containsString:@"Passcode"] || [className containsString:@"Keyboard"]) {
+            return NO; 
+        }
+        view = view.superview;
+    }
+    return YES;
 }
 
 %new
