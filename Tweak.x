@@ -2659,46 +2659,6 @@ static void EnsureEngineViewIsMounted() {
         floatingLayer.alpha = 0.0; 
         floatingLayer.hidden = YES; 
     }
-// =========================================================================
-    // ⬇️ 【iOS 16-17 专属自愈补丁】：外挂唤醒，解决 CallKit 遮挡导致的脱节死锁 ⬇️
-    // =========================================================================
-    // 节流阀：每 0.5 秒最多检测一次，绝对不影响性能，防止高频 layout 烧 CPU
-    static NSTimeInterval lastCheckTime = 0;
-    NSTimeInterval now = CACurrentMediaTime();
-    if (now - lastCheckTime < 0.5) return;
-    lastCheckTime = now;
-    
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 1. 获取底层物理屏幕的真实状态 (仅限 iOS 16-17)
-        BOOL isScreenPhysicallyOn = NO; 
-        Class blClass = NSClassFromString(@"SBBacklightController");
-        if ([blClass respondsToSelector:@selector(sharedInstance)]) {
-            id bl = [blClass performSelector:@selector(sharedInstance)];
-            if ([bl respondsToSelector:@selector(backlightState)]) {
-                // iOS 16/17 底层状态: 0 = 息屏, 1 = 正常亮屏, 2 = AOD 变暗
-                // 【核心修复】：使用 valueForKey: 安全地将基础数据类型自动装箱为 NSNumber
-                long long state = [[bl valueForKey:@"backlightState"] longLongValue];
-                isScreenPhysicallyOn = (state == 1); 
-            }
-        }
-        
-        // 2. 核心自愈抢救逻辑：物理屏幕亮着，但引擎变量睡死了 -> 触发抢救！
-        if (isScreenPhysicallyOn && (!g_isScreenOn || g_isAODInactive)) {
-            // 强行纠正全局标志位
-            g_isScreenOn = YES;
-            g_isAODInactive = NO;
-            
-            // 获取当前真实的解锁状态 (防接完电话后直接停在桌面)
-            BOOL realUnlocked = ZoneIsDeviceUnlocked();
-            NSString *targetState = realUnlocked ? @"Unlock" : @"Locked";
-            
-            // 发送除颤电击，强制打醒渲染引擎！
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" 
-                                                                object:nil 
-                                                              userInfo:@{@"state": targetState, @"animated": @YES}];
-        }
-    });
 }
 
 - (void)updatePosterSwitcherSnapshots { if (g_enabled) return; %orig; }
@@ -2773,6 +2733,36 @@ static void EnsureEngineViewIsMounted() {
     if (g_enabled) {
         g_lastTickProgress = -1;
     }
+}
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    if (!g_enabled) return;
+    
+    // ⬇️ 【终极自愈补丁】：在电话界面消失、锁屏即将露出的第一毫秒，主动侦测并唤醒 ⬇️
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BOOL isScreenPhysicallyOn = NO; 
+        Class blClass = NSClassFromString(@"SBBacklightController");
+        if ([blClass respondsToSelector:@selector(sharedInstance)]) {
+            id bl = [blClass performSelector:@selector(sharedInstance)];
+            if ([bl respondsToSelector:@selector(backlightState)]) {
+                // 安全获取底层背光状态
+                long long state = [[bl valueForKey:@"backlightState"] longLongValue];
+                isScreenPhysicallyOn = (state == 1); 
+            }
+        }
+        
+        // 物理屏幕亮着，但壁纸处于息屏状态 -> 触发抢救
+        if (isScreenPhysicallyOn && (!g_isScreenOn || g_isAODInactive)) {
+            g_isScreenOn = YES;
+            g_isAODInactive = NO;
+            BOOL realUnlocked = ZoneIsDeviceUnlocked();
+            NSString *targetState = realUnlocked ? @"Unlock" : @"Locked";
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" 
+                                                                object:nil 
+                                                              userInfo:@{@"state": targetState, @"animated": @YES}];
+        }
+    });
 }
 %end
 
