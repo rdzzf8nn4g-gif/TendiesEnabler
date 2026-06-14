@@ -414,7 +414,10 @@ static inline BOOL ZoneIsDefinitiveBacklightState(long long state) {
 }
 
 static inline BOOL ZoneShouldIgnoreAODBacklightWakeState(long long state) {
-    return (g_isAODInactive && state == 1);
+    // 🚨 修复来电死锁：只要系统硬件发出 state == 1 (彻底亮屏)，
+    // 无论是来电还是按电源键，我们都绝对不能忽略！
+    // 将原先的 (g_isAODInactive && state == 1) 废弃，返回 NO 予以放行。
+    return NO; 
 }
 
 static inline void ZoneEmitScreenEvent(BOOL screenOn) {
@@ -2804,39 +2807,26 @@ static void EnsureEngineViewIsMounted() {
 %end
 
 %hook SBBacklightController
-
 - (void)backlightHost:(id)host willTransitionToState:(long long)state forEvent:(id)event {
     %orig;
-    
-    // ========================================================
-    // 👇 新增防御代码开始：来电死锁看门狗 (Watchdog) 👇
-    // ========================================================
-    if (g_enabled && state == 1) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // 0.5秒后，如果发现引擎还在 Sleep 状态（说明被来电弹窗劫持了）
-            if (!g_isScreenOn) {
-                // 强行打破死锁，踢醒渲染引擎！
-                NSString *zoneState = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
-                ZoneCommitAODTransition(YES, zoneState, YES);
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
-            }
-        });
-    }
-    // ========================================================
-    // 👆 新增防御代码结束 👆
-    // ========================================================
-
-    // ---> 以下是你原有的代码，一行都没动！ <---
     if (g_enabled && !g_isVideoMode) {
         if (!ZoneIsDefinitiveBacklightState(state)) {
             return;
         }
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
+        
+        BOOL screenOn = (state == 1);
+        
+        // 💡 修复核心：只要硬件背光是 1，强制校准全局变量，打破来电时的状态脱节
+        if (screenOn && (!g_isScreenOn || g_isAODInactive)) {
+            g_isScreenOn = YES;
+            g_isAODInactive = NO;
+            NSString *zoneState = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
+            ZoneCommitAODTransition(YES, zoneState, YES);
             return;
         }
-        BOOL screenOn = (state == 1);
+        
         if (screenOn != g_isScreenOn) {
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            NSString *zoneState = screenOn ? (ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
@@ -2844,39 +2834,28 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)backlight:(id)backlight didCompleteUpdateToState:(long long)state forEvent:(id)event {
     %orig;
-    
-    // ========================================================
-    // 👇 新增防御代码开始：双重保险 👇
-    // ========================================================
-    if (g_enabled && state == 1) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!g_isScreenOn) {
-                NSString *zoneState = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
-                ZoneCommitAODTransition(YES, zoneState, YES);
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
-            }
-        });
-    }
-    // ========================================================
-    // 👆 新增防御代码结束 👆
-    // ========================================================
-
-    // ---> 以下是你原有的代码，一行都没动！ <---
     if (g_enabled && !g_isVideoMode) {
         if (!ZoneIsDefinitiveBacklightState(state)) {
             return;
         }
-        if (ZoneShouldIgnoreAODBacklightWakeState(state)) {
+        
+        BOOL screenOn = (state == 1);
+        
+        // 💡 确保完成阶段再次兜底
+        if (screenOn && (!g_isScreenOn || g_isAODInactive)) {
+            g_isScreenOn = YES;
+            g_isAODInactive = NO;
+            NSString *zoneState = ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked";
+            ZoneCommitAODTransition(YES, zoneState, YES);
             return;
         }
-        BOOL screenOn = (state == 1);
+        
         if (screenOn != g_isScreenOn) {
-            NSString *zoneState = screenOn ? (g_isUnlocked ? @"Unlock" : @"Locked") : @"Sleep";
+            NSString *zoneState = screenOn ? (ZoneIsDeviceUnlocked() ? @"Unlock" : @"Locked") : @"Sleep";
             ZoneCommitAODTransition(screenOn, zoneState, YES);
         }
     }
 }
-
 %end
 
 %end // 结束 iOS16Plus
