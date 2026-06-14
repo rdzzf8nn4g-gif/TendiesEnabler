@@ -2734,36 +2734,6 @@ static void EnsureEngineViewIsMounted() {
         g_lastTickProgress = -1;
     }
 }
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    if (!g_enabled) return;
-    
-    // ⬇️ 【终极自愈补丁】：在电话界面消失、锁屏即将露出的第一毫秒，主动侦测并唤醒 ⬇️
-    dispatch_async(dispatch_get_main_queue(), ^{
-        BOOL isScreenPhysicallyOn = NO; 
-        Class blClass = NSClassFromString(@"SBBacklightController");
-        if ([blClass respondsToSelector:@selector(sharedInstance)]) {
-            id bl = [blClass performSelector:@selector(sharedInstance)];
-            if ([bl respondsToSelector:@selector(backlightState)]) {
-                // 安全获取底层背光状态
-                long long state = [[bl valueForKey:@"backlightState"] longLongValue];
-                isScreenPhysicallyOn = (state == 1); 
-            }
-        }
-        
-        // 物理屏幕亮着，但壁纸处于息屏状态 -> 触发抢救
-        if (isScreenPhysicallyOn && (!g_isScreenOn || g_isAODInactive)) {
-            g_isScreenOn = YES;
-            g_isAODInactive = NO;
-            BOOL realUnlocked = ZoneIsDeviceUnlocked();
-            NSString *targetState = realUnlocked ? @"Unlock" : @"Locked";
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" 
-                                                                object:nil 
-                                                              userInfo:@{@"state": targetState, @"animated": @YES}];
-        }
-    });
-}
 %end
 
 %hook SBWallpaperController
@@ -3596,6 +3566,45 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
     
     if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
         %init(iOS16Plus);
+        
+        // =========================================================================
+        // ⬇️ 【终极硬件级脱节自愈监控 (Watchdog)】 ⬇️
+        // 只在 iOS 16-17 启动。纯后台运行，免疫一切 CallKit / 闹钟 / 弹窗导致的生命周期假死！
+        // =========================================================================
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // 创建一个每 0.5 秒滴答一次的超轻量级 GCD 定时器 (纳秒级开销，0耗电)
+            dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
+            dispatch_source_set_event_handler(timer, ^{
+                if (!g_enabled) return;
+                
+                Class blClass = NSClassFromString(@"SBBacklightController");
+                if ([blClass respondsToSelector:@selector(sharedInstance)]) {
+                    id bl = [blClass performSelector:@selector(sharedInstance)];
+                    if ([bl respondsToSelector:@selector(backlightState)]) {
+                        // 使用 valueForKey 安全获取底层物理屏幕状态：1 = 亮屏，0 = 黑屏，2 = AOD
+                        long long state = [[bl valueForKey:@"backlightState"] longLongValue];
+                        
+                        // 【绝杀逻辑】：只要屏幕物理背光是亮的 (1)，但引擎居然在睡觉？打醒它！
+                        if (state == 1 && (!g_isScreenOn || g_isAODInactive)) {
+                            g_isScreenOn = YES;
+                            g_isAODInactive = NO;
+                            
+                            BOOL realUnlocked = ZoneIsDeviceUnlocked();
+                            NSString *targetState = realUnlocked ? @"Unlock" : @"Locked";
+                            
+                            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineWake" object:nil];
+                            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneEngineStateChange" 
+                                                                                object:nil 
+                                                                              userInfo:@{@"state": targetState, @"animated": @YES}];
+                        }
+                    }
+                }
+            });
+            dispatch_resume(timer);
+        });
+        // ⬆️ 守望者结束 ⬆️
+        
     } else {
         %init(iOS14_15);
     }
