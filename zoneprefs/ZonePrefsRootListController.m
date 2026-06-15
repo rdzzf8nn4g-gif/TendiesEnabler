@@ -2493,8 +2493,12 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 // =======================================================
-// ================= 独立子页面：CAML 原生代码编辑器 =================
+// ================= 独立子页面：可视化高级编辑引擎 =================
 // =======================================================
+
+// -------------------------------------------------------
+// 1. CAML 原生代码编辑器 (用于编辑动画过渡片段)
+// -------------------------------------------------------
 @interface ZoneCamlCodeEditorViewController : UIViewController
 @property (nonatomic, copy) NSString *camlPath;
 @property (nonatomic, copy) NSString *camlContent;
@@ -2508,14 +2512,14 @@ static NSString * GetPrefsPlistPath() {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
-    self.title = self.transitionName ?: @"CAML 完整编辑";
+    self.title = self.transitionName ?: @"CAML 代码编辑";
     
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消" style:UIBarButtonItemStylePlain target:self action:@selector(cancelEdit)];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存" style:UIBarButtonItemStyleDone target:self action:@selector(saveEdit)];
     
     self.textView = [[UITextView alloc] initWithFrame:self.view.bounds];
     self.textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.textView.font = [UIFont fontWithName:@"Menlo" size:13]; // 程序员等宽字体
+    self.textView.font = [UIFont fontWithName:@"Menlo" size:13];
     self.textView.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1.0];
     self.textView.textColor = [UIColor colorWithRed:0.5 green:0.8 blue:0.5 alpha:1.0];
     self.textView.autocorrectionType = UITextAutocorrectionTypeNo;
@@ -2530,9 +2534,7 @@ static NSString * GetPrefsPlistPath() {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
 }
 
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-}
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
 
 - (void)keyboardWillShow:(NSNotification *)note {
     CGRect kbFrame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
@@ -2540,42 +2542,207 @@ static NSString * GetPrefsPlistPath() {
     self.textView.contentInset = insets;
     self.textView.scrollIndicatorInsets = insets;
 }
-
 - (void)keyboardWillHide:(NSNotification *)note {
     self.textView.contentInset = UIEdgeInsetsZero;
     self.textView.scrollIndicatorInsets = UIEdgeInsetsZero;
 }
-
-- (void)cancelEdit {
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
+- (void)cancelEdit { [self dismissViewControllerAnimated:YES completion:nil]; }
 - (void)saveEdit {
-    if (self.saveCallback) {
-        self.saveCallback(self.textView.text);
-    }
+    if (self.saveCallback) self.saveCallback(self.textView.text);
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 @end
 
 
-// =======================================================
-// ================= 独立子页面：可视化高级编辑引擎 =================
-// =======================================================
-
-// 补全系统私有类声明，避免编译报错，直击底层渲染
+// -------------------------------------------------------
+// 2. 核心底层私有类头文件补全
+// -------------------------------------------------------
 @interface CAPackage : NSObject
 + (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)error;
-@property (readonly) CALayer *rootLayer;
+@end
+@interface CAStateController : NSObject
+- (instancetype)initWithLayer:(CALayer *)layer;
+- (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
 @end
 
+
+// -------------------------------------------------------
+// 3. 克隆自 .x 的全系统兼容渲染容器 (ZoneEditorPackageView)
+// -------------------------------------------------------
+@interface ZoneEditorPackageView : UIView
+@property (nonatomic, strong) UIView *uiPackageView; 
+@property (nonatomic, strong) id package;            
+@property (nonatomic, strong) id stateController;
+@property (nonatomic, strong) CALayer *rootLayer;
+- (instancetype)initWithURL:(NSURL *)url;
+- (BOOL)setState:(NSString *)state;
+@end
+
+@implementation ZoneEditorPackageView
+- (instancetype)initWithURL:(NSURL *)url {
+    self = [super initWithFrame:CGRectZero];
+    if (self) {
+        Class UICPClass = NSClassFromString(@"_UICAPackageView");
+        if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
+            @try {
+                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:url publishedObjectViewClassMap:nil];
+                if (_uiPackageView) {
+                    _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                    [self addSubview:_uiPackageView];
+                    _rootLayer = [_uiPackageView.layer.sublayers firstObject];
+                    return self;
+                }
+            } @catch (NSException *e) {}
+        }
+        
+        Class CAPackageClass = NSClassFromString(@"CAPackage");
+        if (CAPackageClass) {
+            NSError *err = nil;
+            _package = [(id)CAPackageClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:&err];
+            if (!_package) {
+                _package = [(id)CAPackageClass packageWithContentsOfURL:[url URLByAppendingPathComponent:@"main.caml"] type:@"com.apple.coreanimation-xml" options:nil error:&err];
+            }
+            if (_package) {
+                _rootLayer = [_package valueForKey:@"rootLayer"];
+                if (_rootLayer) {
+                    _rootLayer.geometryFlipped = NO;
+                    [self.layer addSublayer:_rootLayer];
+                    Class CAStateControllerClass = NSClassFromString(@"CAStateController");
+                    if (CAStateControllerClass) {
+                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:_rootLayer]; 
+                    }
+                }
+            }
+        }
+    }
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (_uiPackageView) _uiPackageView.frame = self.bounds;
+    else if (_rootLayer) _rootLayer.frame = self.bounds;
+}
+- (BOOL)setState:(NSString *)state {
+    if (_uiPackageView && [_uiPackageView respondsToSelector:@selector(setState:)]) {
+        return (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
+    }
+    if (_stateController && _package && _rootLayer) {
+        NSMethodSignature *sig = [[_stateController class] instanceMethodSignatureForSelector:@selector(setState:ofLayer:transitionSpeed:)];
+        if (sig) {
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setSelector:@selector(setState:ofLayer:transitionSpeed:)];
+            [inv setTarget:_stateController];
+            [inv setArgument:&state atIndex:2];
+            [inv setArgument:&_rootLayer atIndex:3];
+            float speed = 1.0f;
+            [inv setArgument:&speed atIndex:4];
+            [inv invoke];
+            return YES;
+        }
+    }
+    return NO;
+}
+@end
+
+
+// -------------------------------------------------------
+// 4. 克隆自 .x 的 XML 解析引擎 (ZoneEditorCAMLParser)
+// -------------------------------------------------------
+@interface ZoneEditorCAMLParser : NSObject <NSXMLParserDelegate>
+@property (nonatomic, strong) NSMutableDictionary *statesData;
+@property (nonatomic, assign) BOOL isGeometryFlipped;
+@property (nonatomic, copy) NSString *currentParsingState;
+@property (nonatomic, copy) NSString *currentParsingTargetId;
+@property (nonatomic, copy) NSString *currentParsingKeyPath;
+- (void)parseFile:(NSString *)path;
+@end
+
+@implementation ZoneEditorCAMLParser
+- (instancetype)init {
+    if (self = [super init]) {
+        _statesData = [NSMutableDictionary new];
+    }
+    return self;
+}
+- (void)parseFile:(NSString *)path {
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return;
+    NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
+    parser.delegate = self;
+    [parser parse];
+}
+- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary *)attributeDict {
+    if ([elementName isEqualToString:@"CALayer"] || [elementName isEqualToString:@"CAEmitterLayer"]) {
+        if ([attributeDict[@"id"] isEqualToString:@"__capRootLayer__"]) {
+            if ([attributeDict[@"geometryFlipped"] intValue] == 1) self.isGeometryFlipped = YES;
+        }
+    } else if ([elementName isEqualToString:@"LKState"]) {
+        self.currentParsingState = attributeDict[@"name"];
+    } else if ([elementName isEqualToString:@"LKStateSetValue"]) {
+        self.currentParsingTargetId = attributeDict[@"targetId"];
+        self.currentParsingKeyPath = attributeDict[@"keyPath"];
+    } else if ([elementName isEqualToString:@"value"]) {
+        if (self.currentParsingState && self.currentParsingTargetId && self.currentParsingKeyPath) {
+            NSString *valStr = attributeDict[@"value"];
+            NSString *typeStr = attributeDict[@"type"];
+            if (valStr) {
+                id finalValue = nil;
+                if ([typeStr isEqualToString:@"CGPoint"]) {
+                    NSArray *comps = [valStr componentsSeparatedByString:@" "];
+                    if (comps.count == 2) finalValue = [NSValue valueWithCGPoint:CGPointMake([comps[0] doubleValue], [comps[1] doubleValue])];
+                } else {
+                    finalValue = @([valStr doubleValue]);
+                }
+                if (finalValue) {
+                    NSMutableDictionary *targetDict = self.statesData[self.currentParsingTargetId];
+                    if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; self.statesData[self.currentParsingTargetId] = targetDict; }
+                    NSMutableDictionary *stateDict = targetDict[self.currentParsingState];
+                    if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[self.currentParsingState] = stateDict; }
+                    stateDict[self.currentParsingKeyPath] = finalValue;
+                }
+            }
+        }
+    }
+}
+- (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
+    if ([elementName isEqualToString:@"LKState"]) self.currentParsingState = nil;
+    else if ([elementName isEqualToString:@"LKStateSetValue"]) { self.currentParsingTargetId = nil; self.currentParsingKeyPath = nil; }
+}
+@end
+
+
+// -------------------------------------------------------
+// 5. KVC 安全赋值函数 (源自 .x)
+// -------------------------------------------------------
+static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
+    if (!layer || !keyPath || !value) return;
+    if ([keyPath isEqualToString:@"position.x"]) {
+        CGPoint p = layer.position; p.x = [value doubleValue]; layer.position = p; return;
+    } else if ([keyPath isEqualToString:@"position.y"]) {
+        CGPoint p = layer.position; p.y = [value doubleValue]; layer.position = p; return;
+    } else if ([keyPath isEqualToString:@"bounds.size.width"]) {
+        CGRect b = layer.bounds; b.size.width = [value doubleValue]; layer.bounds = b; return;
+    } else if ([keyPath isEqualToString:@"bounds.size.height"]) {
+        CGRect b = layer.bounds; b.size.height = [value doubleValue]; layer.bounds = b; return;
+    } else if ([keyPath isEqualToString:@"position"]) {
+        layer.position = [value CGPointValue]; return;
+    }
+    @try { [layer setValue:value forKeyPath:keyPath]; } @catch (NSException *e) {}
+}
+
+
+// -------------------------------------------------------
+// 6. 主页 UI：高级编辑器控制器
+// -------------------------------------------------------
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
 @property (nonatomic, copy) NSString *wallpaperPath;
 
 @property (nonatomic, strong) UISegmentedControl *stateSegment;
 @property (nonatomic, strong) UIView *canvasContainer;
-@property (nonatomic, strong) CALayer *packageRootLayer; // 纯物理图层，无视 iOS UI 封装限制
+@property (nonatomic, strong) ZoneEditorPackageView *editorPackageView;
+@property (nonatomic, strong) ZoneEditorCAMLParser *camlParser;
+@property (nonatomic, strong) NSMutableDictionary *layerMap; // 图层字典映射
 
 @property (nonatomic, strong) UIStackView *bottomToolbar;
 @property (nonatomic, strong) UILabel *tipLabel;
@@ -2593,14 +2760,14 @@ static NSString * GetPrefsPlistPath() {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.title = @"高级编辑";
+    self.layerMap = [NSMutableDictionary dictionary];
     
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(closeEditor)];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存生效" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndApply)];
     
-    // 1. 顶部状态切换器
     NSArray *states = @[@"息屏", @"锁屏", @"解锁"];
     self.stateSegment = [[UISegmentedControl alloc] initWithItems:states];
-    self.stateSegment.selectedSegmentIndex = 1; // 默认锁屏
+    self.stateSegment.selectedSegmentIndex = 1; 
     [self.stateSegment addTarget:self action:@selector(stateChanged:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:self.stateSegment];
     
@@ -2611,7 +2778,6 @@ static NSString * GetPrefsPlistPath() {
         [self.stateSegment.widthAnchor constraintEqualToAnchor:self.view.widthAnchor multiplier:0.9]
     ]];
     
-    // 2. 居中画板
     self.canvasContainer = [[UIView alloc] init];
     self.canvasContainer.backgroundColor = [UIColor blackColor];
     self.canvasContainer.layer.cornerRadius = 20;
@@ -2632,7 +2798,6 @@ static NSString * GetPrefsPlistPath() {
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(canvasTapped:)];
     [self.canvasContainer addGestureRecognizer:tap];
     
-    // 拾取高亮框
     self.highlightBorderView = [[UIView alloc] init];
     self.highlightBorderView.layer.borderWidth = 2;
     self.highlightBorderView.layer.borderColor = [UIColor systemYellowColor].CGColor;
@@ -2641,7 +2806,6 @@ static NSString * GetPrefsPlistPath() {
     self.highlightBorderView.userInteractionEnabled = NO;
     [self.canvasContainer addSubview:self.highlightBorderView];
     
-    // 3. 底部提示与工具栏
     self.tipLabel = [[UILabel alloc] init];
     self.tipLabel.text = @"请点击上方画板中的图片进行编辑";
     self.tipLabel.textColor = [UIColor secondaryLabelColor];
@@ -2676,7 +2840,7 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (void)setupToolbarButtons {
-    NSArray *titles = @[@"替换素材", @"图层动画", @"上移", @"下移", @"删除"];
+    NSArray *titles = @[@"替换素材", @"图层动画", @"上移", @"下移", @"删除图层"];
     NSArray *actions = @[@"actionReplace:", @"actionAnimationMenu:", @"actionMoveUp:", @"actionMoveDown:", @"actionDelete:"];
     
     for (int i = 0; i < titles.count; i++) {
@@ -2690,15 +2854,15 @@ static NSString * GetPrefsPlistPath() {
 }
 
 // =======================================================
-// 【终极修复 1】：降维打击，直接加载 CAPackage 避开所有的系统 UI 限制！
+// 无缝加载引擎与映射表
 // =======================================================
-
 - (void)loadWallpaperEngine {
-    if (self.packageRootLayer) {
-        [self.packageRootLayer removeFromSuperlayer];
-        self.packageRootLayer = nil;
+    if (self.editorPackageView) {
+        [self.editorPackageView removeFromSuperview];
+        self.editorPackageView = nil;
     }
     self.highlightBorderView.hidden = YES;
+    [self.layerMap removeAllObjects];
     
     NSString *bgPath = nil;
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -2718,93 +2882,59 @@ static NSString * GetPrefsPlistPath() {
         self.currentCamlPath = [bgPath stringByAppendingPathComponent:@"main.caml"];
         self.currentCamlString = [NSString stringWithContentsOfFile:self.currentCamlPath encoding:NSUTF8StringEncoding error:nil];
         
+        // 1. 初始化底板视图
         NSURL *url = [NSURL fileURLWithPath:bgPath isDirectory:YES];
-        Class CAPackageClass = NSClassFromString(@"CAPackage");
+        self.editorPackageView = [[ZoneEditorPackageView alloc] initWithURL:url];
+        self.editorPackageView.frame = self.canvasContainer.bounds;
+        [self.canvasContainer insertSubview:self.editorPackageView atIndex:0];
         
-        if (CAPackageClass) {
-            NSError *err = nil;
-            id package = [CAPackageClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:&err];
-            if (!package) package = [CAPackageClass packageWithContentsOfURL:[url URLByAppendingPathComponent:@"main.caml"] type:@"com.apple.coreanimation-xml" options:nil error:&err];
+        // 2. 解析 CAML 获取准确状态数据
+        self.camlParser = [[ZoneEditorCAMLParser alloc] init];
+        [self.camlParser parseFile:self.currentCamlPath];
+        
+        // 3. 构建视图层级缩放与字典映射
+        CALayer *rootLayer = self.editorPackageView.rootLayer;
+        if (rootLayer) {
+            self.editorPackageView.layer.geometryFlipped = !self.camlParser.isGeometryFlipped;
+            CGFloat scale = self.canvasContainer.bounds.size.width / 390.0; 
+            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+            rootLayer.position = CGPointMake(self.canvasContainer.bounds.size.width / 2.0, self.canvasContainer.bounds.size.height / 2.0);
             
-            if (package) {
-                self.packageRootLayer = [package valueForKey:@"rootLayer"];
-                if (self.packageRootLayer) {
-                    self.packageRootLayer.geometryFlipped = NO;
-                    [self.canvasContainer.layer insertSublayer:self.packageRootLayer atIndex:0];
-                    
-                    CGFloat scale = self.canvasContainer.bounds.size.width / 390.0;
-                    self.packageRootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
-                    self.packageRootLayer.position = CGPointMake(self.canvasContainer.bounds.size.width / 2.0, self.canvasContainer.bounds.size.height / 2.0);
-                }
-            }
+            [self buildLayerMap:rootLayer];
         }
     }
     
     [self stateChanged:self.stateSegment];
 }
 
-// 【终极修复 2】：纯手工解析 CAML 并注入状态值，绕过 iOS 17 的底层冻结逻辑
+- (void)buildLayerMap:(CALayer *)layer {
+    if (layer.name && layer.name.length > 0) {
+        self.layerMap[layer.name] = layer;
+    }
+    for (CALayer *sub in layer.sublayers) {
+        [self buildLayerMap:sub];
+    }
+}
+
+// 【彻底修复状态冻结】：依靠 CAML 解析器的数值强制通过 KVC 覆盖状态
 - (void)stateChanged:(UISegmentedControl *)seg {
     NSString *targetState = @[@"Sleep", @"Locked", @"Unlock"][seg.selectedSegmentIndex];
-    if (!self.currentCamlString || !self.packageRootLayer) return;
-    
-    // 正则提取目标 State 内的所有 LKStateSetValue
-    NSString *statePattern = [NSString stringWithFormat:@"<LKState name=\"%@\">.*?</LKState>", targetState];
-    NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
-    NSTextCheckingResult *stateMatch = [stateRegex firstMatchInString:self.currentCamlString options:0 range:NSMakeRange(0, self.currentCamlString.length)];
+    if (!self.editorPackageView) return;
     
     [CATransaction begin];
     [CATransaction setAnimationDuration:0.5];
     [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
     
-    if (stateMatch) {
-        NSString *stateContent = [self.currentCamlString substringWithRange:stateMatch.range];
-        
-        // 解析 <LKStateSetValue>，兼容 value="..." 和残缺换行标签
-        NSString *setValuePattern = @"<LKStateSetValue targetId=\"([^\"]+)\" keyPath=\"([^\"]+)\">(.*?)</LKStateSetValue>";
-        NSRegularExpression *setValueRegex = [NSRegularExpression regularExpressionWithPattern:setValuePattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
-        NSArray *matches = [setValueRegex matchesInString:stateContent options:0 range:NSMakeRange(0, stateContent.length)];
-        
-        for (NSTextCheckingResult *match in matches) {
-            NSString *targetId = [stateContent substringWithRange:[match rangeAtIndex:1]];
-            NSString *keyPath = [stateContent substringWithRange:[match rangeAtIndex:2]];
-            NSString *innerContent = [stateContent substringWithRange:[match rangeAtIndex:3]];
-            
-            NSString *valueStr = nil;
-            // 尝试提取属性 value="..."
-            NSRegularExpression *attrRegex = [NSRegularExpression regularExpressionWithPattern:@"value=\"([^\"]+)\"" options:0 error:nil];
-            NSTextCheckingResult *attrMatch = [attrRegex firstMatchInString:innerContent options:0 range:NSMakeRange(0, innerContent.length)];
-            if (attrMatch) {
-                valueStr = [innerContent substringWithRange:[attrMatch rangeAtIndex:1]];
-            } else {
-                // 尝试提取闭合内部文本 (如 <value> 306 206 </value>)
-                NSRegularExpression *textRegex = [NSRegularExpression regularExpressionWithPattern:@">([^<]+)" options:0 error:nil];
-                NSTextCheckingResult *textMatch = [textRegex firstMatchInString:innerContent options:0 range:NSMakeRange(0, innerContent.length)];
-                if (textMatch) {
-                    valueStr = [[innerContent substringWithRange:[textMatch rangeAtIndex:1]] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                }
-            }
-            
-            if (valueStr && valueStr.length > 0) {
-                CALayer *layer = [self findLayerByName:targetId inRoot:self.packageRootLayer];
-                if (layer) {
-                    // 安全暴力注入 KVC
-                    if ([keyPath isEqualToString:@"position"] && [valueStr componentsSeparatedByString:@" "].count >= 2) {
-                        NSArray *comps = [valueStr componentsSeparatedByString:@" "];
-                        [layer setValue:[NSValue valueWithCGPoint:CGPointMake([comps[0] doubleValue], [comps[1] doubleValue])] forKeyPath:keyPath];
-                    } else if ([keyPath isEqualToString:@"position.x"]) {
-                        CGPoint p = layer.position; p.x = [valueStr doubleValue]; layer.position = p;
-                    } else if ([keyPath isEqualToString:@"position.y"]) {
-                        CGPoint p = layer.position; p.y = [valueStr doubleValue]; layer.position = p;
-                    } else if ([keyPath isEqualToString:@"bounds.size.width"]) {
-                        CGRect b = layer.bounds; b.size.width = [valueStr doubleValue]; layer.bounds = b;
-                    } else if ([keyPath isEqualToString:@"bounds.size.height"]) {
-                        CGRect b = layer.bounds; b.size.height = [valueStr doubleValue]; layer.bounds = b;
-                    } else {
-                        @try { [layer setValue:@([valueStr doubleValue]) forKeyPath:keyPath]; } @catch (NSException *e) {}
-                    }
-                }
-            }
+    // 发送系统级状态切换指令 (应对基础变形)
+    [self.editorPackageView setState:targetState];
+    
+    // 发送手工 KVC 解析指令 (应对 iOS 17 的沙盒冻结，强行覆盖坐标和透明度)
+    for (NSString *targetId in self.camlParser.statesData) {
+        CALayer *layer = self.layerMap[targetId];
+        if (!layer) continue;
+        NSDictionary *vals = self.camlParser.statesData[targetId][targetState];
+        for (NSString *keyPath in vals) {
+            ZoneEditorSafeSetLayerKVC(layer, keyPath, vals[keyPath]);
         }
     }
     
@@ -2818,12 +2948,11 @@ static NSString * GetPrefsPlistPath() {
 // =======================================================
 // 精准点击穿透识别与高亮框更新
 // =======================================================
-
 - (void)canvasTapped:(UITapGestureRecognizer *)gesture {
     CGPoint pt = [gesture locationInView:self.canvasContainer];
-    if (!self.packageRootLayer) return;
+    if (!self.editorPackageView || !self.editorPackageView.rootLayer) return;
     
-    CALayer *hitLayer = [self findImageLayerAtPoint:pt inLayer:self.packageRootLayer];
+    CALayer *hitLayer = [self findImageLayerAtPoint:pt inLayer:self.editorPackageView.rootLayer];
     if (hitLayer) {
         self.selectedLayer = hitLayer;
         self.selectedLayerName = hitLayer.name;
@@ -2839,7 +2968,6 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 递归穿透屏蔽系统虚空层
 - (CALayer *)findImageLayerAtPoint:(CGPoint)pt inLayer:(CALayer *)layer {
     for (CALayer *sub in [layer.sublayers reverseObjectEnumerator]) {
         if (sub.isHidden || sub.opacity < 0.01) continue; 
@@ -2849,20 +2977,11 @@ static NSString * GetPrefsPlistPath() {
             CALayer *deep = [self findImageLayerAtPoint:localPt inLayer:sub];
             if (deep) return deep;
             
-            // 屏蔽 RootLayer，只要图层含有名字即可作为实体层被选中
+            // 实体图层判定：图层名字带有特定后缀，或者是图片图层，并且不是画板基座
             if (sub.name && sub.name.length > 0 && ![sub.name containsString:@"Root Layer"] && ![sub.name containsString:@"__capRootLayer__"]) {
                 return sub;
             }
         }
-    }
-    return nil;
-}
-
-- (CALayer *)findLayerByName:(NSString *)name inRoot:(CALayer *)layer {
-    if ([layer.name isEqualToString:name]) return layer;
-    for (CALayer *sub in layer.sublayers) {
-        CALayer *found = [self findLayerByName:name inRoot:sub];
-        if (found) return found;
     }
     return nil;
 }
@@ -2882,9 +3001,8 @@ static NSString * GetPrefsPlistPath() {
 }
 
 // =======================================================
-// 底部工具栏交互菜单 (图层编辑器)
+// 工具栏核心交互
 // =======================================================
-
 - (void)actionReplace:(UIButton *)sender {
     if (!self.selectedLayerName) return;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
@@ -2903,7 +3021,7 @@ static NSString * GetPrefsPlistPath() {
         NSData *data = UIImagePNGRepresentation(img);
         [data writeToFile:targetPath atomically:YES];
         
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"替换成功" message:@"图片已覆盖，可在预览屏查看效果。" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"替换成功" message:@"图片已覆盖，可在预览屏实时查看。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             [self refreshCanvas];
         }]];
@@ -2911,11 +3029,11 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// 【关键修复】：根据用户需求弹出分离式动画跳转菜单
+// 点击图层动画，弹出 7 种动画跳转菜单
 - (void)actionAnimationMenu:(UIButton *)sender {
     if (!self.selectedLayerName) return;
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图层动画编辑 (CAML)" message:[NSString stringWithFormat:@"当前选中图片: %@", self.selectedLayerName] preferredStyle:UIAlertControllerStyleActionSheet];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"编辑 CAML 动画代码" message:[NSString stringWithFormat:@"当前选中图片: %@", self.selectedLayerName] preferredStyle:UIAlertControllerStyleActionSheet];
     
     NSArray *fromStates = @[@"Sleep", @"Locked", @"Locked", @"Unlock", @"Sleep", @"Unlock", @"*"];
     NSArray *toStates = @[@"Locked", @"Sleep", @"Unlock", @"Locked", @"Unlock", @"Sleep", @"*"];
@@ -2932,7 +3050,6 @@ static NSString * GetPrefsPlistPath() {
     }
     
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    
     if (alert.popoverPresentationController) {
         alert.popoverPresentationController.sourceView = sender;
         alert.popoverPresentationController.sourceRect = sender.bounds;
@@ -2949,7 +3066,7 @@ static NSString * GetPrefsPlistPath() {
     if (match) {
         contentToEdit = [self.currentCamlString substringWithRange:match.range];
     } else {
-        // 如果 XML 原本不存在该节点的动画，就自动生成一个初始的完美模板
+        // XML 若不存在此过渡，自动生成优雅的初始模板
         contentToEdit = [NSString stringWithFormat:@"      <LKStateTransition fromState=\"%@\" toState=\"%@\">\n        <elements>\n          <LKStateTransitionElement targetId=\"%@\" key=\"position\">\n            <animation type=\"CASpringAnimation\" duration=\"0.8\" fillMode=\"backwards\" keyPath=\"position\"/>\n          </LKStateTransitionElement>\n        </elements>\n      </LKStateTransition>", from, to, self.selectedLayerName];
     }
     
@@ -2975,7 +3092,7 @@ static NSString * GetPrefsPlistPath() {
                 // 原有节点存在，替换覆写
                 weakSelf.currentCamlString = [regex stringByReplacingMatchesInString:weakSelf.currentCamlString options:0 range:NSMakeRange(0, weakSelf.currentCamlString.length) withTemplate:newContent];
             } else {
-                // 原有节点不存在，直接插入到 <stateTransitions>
+                // 原有节点不存在，直接插入到 <stateTransitions> 底部
                 NSRegularExpression *appendRegex = [NSRegularExpression regularExpressionWithPattern:@"(<stateTransitions>)" options:0 error:nil];
                 weakSelf.currentCamlString = [appendRegex stringByReplacingMatchesInString:weakSelf.currentCamlString options:0 range:NSMakeRange(0, weakSelf.currentCamlString.length) withTemplate:[NSString stringWithFormat:@"$1\n%@", newContent]];
             }
@@ -2988,13 +3105,8 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:nav animated:YES completion:nil];
 }
 
-- (void)actionMoveUp:(UIButton *)sender {
-    [self modifyLayerZPosition:1];
-}
-
-- (void)actionMoveDown:(UIButton *)sender {
-    [self modifyLayerZPosition:-1];
-}
+- (void)actionMoveUp:(UIButton *)sender { [self modifyLayerZPosition:1]; }
+- (void)actionMoveDown:(UIButton *)sender { [self modifyLayerZPosition:-1]; }
 
 - (void)modifyLayerZPosition:(int)delta {
     self.selectedLayer.zPosition += delta;
