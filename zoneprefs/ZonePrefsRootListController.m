@@ -2581,7 +2581,6 @@ static NSString * GetPrefsPlistPath() {
     [self.stateSegment addTarget:self action:@selector(stateSegmentChanged:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:self.stateSegment];
     
-    // 完美贴合手机屏幕比例
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     CGFloat screenAspect = screenSize.height / screenSize.width;
     CGFloat previewWidth = self.view.bounds.size.width - 60;
@@ -2642,14 +2641,16 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:self.bottomToolbar];
 }
 
-// iOS 14.3 终极防崩溃生成器，严格拦截 iOS 16 版本检查
 - (UIView *)createPackageViewWithURL:(NSURL *)url {
     dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
     
     if (@available(iOS 16.0, *)) {
         Class BSUIPackageClass = NSClassFromString(@"BSUICAPackageView");
         if (BSUIPackageClass) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             id pkg = [[BSUIPackageClass alloc] performSelector:NSSelectorFromString(@"initWithURL:") withObject:url];
+#pragma clang diagnostic pop
             if (pkg) return pkg;
         }
     }
@@ -2697,8 +2698,11 @@ static NSString * GetPrefsPlistPath() {
             [inv setArgument:&type1 atIndex:3];
             id nilObj = nil;
             [inv setArgument:&nilObj atIndex:4];
-            NSError **errPtr = &err;
-            [inv setArgument:&errPtr atIndex:5];
+            
+            // 规避 ARC NSError ** 指针推断错误
+            void *argValue = &err;
+            [inv setArgument:&argValue atIndex:5];
+            
             [inv invoke];
             [inv getReturnValue:&package];
             
@@ -2718,7 +2722,10 @@ static NSString * GetPrefsPlistPath() {
                     [container.layer addSublayer:root];
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                         id stateController = [[CAStateControllerClass alloc] performSelector:NSSelectorFromString(@"initWithLayer:") withObject:root];
+#pragma clang diagnostic pop
                         container.stateController = stateController;
                         container.package = package;
                     }
@@ -2766,7 +2773,6 @@ static NSString * GetPrefsPlistPath() {
     
     [self stateSegmentChanged:self.stateSegment];
     
-    // 确保高亮层永远在最顶部，不再使用 view 的 bringSubviewToFront 避免编译错误
     if (self.selectionBoxLayer.superlayer) {
         [self.selectionBoxLayer removeFromSuperlayer];
     }
@@ -2806,6 +2812,8 @@ static NSString * GetPrefsPlistPath() {
 - (void)safeSetState:(NSString *)state forView:(UIView *)view {
     if (!view) return;
     
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
         ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
         if (fbView.uicpView && [fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:")]) {
@@ -2834,6 +2842,7 @@ static NSString * GetPrefsPlistPath() {
             [view performSelector:NSSelectorFromString(@"setState:") withObject:state];
         }
     }
+#pragma clang diagnostic pop
 }
 
 - (void)stateSegmentChanged:(UISegmentedControl *)sender {
