@@ -2567,31 +2567,37 @@ static NSString * GetPrefsPlistPath() {
 - (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
 @end
 
+@interface BSUICAPackageView : UIView
+- (id)initWithURL:(NSURL *)url;
+- (BOOL)setState:(NSString *)state;
+- (BOOL)setState:(NSString *)state animated:(BOOL)animated;
+@end
+
 
 // -------------------------------------------------------
-// 3. 克隆自 .x 的全系统兼容渲染容器 (ZoneEditorPackageView)
+// 3. 完美移植自 .x 的全系统兼容渲染容器 (ZoneEditorFallbackPackageView)
 // -------------------------------------------------------
-@interface ZoneEditorPackageView : UIView
+@interface ZoneEditorFallbackPackageView : UIView
 @property (nonatomic, strong) UIView *uiPackageView; 
 @property (nonatomic, strong) id package;            
 @property (nonatomic, strong) id stateController;
-@property (nonatomic, strong) CALayer *rootLayer;
 - (instancetype)initWithURL:(NSURL *)url;
 - (BOOL)setState:(NSString *)state;
+- (BOOL)setState:(NSString *)state animated:(BOOL)animated;
 @end
 
-@implementation ZoneEditorPackageView
+@implementation ZoneEditorFallbackPackageView
 - (instancetype)initWithURL:(NSURL *)url {
     self = [super initWithFrame:CGRectZero];
     if (self) {
+        NSURL *dirURL = [url copy]; // 必须 Copy，防止内存被释放导致路径错乱
         Class UICPClass = NSClassFromString(@"_UICAPackageView");
         if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
             @try {
-                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:url publishedObjectViewClassMap:nil];
+                _uiPackageView = [[(id)UICPClass alloc] initWithContentsOfURL:dirURL publishedObjectViewClassMap:nil];
                 if (_uiPackageView) {
                     _uiPackageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                     [self addSubview:_uiPackageView];
-                    _rootLayer = [_uiPackageView.layer.sublayers firstObject];
                     return self;
                 }
             } @catch (NSException *e) {}
@@ -2600,18 +2606,20 @@ static NSString * GetPrefsPlistPath() {
         Class CAPackageClass = NSClassFromString(@"CAPackage");
         if (CAPackageClass) {
             NSError *err = nil;
-            _package = [(id)CAPackageClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:&err];
+            // 核心修复：按 .x 逻辑，先尝试加载 package，失败则降级加载 xml
+            _package = [(id)CAPackageClass packageWithContentsOfURL:dirURL type:@"com.apple.coreanimation-package" options:nil error:&err];
             if (!_package) {
-                _package = [(id)CAPackageClass packageWithContentsOfURL:[url URLByAppendingPathComponent:@"main.caml"] type:@"com.apple.coreanimation-xml" options:nil error:&err];
+                NSURL *camlURL = [dirURL URLByAppendingPathComponent:@"main.caml"];
+                _package = [(id)CAPackageClass packageWithContentsOfURL:camlURL type:@"com.apple.coreanimation-xml" options:nil error:&err];
             }
             if (_package) {
-                _rootLayer = [_package valueForKey:@"rootLayer"];
-                if (_rootLayer) {
-                    _rootLayer.geometryFlipped = NO;
-                    [self.layer addSublayer:_rootLayer];
+                CALayer *rootLayer = [_package valueForKey:@"rootLayer"];
+                if (rootLayer) {
+                    rootLayer.geometryFlipped = NO;
+                    [self.layer addSublayer:rootLayer];
                     Class CAStateControllerClass = NSClassFromString(@"CAStateController");
                     if (CAStateControllerClass) {
-                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:_rootLayer]; 
+                        _stateController = [[(id)CAStateControllerClass alloc] initWithLayer:rootLayer]; 
                     }
                 }
             }
@@ -2621,25 +2629,42 @@ static NSString * GetPrefsPlistPath() {
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (_uiPackageView) _uiPackageView.frame = self.bounds;
-    else if (_rootLayer) _rootLayer.frame = self.bounds;
+    if (_uiPackageView) {
+        _uiPackageView.frame = self.bounds;
+    } else if (_package) {
+        CALayer *rootLayer = [_package valueForKey:@"rootLayer"];
+        if (rootLayer) rootLayer.frame = self.bounds;
+    }
 }
 - (BOOL)setState:(NSString *)state {
+    return [self setState:state animated:NO];
+}
+- (BOOL)setState:(NSString *)state animated:(BOOL)animated {
     if (_uiPackageView && [_uiPackageView respondsToSelector:@selector(setState:)]) {
+        if (!animated) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            BOOL result = (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
+            [CATransaction commit];
+            return result;
+        }
         return (BOOL)[_uiPackageView performSelector:@selector(setState:) withObject:state];
     }
-    if (_stateController && _package && _rootLayer) {
-        NSMethodSignature *sig = [[_stateController class] instanceMethodSignatureForSelector:@selector(setState:ofLayer:transitionSpeed:)];
-        if (sig) {
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setSelector:@selector(setState:ofLayer:transitionSpeed:)];
-            [inv setTarget:_stateController];
-            [inv setArgument:&state atIndex:2];
-            [inv setArgument:&_rootLayer atIndex:3];
-            float speed = 1.0f;
-            [inv setArgument:&speed atIndex:4];
-            [inv invoke];
-            return YES;
+    if (_stateController && _package) {
+        CALayer *rootLayer = [_package valueForKey:@"rootLayer"];
+        if (rootLayer) {
+            NSMethodSignature *sig = [[_stateController class] instanceMethodSignatureForSelector:@selector(setState:ofLayer:transitionSpeed:)];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setSelector:@selector(setState:ofLayer:transitionSpeed:)];
+                [inv setTarget:_stateController];
+                [inv setArgument:&state atIndex:2];
+                [inv setArgument:&rootLayer atIndex:3];
+                float speed = animated ? 1.0f : 0.0f;
+                [inv setArgument:&speed atIndex:4];
+                [inv invoke];
+                return YES;
+            }
         }
     }
     return NO;
@@ -2742,7 +2767,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 
 @property (nonatomic, strong) UISegmentedControl *stateSegment;
 @property (nonatomic, strong) UIView *canvasContainer;
-@property (nonatomic, strong) ZoneEditorPackageView *editorPackageView;
+// 核心修复：由于引进了 BSUICAPackageView，这里改为泛型 UIView 接收
+@property (nonatomic, strong) UIView *editorPackageView; 
 @property (nonatomic, strong) ZoneEditorCAMLParser *camlParser;
 @property (nonatomic, strong) NSMutableDictionary *layerMap; 
 
@@ -2856,7 +2882,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 无缝加载引擎与映射表
+// 无缝加载引擎与映射表 (接入了 .x 的原生解析核心)
 // =======================================================
 - (void)loadWallpaperEngine {
     if (self.editorPackageView) {
@@ -2884,9 +2910,16 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         self.currentCamlPath = [bgPath stringByAppendingPathComponent:@"main.caml"];
         self.currentCamlString = [NSString stringWithContentsOfFile:self.currentCamlPath encoding:NSUTF8StringEncoding error:nil];
         
+        // 核心修复：强制在设置 App 内尝试注入系统原生的渲染框架，并配置完美的降级方案
+        dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
+        Class PackageViewClass = NSClassFromString(@"BSUICAPackageView");
+        if (!PackageViewClass || ![PackageViewClass instancesRespondToSelector:@selector(initWithURL:)]) {
+            PackageViewClass = [ZoneEditorFallbackPackageView class];
+        }
+        
         // 1. 初始化底板视图
         NSURL *url = [NSURL fileURLWithPath:bgPath isDirectory:YES];
-        self.editorPackageView = [[ZoneEditorPackageView alloc] initWithURL:url];
+        self.editorPackageView = [[(id)PackageViewClass alloc] initWithURL:url];
         self.editorPackageView.frame = self.canvasContainer.bounds;
         [self.canvasContainer insertSubview:self.editorPackageView atIndex:0];
         
@@ -2894,14 +2927,33 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         self.camlParser = [[ZoneEditorCAMLParser alloc] init];
         [self.camlParser parseFile:self.currentCamlPath];
         
-        // 3. 构建视图层级缩放与字典映射
-        CALayer *rootLayer = self.editorPackageView.rootLayer;
+        // 3. 构建视图层级缩放与字典映射 (接入完美缩放算法)
+        // 注意：BSUICAPackageView 内部封装了 layer，ZoneEditorFallbackPackageView 也有对应的获取方式
+        CALayer *rootLayer = nil;
+        if ([self.editorPackageView isKindOfClass:[ZoneEditorFallbackPackageView class]]) {
+            id pkg = [(ZoneEditorFallbackPackageView *)self.editorPackageView package];
+            if (pkg) rootLayer = [pkg valueForKey:@"rootLayer"];
+            if (!rootLayer) rootLayer = [[(ZoneEditorFallbackPackageView *)self.editorPackageView uiPackageView].layer.sublayers firstObject];
+        } else {
+            rootLayer = [self.editorPackageView.layer.sublayers firstObject];
+        }
+        
         if (rootLayer) {
-            self.editorPackageView.layer.geometryFlipped = !self.camlParser.isGeometryFlipped;
-            CGFloat scale = self.canvasContainer.bounds.size.width / 390.0; 
-            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
-            rootLayer.position = CGPointMake(self.canvasContainer.bounds.size.width / 2.0, self.canvasContainer.bounds.size.height / 2.0);
+            BOOL camlFlipped = self.camlParser.isGeometryFlipped;
+            self.editorPackageView.layer.geometryFlipped = !camlFlipped;
             
+            CGFloat canvasW = self.canvasContainer.bounds.size.width;
+            CGFloat canvasH = self.canvasContainer.bounds.size.height;
+            CGSize realSize = rootLayer.bounds.size;
+            
+            if (realSize.width > 0 && realSize.height > 0) {
+                CGFloat scaleX = canvasW / realSize.width;
+                CGFloat scaleY = canvasH / realSize.height;
+                CGFloat scale = MAX(scaleX, scaleY);
+                
+                rootLayer.position = CGPointMake(canvasW / 2.0, canvasH / 2.0);
+                rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+            }
             [self buildLayerMap:rootLayer];
         }
     }
@@ -2928,7 +2980,9 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
     
     // 发送系统级状态切换指令 (应对基础变形)
-    [self.editorPackageView setState:targetState];
+    if ([self.editorPackageView respondsToSelector:@selector(setState:)]) {
+        [self.editorPackageView performSelector:@selector(setState:) withObject:targetState];
+    }
     
     // 发送手工 KVC 解析指令 (强制覆盖坐标和透明度)
     for (NSString *targetId in self.camlParser.statesData) {
@@ -2952,9 +3006,20 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 // =======================================================
 - (void)canvasTapped:(UITapGestureRecognizer *)gesture {
     CGPoint pt = [gesture locationInView:self.canvasContainer];
-    if (!self.editorPackageView || !self.editorPackageView.rootLayer) return;
+    if (!self.editorPackageView) return;
     
-    CALayer *hitLayer = [self findImageLayerAtPoint:pt inLayer:self.editorPackageView.rootLayer];
+    CALayer *rootLayer = nil;
+    if ([self.editorPackageView isKindOfClass:[ZoneEditorFallbackPackageView class]]) {
+        id pkg = [(ZoneEditorFallbackPackageView *)self.editorPackageView package];
+        if (pkg) rootLayer = [pkg valueForKey:@"rootLayer"];
+        if (!rootLayer) rootLayer = [[(ZoneEditorFallbackPackageView *)self.editorPackageView uiPackageView].layer.sublayers firstObject];
+    } else {
+        rootLayer = [self.editorPackageView.layer.sublayers firstObject];
+    }
+    
+    if (!rootLayer) return;
+    
+    CALayer *hitLayer = [self findImageLayerAtPoint:pt inLayer:rootLayer];
     if (hitLayer) {
         self.selectedLayer = hitLayer;
         self.selectedLayerName = hitLayer.name;
