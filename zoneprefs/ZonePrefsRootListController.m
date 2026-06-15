@@ -2539,7 +2539,7 @@ static NSString * GetPrefsPlistPath() {
             self.textView.text = [caml substringWithRange:match.range];
         } else {
             self.matchedRange = NSMakeRange(NSNotFound, 0);
-            self.textView.text = [NSString stringWithFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n  <elements>\n    <!-- 在此添加对图层 [%@] 的动画属性 -->\n  </elements>\n</LKStateTransition>", self.fromState, self.toState, self.layerName];
+            self.textView.text = [NSString stringWithFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n  <elements>\n    \n  </elements>\n</LKStateTransition>", self.fromState, self.toState, self.layerName];
         }
     }
 }
@@ -2731,47 +2731,18 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (UIView *)createPackageViewWithURL:(NSURL *)url {
-    dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
-    
-    if (@available(iOS 16.0, *)) {
-        Class BSUIPackageClass = NSClassFromString(@"BSUICAPackageView");
-        if (BSUIPackageClass) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id pkg = [[BSUIPackageClass alloc] performSelector:NSSelectorFromString(@"initWithURL:") withObject:url];
-#pragma clang diagnostic pop
-            if (pkg) return pkg;
-        }
-    }
-    
     ZoneEditorFallbackView *container = [[ZoneEditorFallbackView alloc] initWithFrame:CGRectZero];
-    
-    Class UICPClass = NSClassFromString(@"_UICAPackageView");
-    if (UICPClass) {
-        @try {
-            id packageView = [UICPClass alloc];
-            if ([packageView respondsToSelector:NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:")]) {
-                id (*imp)(id, SEL, id, id) = (id(*)(id, SEL, id, id))[packageView methodForSelector:NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:")];
-                if (imp) {
-                    packageView = imp(packageView, NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:"), url, nil);
-                    if (packageView) {
-                        [packageView setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
-                        [container addSubview:packageView];
-                        container.uicpView = packageView;
-                        return container;
-                    }
-                }
-            }
-        } @catch(NSException *e) {}
-    }
     
     Class capClass = NSClassFromString(@"CAPackage");
     if (capClass && [capClass respondsToSelector:@selector(packageWithContentsOfURL:type:options:error:)]) {
-        id package = [capClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:nil];
-        if (!package) {
-            NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
-            package = [capClass packageWithContentsOfURL:camlURL type:@"com.apple.coreanimation-xml" options:nil error:nil];
-        }
+        id package = nil;
+        @try {
+            package = [capClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:nil];
+            if (!package) {
+                NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
+                package = [capClass packageWithContentsOfURL:camlURL type:@"com.apple.coreanimation-xml" options:nil error:nil];
+            }
+        } @catch(NSException *e) {}
         
         if (package) {
             CALayer *root = nil;
@@ -2840,9 +2811,6 @@ static NSString * GetPrefsPlistPath() {
             @try { rootLayer = [fbView.package valueForKey:@"rootLayer"]; } @catch(NSException *e){}
             if (rootLayer) fbView.layer.geometryFlipped = !rootLayer.geometryFlipped;
         }
-    } else {
-        rootLayer = [pkgView.layer.sublayers firstObject];
-        pkgView.layer.geometryFlipped = !rootLayer.geometryFlipped;
     }
     
     if (rootLayer) {
@@ -2860,32 +2828,12 @@ static NSString * GetPrefsPlistPath() {
     if (!view) return;
     if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
         ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
-        if (fbView.uicpView) {
-            if ([fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:animated:")]) {
-                void (*imp)(id, SEL, id, BOOL) = (void(*)(id, SEL, id, BOOL))[fbView.uicpView methodForSelector:NSSelectorFromString(@"setState:animated:")];
-                if (imp) imp(fbView.uicpView, NSSelectorFromString(@"setState:animated:"), state, YES);
-            } else if ([fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:")]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                @try { [fbView.uicpView performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e){}
-                #pragma clang diagnostic pop
-            }
-        } else if (fbView.stateController && fbView.package) {
+        if (fbView.stateController && fbView.package) {
             CALayer *root = nil;
             @try { root = [fbView.package valueForKey:@"rootLayer"]; } @catch(NSException *e){}
             if (root && [root isKindOfClass:[CALayer class]]) {
                 [(CAStateController *)fbView.stateController setState:state ofLayer:root transitionSpeed:1.0f];
             }
-        }
-    } else {
-        if ([view respondsToSelector:NSSelectorFromString(@"setState:animated:")]) {
-            void (*imp)(id, SEL, id, BOOL) = (void(*)(id, SEL, id, BOOL))[view methodForSelector:NSSelectorFromString(@"setState:animated:")];
-            if (imp) imp(view, NSSelectorFromString(@"setState:animated:"), state, YES);
-        } else if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            @try { [view performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e){}
-            #pragma clang diagnostic pop
         }
     }
 }
@@ -2946,13 +2894,27 @@ static NSString * GetPrefsPlistPath() {
         if ([viewObj isKindOfClass:[NSNull class]]) continue;
         UIView *view = (UIView *)viewObj;
         
-        CGPoint convertedPoint = [self.previewContainer.layer convertPoint:point toLayer:view.layer];
-        CALayer *found = [self hitTestNamedLayerInTree:view.layer point:convertedPoint];
-        if (found) {
-            self.selectedHitLayer = found;
-            self.selectedLayerPath = paths[i];
-            break;
+        CALayer *rootLayer = nil;
+        if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
+            ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
+            if (fbView.package) {
+                @try { rootLayer = [fbView.package valueForKey:@"rootLayer"]; } @catch(NSException *e){}
+            }
         }
+        
+        if (!rootLayer) continue;
+        
+        CGPoint convertedPoint = [self.previewContainer.layer convertPoint:point toLayer:rootLayer];
+        CALayer *found = [rootLayer hitTest:convertedPoint];
+        while (found && found != rootLayer) {
+            if (found.name.length > 0 && ![found.name isEqualToString:@"rootLayer"]) {
+                self.selectedHitLayer = found;
+                self.selectedLayerPath = paths[i];
+                break;
+            }
+            found = found.superlayer;
+        }
+        if (self.selectedHitLayer) break;
     }
     
     if (self.selectedHitLayer) {
@@ -3030,12 +2992,8 @@ static NSString * GetPrefsPlistPath() {
             NSData *data = UIImagePNGRepresentation(img);
             [data writeToFile:targetImgPath atomically:YES];
             
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            self.selectedHitLayer.contents = (__bridge id)img.CGImage;
-            [CATransaction commit];
-            
             [self bustCacheAndApply];
+            [self loadWallpaperEngine];
             [self showToast:@"图片替换已更新"];
         }
     }];
