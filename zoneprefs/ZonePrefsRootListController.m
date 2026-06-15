@@ -2552,6 +2552,7 @@ static NSString * GetPrefsPlistPath() {
 @end
 
 @implementation ZoneCAMLEditorViewController
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
@@ -2594,9 +2595,19 @@ static NSString * GetPrefsPlistPath() {
             self.matchedRange = match.range;
             self.textView.text = [self.fullCamlString substringWithRange:self.matchedRange];
         } else {
-            // 如果文件里没有这个过渡动画，则生成一个标准模板供用户编写
+            // 【修复编译错误】：拆分格式化字符串，避免多行混合中文导致 Theos 编译器误判格式化参数数量
             self.matchedRange = NSMakeRange(NSNotFound, 0);
-            self.textView.text = [NSString stringWithFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n  <elements>\n    \n    \n  </elements>\n</LKStateTransition>", self.transitionFrom, self.transitionTo, self.targetLayerName ?: @"图层动画"];
+            NSString *layerName = self.targetLayerName ? self.targetLayerName : @"图层动画";
+            
+            NSMutableString *templateStr = [NSMutableString string];
+            [templateStr appendFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n", self.transitionFrom, self.transitionTo];
+            [templateStr appendString:@"  <elements>\n"];
+            [templateStr appendFormat:@"    \n", layerName];
+            [templateStr appendString:@"    \n"];
+            [templateStr appendString:@"  </elements>\n"];
+            [templateStr appendString:@"</LKStateTransition>"];
+            
+            self.textView.text = templateStr;
         }
     }
 }
@@ -2640,6 +2651,7 @@ static NSString * GetPrefsPlistPath() {
 - (void)cancelEdit {
     [self dismissViewControllerAnimated:YES completion:nil];
 }
+
 @end
 
 // ==========================================
