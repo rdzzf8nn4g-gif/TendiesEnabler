@@ -2568,7 +2568,7 @@ static NSString * GetPrefsPlistPath() {
         return;
     }
     
-    // 🛡️ 【核心修复】：分离 < 和 !-- 防止 Theos 编译环境脚本把注释当做真注释给抹除导致空字符串报错
+    // 🛡️ 【核心修复】：分离 < 和 !-- 防止 Theos 编译脚本把字符串当注释抹掉导致空字符串崩溃！
     NSString *cStart = @"<"; cStart = [cStart stringByAppendingString:@"!-"]; cStart = [cStart stringByAppendingString:@"-"];
     NSString *cEnd = @"-"; cEnd = [cEnd stringByAppendingString:@"->"];
     
@@ -2668,16 +2668,18 @@ static NSString * GetPrefsPlistPath() {
     self.title = @"高级实时编辑";
     
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存生效" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndApply)];
-    if (!self.navigationController.viewControllers.firstObject || self.navigationController.viewControllers.firstObject == self) {
-        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(dismissSelf)];
-    }
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(dismissSelf)];
 
     [self setupUI];
     [self loadWallpaperEngine];
 }
 
 - (void)dismissSelf {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    if (self.navigationController && self.navigationController.viewControllers.firstObject != self) {
+        [self.navigationController popViewControllerAnimated:YES];
+    } else {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
 }
 
 - (void)setupUI {
@@ -2747,7 +2749,7 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:self.bottomToolbar];
 }
 
-// 🎯 【新增】：轻量级 Toast 提示组件，摆脱繁琐的 Alert 拦截操作
+// 🎯 【轻量级 Toast 提示组件】，去除了反锁人的 Alert 弹窗
 - (void)showToast:(NSString *)msg {
     UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 240, 40)];
     toast.center = CGPointMake(self.view.bounds.size.width / 2, self.view.bounds.size.height - 100);
@@ -2772,13 +2774,14 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// 🎯 【新增】：跨进程通信全局重载，实现“真·实时生效”
+// 🎯 【跨进程通信全局重载】，任何更改瞬间生效
 - (void)triggerGlobalReload {
     CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)self.wallpaperPath, CFSTR("com.iosdump.zoneprefs"));
     CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
 }
 
+// 🛡️ 【底层包加载引擎】：彻底解决 ARC 与 NSInvocation 带来的 iOS14/15 闪退
 - (UIView *)createPackageViewWithURL:(NSURL *)url {
     dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
     
@@ -2788,7 +2791,6 @@ static NSString * GetPrefsPlistPath() {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             id pkg = nil;
-            // 包裹 @try-@catch 彻底隔绝低系统版本识别导致的崩溃
             @try { pkg = [[BSUIPackageClass alloc] performSelector:NSSelectorFromString(@"initWithURL:") withObject:url]; } @catch(NSException *e){}
             if (pkg) return pkg;
 #pragma clang diagnostic pop
@@ -2799,18 +2801,21 @@ static NSString * GetPrefsPlistPath() {
     Class UICPClass = NSClassFromString(@"_UICAPackageView");
     if (UICPClass) {
         @try {
-            id packageView = [UICPClass alloc];
+            id alloced = [UICPClass alloc];
             SEL initSel = NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:");
-            NSMethodSignature *sig = [packageView methodSignatureForSelector:initSel];
+            NSMethodSignature *sig = [alloced methodSignatureForSelector:initSel];
             if (sig) {
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                 [inv setSelector:initSel];
-                [inv setTarget:packageView];
+                [inv setTarget:alloced];
                 [inv setArgument:&url atIndex:2];
                 id nilObj = nil;
                 [inv setArgument:&nilObj atIndex:3];
                 [inv invoke];
-                [inv getReturnValue:&packageView];
+                
+                void *ret = NULL;
+                [inv getReturnValue:&ret];
+                id packageView = (__bridge_transfer id)ret; // 🔥 这里极其关键：接管 alloc 后的内存归属，防止泄漏
                 
                 if (packageView) {
                     [packageView setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
@@ -2836,16 +2841,27 @@ static NSString * GetPrefsPlistPath() {
             [inv setArgument:&type1 atIndex:3];
             id nilObj = nil;
             [inv setArgument:&nilObj atIndex:4];
-            void *nilErr = nil;
+            void *nilErr = NULL;
             [inv setArgument:&nilErr atIndex:5];
-            @try { [inv invoke]; [inv getReturnValue:&package]; } @catch(NSException *e){}
+            
+            @try { 
+                [inv invoke]; 
+                void *ret = NULL;
+                [inv getReturnValue:&ret];
+                package = (__bridge id)ret; // 🔥 这里极其关键：类方法返回的是 autorelease 对象
+            } @catch(NSException *e){}
             
             if (!package) {
                 NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
                 NSString *type2 = @"com.apple.coreanimation-xml";
                 [inv setArgument:&camlURL atIndex:2];
                 [inv setArgument:&type2 atIndex:3];
-                @try { [inv invoke]; [inv getReturnValue:&package]; } @catch(NSException *e){}
+                @try { 
+                    [inv invoke]; 
+                    void *ret = NULL;
+                    [inv getReturnValue:&ret];
+                    package = (__bridge id)ret; 
+                } @catch(NSException *e){}
             }
             
             if (package) {
@@ -2937,14 +2953,61 @@ static NSString * GetPrefsPlistPath() {
     [self.previewContainer addSubview:pkgView];
 }
 
-- (void)safeSetState:(NSString *)state forView:(UIView *)view {
+// 🎯 【解析引擎状态】：复刻 .x 的逻辑，适配各类变种包 (PortraitUp/Dark 等)
+- (NSString *)resolveStateName:(NSString *)logicalState forCAML:(NSString *)camlPath {
+    if (!camlPath) return logicalState;
+    NSString *caml = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
+    if (!caml) return logicalState;
+
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"<LKState[^>]*name=\"([^\"]+)\"" options:0 error:nil];
+    NSArray *matches = [regex matchesInString:caml options:0 range:NSMakeRange(0, caml.length)];
+    NSMutableArray *availableStates = [NSMutableArray array];
+    for (NSTextCheckingResult *match in matches) {
+        [availableStates addObject:[caml substringWithRange:[match rangeAtIndex:1]]];
+    }
+
+    if (availableStates.count == 0) return logicalState;
+
+    NSString *keyword = logicalState;
+    if ([logicalState isEqualToString:@"Unlock"]) keyword = @"Home";
+    if ([logicalState isEqualToString:@"Locked"]) keyword = @"Lock";
+
+    NSMutableArray *candidates = [NSMutableArray array];
+    for (NSString *state in availableStates) {
+        NSString *lowerState = [state lowercaseString];
+        NSString *lowerLogic = [logicalState lowercaseString];
+        NSString *lowerKey = [keyword lowercaseString];
+
+        if ([lowerLogic isEqualToString:@"locked"]) {
+            if ([lowerState containsString:@"unlock"] || [lowerState containsString:@"home"]) continue;
+        }
+        if ([lowerState containsString:lowerLogic] || [lowerState containsString:lowerKey]) {
+            [candidates addObject:state];
+        }
+    }
+
+    if (candidates.count == 0) return logicalState;
+
+    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *styleKey = isDark ? @"Dark" : @"Light";
+
+    for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"] && [s localizedCaseInsensitiveContainsString:styleKey]) return s; }
+    for (NSString *s in candidates) { if ([s localizedCaseInsensitiveContainsString:styleKey]) return s; }
+    for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"]) return s; }
+
+    return candidates.firstObject;
+}
+
+- (void)safeSetState:(NSString *)state forView:(UIView *)view withCAMLPath:(NSString *)camlPath {
     if (!view) return;
+    NSString *realState = [self resolveStateName:state forCAML:camlPath];
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
         ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
         if (fbView.uicpView && [fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:")]) {
-            [fbView.uicpView performSelector:NSSelectorFromString(@"setState:") withObject:state];
+            [fbView.uicpView performSelector:NSSelectorFromString(@"setState:") withObject:realState];
             return;
         }
         if (fbView.stateController && fbView.package) {
@@ -2957,7 +3020,7 @@ static NSString * GetPrefsPlistPath() {
                     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
                     [inv setSelector:setSel];
                     [inv setTarget:fbView.stateController];
-                    [inv setArgument:&state atIndex:2];
+                    [inv setArgument:&realState atIndex:2];
                     [inv setArgument:&root atIndex:3];
                     float speed = 1.0f;
                     [inv setArgument:&speed atIndex:4];
@@ -2967,7 +3030,7 @@ static NSString * GetPrefsPlistPath() {
         }
     } else {
         if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
-            @try { [view performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e){}
+            @try { [view performSelector:NSSelectorFromString(@"setState:") withObject:realState]; } @catch(NSException *e){}
         }
     }
 #pragma clang diagnostic pop
@@ -2981,14 +3044,16 @@ static NSString * GetPrefsPlistPath() {
     [CATransaction setDisableActions:NO];
     [CATransaction setAnimationDuration:0.6];
     
-    [self safeSetState:targetState forView:self.bgView];
-    [self safeSetState:targetState forView:self.floatingView];
-    [self safeSetState:targetState forView:self.fgView];
+    [self safeSetState:targetState forView:self.bgView withCAMLPath:[self.bgPkgPath stringByAppendingPathComponent:@"main.caml"]];
+    [self safeSetState:targetState forView:self.floatingView withCAMLPath:[self.floatPkgPath stringByAppendingPathComponent:@"main.caml"]];
+    [self safeSetState:targetState forView:self.fgView withCAMLPath:[self.fgPkgPath stringByAppendingPathComponent:@"main.caml"]];
     
     [CATransaction commit];
     
+    // 🛡️ 防御循环保留：使用 weakSelf 解决强引用导致的僵尸对象闪退
+    __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self updateSelectionBox];
+        [weakSelf updateSelectionBox];
     });
 }
 
@@ -3009,7 +3074,7 @@ static NSString * GetPrefsPlistPath() {
     [CATransaction commit];
 }
 
-// 🎯 【核心修复】：利用纯手工层级探测算法，无视任何缩放变换导致的触控点错乱
+// 🎯 【核心突破】：自制纯手工层级探测算法，无视底层缩放矩阵导致的坐标错乱
 - (CALayer *)deepestLayerAtPoint:(CGPoint)p inLayer:(CALayer *)rootLayer {
     if (rootLayer.isHidden || rootLayer.opacity < 0.01) return nil;
     
@@ -3116,6 +3181,10 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:picker animated:YES completion:nil];
 }
 
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
     UIImage *img = info[UIImagePickerControllerOriginalImage];
     [picker dismissViewControllerAnimated:YES completion:^{
@@ -3134,7 +3203,7 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// 🎯 【新增】：呼出独立 CAML 弹窗编辑器选择菜单
+// 🎯 【全新图层动画菜单】：告别难用的手敲弹出框
 - (void)editAnimation {
     if (!self.selectedLayerPath || !self.selectedLayerName) return;
     
@@ -3169,10 +3238,13 @@ static NSString * GetPrefsPlistPath() {
     else if ([title hasPrefix:@"息屏 到 解锁"]) targetState = @"Unlock";
     else if ([title hasPrefix:@"解锁 到 息屏"]) targetState = @"Sleep";
     
+    // 如果有变体（白/黑），默认读取并修改与当前设备匹配的那套动画即可
+    NSString *realState = [self resolveStateName:targetState forCAML:[self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"]];
+    
     ZoneCAMLEditorViewController *vc = [[ZoneCAMLEditorViewController alloc] init];
     vc.camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
     vc.layerName = self.selectedLayerName;
-    vc.targetState = targetState;
+    vc.targetState = realState ?: targetState;
     vc.isFullMode = isFull;
     vc.onSave = ^{
         [self loadWallpaperEngine];
@@ -3221,7 +3293,7 @@ static NSString * GetPrefsPlistPath() {
     if (modified) [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
-// 🎯 【核心优化】：上下移取消弹窗，全自动计算兄弟节点并 Toast 反馈
+// 🎯 【核心优化】：上下移取消弹窗，全自动计算并使用 Toast 无缝反馈
 - (void)moveLayerUp { [self modifyLayerZPosition:1]; }
 - (void)moveLayerDown { [self modifyLayerZPosition:-1]; }
 
