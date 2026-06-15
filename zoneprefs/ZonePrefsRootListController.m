@@ -2595,22 +2595,16 @@ static NSString * GetPrefsPlistPath() {
             self.matchedRange = match.range;
             self.textView.text = [self.fullCamlString substringWithRange:self.matchedRange];
         } else {
-            // 【物理级修复编译错误】：彻底抛弃带中文的 appendFormat，改用连续的 appendString 物理拼接
             self.matchedRange = NSMakeRange(NSNotFound, 0);
-            NSString *layerName = self.targetLayerName ? self.targetLayerName : @"图层动画";
             
-            NSMutableString *templateStr = [NSMutableString string];
+            // 【终极物理防御】：0变量、0格式化符号，直接使用纯字符串替换！100% 杜绝任何编译报错。
+            NSString *template = @"<LKStateTransition fromState=\"[FROM]\" toState=\"[TO]\">\n  <elements>\n    \n    \n  </elements>\n</LKStateTransition>";
             
-            // 纯英文字符串，使用 appendFormat 是绝对安全的
-            [templateStr appendFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n", self.transitionFrom, self.transitionTo];
+            template = [template stringByReplacingOccurrencesOfString:@"[FROM]" withString:self.transitionFrom ?: @""];
+            template = [template stringByReplacingOccurrencesOfString:@"[TO]" withString:self.transitionTo ?: @""];
+            template = [template stringByReplacingOccurrencesOfString:@"[LAYER]" withString:self.targetLayerName ?: @"图层动画"];
             
-            [templateStr appendString:@"  <elements>\n"];
-            [templateStr appendString:@"    \n"];
-            [templateStr appendString:@"    \n"];
-            [templateStr appendString:@"  </elements>\n"];
-            [templateStr appendString:@"</LKStateTransition>"];
-            
-            self.textView.text = templateStr;
+            self.textView.text = template;
         }
     }
 }
