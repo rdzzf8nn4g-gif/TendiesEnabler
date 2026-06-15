@@ -2773,9 +2773,40 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     @try { [layer setValue:value forKeyPath:keyPath]; } @catch (NSException *e) {}
 }
 
+// -------------------------------------------------------
+// 辅助函数：解析 CAML 获取图层序号与总数
+// -------------------------------------------------------
+static void ZoneGetLayerIndexAndCount(NSString *camlStr, NSString *targetId, NSInteger *outIndex, NSInteger *outTotal) {
+    *outIndex = -1;
+    *outTotal = 0;
+    if (!camlStr || !targetId) return;
+    
+    // 我们定位到拥有该 ID 的图层的直属父级 <sublayers>
+    NSString *pattern = @"<sublayers>(.*?)</sublayers>";
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+    NSArray *matches = [regex matchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length)];
+    
+    for (NSTextCheckingResult *match in matches) {
+        NSString *sublayersContent = [camlStr substringWithRange:[match rangeAtIndex:1]];
+        if ([sublayersContent containsString:[NSString stringWithFormat:@"id=\"%@\"", targetId]]) {
+            // 解析所有的子 CALayer
+            NSRegularExpression *layerRegex = [NSRegularExpression regularExpressionWithPattern:@"<CALayer[^>]*id=\"([^\"]+)\"" options:0 error:nil];
+            NSArray *layerMatches = [layerRegex matchesInString:sublayersContent options:0 range:NSMakeRange(0, sublayersContent.length)];
+            *outTotal = layerMatches.count;
+            for (NSInteger i = 0; i < layerMatches.count; i++) {
+                NSString *foundId = [sublayersContent substringWithRange:[layerMatches[i] rangeAtIndex:1]];
+                if ([foundId isEqualToString:targetId]) {
+                    *outIndex = i + 1; // 1-based index
+                    break;
+                }
+            }
+            if (*outIndex != -1) break;
+        }
+    }
+}
 
 // -------------------------------------------------------
-// 6. 主页 UI：高级编辑器控制器 (消灭 Werror 版)
+// 6. 主页 UI：高级编辑器控制器 (防消失、防闪退、彻底解构翻转最终版)
 // -------------------------------------------------------
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
@@ -2815,6 +2846,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 @property (nonatomic, strong) CAShapeLayer *dashBorderLayer; 
 @property (nonatomic, copy) NSString *selectedLayerName;
 @property (nonatomic, copy) NSString *selectedLayerId; 
+@property (nonatomic, copy) NSString *selectedLevelName; 
 
 @property (nonatomic, assign) NSInteger targetInsertLevel; 
 @property (nonatomic, assign) CGPoint initialPanCenter;
@@ -2997,7 +3029,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     if (self.fgView) { [self.fgView removeFromSuperview]; self.fgView = nil; }
     
     self.highlightBorderView.hidden = YES;
-    self.statusLabel.text = @"";
     [self.bgLayerMap removeAllObjects];
     [self.floatLayerMap removeAllObjects];
     [self.fgLayerMap removeAllObjects];
@@ -3084,8 +3115,18 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     else if ([self.currentCamlPath isEqualToString:self.fgCamlPath]) self.fgCamlString = str;
 }
 
+- (void)updateStatusLabelWithIndex {
+    NSInteger index = 0, total = 0;
+    ZoneGetLayerIndexAndCount([self activeCamlString], self.selectedLayerId, &index, &total);
+    if (index != -1 && total > 0) {
+        self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@] (第 %ld 层 / 共 %ld 层)", self.selectedLayerName, self.selectedLevelName, (long)index, (long)total];
+    } else {
+        self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@]", self.selectedLayerName, self.selectedLevelName];
+    }
+}
+
 // =======================================================
-// 【核心修改】：精准写入与防重置保护
+// 精准写入与防重置保护
 // =======================================================
 - (NSString *)cleanStateElements:(NSString *)elements targetId:(NSString *)tid keyPaths:(NSArray *)keyPaths {
     NSString *res = elements;
@@ -3166,16 +3207,16 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 手势移动与缩放 (完美跟手+自动保存不黑屏)
+// 【核心修改】：精准识别矩阵翻转 彻底解决反向拖拽
 // =======================================================
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     if (!self.selectedLayer || !self.selectedLayerName) return;
     CGFloat scale = 390.0 / self.canvasContainer.bounds.size.width;
     
-    BOOL isFlipped = NO;
-    if ([self.currentCamlPath isEqualToString:self.bgCamlPath]) isFlipped = self.bgParser.isGeometryFlipped;
-    else if ([self.currentCamlPath isEqualToString:self.floatCamlPath]) isFlipped = self.floatParser.isGeometryFlipped;
-    else if ([self.currentCamlPath isEqualToString:self.fgCamlPath]) isFlipped = self.fgParser.isGeometryFlipped;
+    // 直接读取渲染呈现层在 Y 轴的真实矩阵拉伸。如果 d < 0 说明 Y 轴被彻底颠倒了，需要反向修正在屏幕上的滑动手势！
+    CALayer *pLayer = self.canvasContainer.layer.presentationLayer ?: self.canvasContainer.layer;
+    CGAffineTransform transform = pLayer.affineTransform;
+    BOOL isYFlipped = (transform.d < 0);
     
     if (pan.state == UIGestureRecognizerStateBegan) {
         [self pushUndoState];
@@ -3183,7 +3224,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     } else if (pan.state == UIGestureRecognizerStateChanged) {
         CGPoint trans = [pan translationInView:self.canvasContainer];
         CGFloat dy = trans.y * scale;
-        if (isFlipped) dy = -dy; 
+        if (isYFlipped) dy = -dy; 
         
         CGPoint newPos = CGPointMake(self.initialPanCenter.x + trans.x * scale, self.initialPanCenter.y + dy);
         [CATransaction begin];
@@ -3284,6 +3325,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     if (hitLayer) {
         self.selectedLayer = hitLayer;
         self.selectedLayerName = hitLayer.name;
+        self.selectedLevelName = levelName;
         
         self.selectedLayerId = self.selectedLayerName; 
         ZoneEditorCAMLParser *parser = nil;
@@ -3303,18 +3345,14 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         
         self.tipLabel.hidden = YES;
         self.bottomToolbar.hidden = NO;
-        self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@]", self.selectedLayerName, levelName];
+        [self updateStatusLabelWithIndex];
         [self updateHighlightFrame];
     } else {
         self.selectedLayer = nil;
         self.tipLabel.hidden = NO;
         self.bottomToolbar.hidden = YES;
         self.highlightBorderView.hidden = YES;
-        
-        // 【关键防御修复】：如果没有选中任何东西，清空文字！这就用到了 levelName 的隐式特性了，解决了 Werror 问题
-        if (levelName.length == 0) {
-            self.statusLabel.text = @"";
-        }
+        self.statusLabel.text = @"";
     }
 }
 
@@ -3444,8 +3482,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     self.selectedLayerName = fileName;
     [self refreshCanvas];
-    
-    // 【关键显示】：利用状态文本框报告插入成功
     self.statusLabel.text = [NSString stringWithFormat:@"成功插入: %@", fileName];
 }
 
@@ -3516,9 +3552,10 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     
+    // 【核心修复】：为 iPad 提供精确的 popover 触发点，防止 crash
     if (alert.popoverPresentationController) {
-        alert.popoverPresentationController.sourceView = self.view; 
-        alert.popoverPresentationController.sourceRect = [sender convertRect:sender.bounds toView:self.view];
+        alert.popoverPresentationController.sourceView = self.bottomToolbar; 
+        alert.popoverPresentationController.sourceRect = [self.bottomToolbar convertRect:sender.bounds fromView:sender];
     }
     
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -3574,32 +3611,55 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     [self presentViewController:nav animated:YES completion:nil];
 }
 
-- (void)actionMoveUp:(UIButton *)sender { [self modifyLayerZPosition:1]; }
-- (void)actionMoveDown:(UIButton *)sender { [self modifyLayerZPosition:-1]; }
+// =======================================================
+// 【核心修改】：通过 XML 真实节点移动实现 上下移层
+// =======================================================
+- (void)actionMoveUp:(UIButton *)sender { [self shiftLayerOrder:-1]; }   // 在 XML 里往前排，渲染时就被压在下面
+- (void)actionMoveDown:(UIButton *)sender { [self shiftLayerOrder:1]; }  // 在 XML 里往后排，渲染时就浮在上面
 
-- (void)modifyLayerZPosition:(int)delta {
+- (void)shiftLayerOrder:(int)direction {
     [self pushUndoState];
-    self.selectedLayer.zPosition += delta;
     NSString *camlStr = [self activeCamlString];
     NSString *realId = self.selectedLayerId ?: self.selectedLayerName;
-    
-    NSString *regexStr = [NSString stringWithFormat:@"(<CALayer[^>]*id=\"%@[^>]*zPosition=\")([^\"]*)(\")", realId];
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:regexStr options:0 error:nil];
-    
-    if ([regex numberOfMatchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length)] > 0) {
-        NSString *newZ = [NSString stringWithFormat:@"%.1f", self.selectedLayer.zPosition];
-        camlStr = [regex stringByReplacingMatchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length) withTemplate:[NSString stringWithFormat:@"$1%@$3", newZ]];
-    } else {
-        NSString *insertRegexStr = [NSString stringWithFormat:@"(<CALayer[^>]*id=\"%@\")", realId];
-        NSRegularExpression *insertRegex = [NSRegularExpression regularExpressionWithPattern:insertRegexStr options:0 error:nil];
-        NSString *newZ = [NSString stringWithFormat:@" zPosition=\"%.1f\"", self.selectedLayer.zPosition];
-        camlStr = [insertRegex stringByReplacingMatchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length) withTemplate:[NSString stringWithFormat:@"$1%@", newZ]];
+    if (!camlStr || !realId) return;
+
+    // 先找到包含该 Layer 的 <sublayers>
+    NSString *pattern = @"<sublayers>(.*?)</sublayers>";
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+    NSArray *matches = [regex matchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length)];
+
+    for (NSTextCheckingResult *match in matches) {
+        NSString *sublayersContent = [camlStr substringWithRange:[match rangeAtIndex:1]];
+        if ([sublayersContent containsString:[NSString stringWithFormat:@"id=\"%@\"", realId]]) {
+            
+            // 提取所有平级的 <CALayer>
+            NSRegularExpression *layerRegex = [NSRegularExpression regularExpressionWithPattern:@"\\s*<CALayer[^>]*>.*?</CALayer>\\s*" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+            NSArray *layerMatches = [layerRegex matchesInString:sublayersContent options:0 range:NSMakeRange(0, sublayersContent.length)];
+            
+            NSMutableArray *layers = [NSMutableArray array];
+            NSInteger targetIndex = -1;
+            
+            for (NSInteger i = 0; i < layerMatches.count; i++) {
+                NSString *layerXml = [sublayersContent substringWithRange:[layerMatches[i] rangeAtIndex:0]];
+                [layers addObject:layerXml];
+                if ([layerXml containsString:[NSString stringWithFormat:@"id=\"%@\"", realId]]) {
+                    targetIndex = i;
+                }
+            }
+            
+            if (targetIndex != -1) {
+                NSInteger newIndex = targetIndex + direction;
+                if (newIndex >= 0 && newIndex < layers.count) {
+                    [layers exchangeObjectAtIndex:targetIndex withObjectAtIndex:newIndex];
+                    NSString *newSublayersContent = [layers componentsJoinedByString:@""];
+                    camlStr = [camlStr stringByReplacingCharactersInRange:[match rangeAtIndex:1] withString:newSublayersContent];
+                    [self setActiveCamlString:camlStr];
+                    [self refreshCanvas];
+                    return; // 成功移动一层
+                }
+            }
+        }
     }
-    [self setActiveCamlString:camlStr];
-    [self refreshCanvas];
-    
-    // 【关键显示】：刷新偏移量
-    self.statusLabel.text = [NSString stringWithFormat:@"图层 Z 轴偏移: %.1f", self.selectedLayer.zPosition];
 }
 
 - (void)actionDelete:(UIButton *)sender {
@@ -3607,7 +3667,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     NSString *camlStr = [self activeCamlString];
     NSString *realId = self.selectedLayerId ?: self.selectedLayerName;
     
-    NSString *pattern = [NSString stringWithFormat:@"<CALayer[^>]*id=\"%@\".*?</CALayer>", realId];
+    NSString *pattern = [NSString stringWithFormat:@"\\s*<CALayer[^>]*id=\"%@\".*?</CALayer>\\s*", realId];
     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
     camlStr = [regex stringByReplacingMatchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length) withTemplate:@""];
     
@@ -3632,10 +3692,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         
         if (found) {
             self.selectedLayer = found;
-            // 只要不是其他操作触发了文字修改，我们就保持它的原貌或设置焦点文字
-            if (![self.statusLabel.text containsString:@"Z 轴偏移"]) {
-                self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@]", self.selectedLayerName, levelName];
-            }
+            self.selectedLevelName = levelName;
+            [self updateStatusLabelWithIndex];
             [self updateHighlightFrame];
         } else {
             self.bottomToolbar.hidden = YES;
