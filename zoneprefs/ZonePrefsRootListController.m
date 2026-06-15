@@ -2777,7 +2777,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 
 
 // -------------------------------------------------------
-// 6. 主页 UI：高级编辑器控制器 (彻底防御黑屏破损版)
+// 6. 主页 UI：高级编辑器控制器 (绝对防御黑屏最终版)
 // -------------------------------------------------------
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
@@ -3087,7 +3087,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     else if (self.selectedLevel == 2) self.fgCamlString = str;
 }
 
-// 【修 Bug 2：重新计算层数指示器，脱离正则解析，改用渲染引擎Z轴计算】
+// 【修 Bug 3：读取真实的渲染图层 Z轴 排位，不再靠错误正则解析】
 - (void)updateStatusLabelWithIndex {
     if (!self.selectedLayer || !self.selectedLayer.superlayer) {
         self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@]", self.selectedLayerName, self.selectedLevelName];
@@ -3103,26 +3103,23 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     NSInteger index = [sortedSiblings indexOfObject:self.selectedLayer] + 1;
     NSInteger total = sortedSiblings.count;
-    self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@] (层级排位: %ld / %ld)", self.selectedLayerName, self.selectedLevelName, (long)index, (long)total];
+    self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@] (深度排位: %ld / %ld)", self.selectedLayerName, self.selectedLevelName, (long)index, (long)total];
 }
 
 // =======================================================
-// 【核心修改 Bug 1 & 2】：严格安全擦除和重构原生 XML 注入 (彻底消除黑屏死机)
+// 【核心重写 Bug 1 & 2】：绝对不会制造黑屏的新版 XML 修改器
 // =======================================================
 - (NSString *)scrubStateValue:(NSString *)xml targetId:(NSString *)tid keyPath:(NSString *)kp {
     NSString *escapedTid = [NSRegularExpression escapedPatternForString:tid];
     NSString *escapedKp = [NSRegularExpression escapedPatternForString:kp];
+    // 不管内容有几行，匹配并删除指定的 LKStateSetValue 结构块
     NSString *valPattern = [NSString stringWithFormat:@"\\s*<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>[\\s\\S]*?</LKStateSetValue>\\s*", escapedTid, escapedKp];
     NSRegularExpression *valRegex = [NSRegularExpression regularExpressionWithPattern:valPattern options:0 error:nil];
-    // 使用空白符替换，不破坏 XML 结构
     return [valRegex stringByReplacingMatchesInString:xml options:0 range:NSMakeRange(0, xml.length) withTemplate:@"\n"];
 }
 
 - (NSString *)updateOrAddStateValue:(NSString *)xml state:(NSString *)state targetId:(NSString *)tid keyPath:(NSString *)kp value:(CGFloat)val {
-    NSString *escapedTid = [NSRegularExpression escapedPatternForString:tid];
-    NSString *escapedKp = [NSRegularExpression escapedPatternForString:kp];
-    
-    // 强制修复苹果的自闭合标签 <elements/> 以防止正则失效
+    // 强制修复某些编辑器可能会产生的自闭合空标签 <elements/>
     xml = [xml stringByReplacingOccurrencesOfString:@"<elements/>" withString:@"<elements>\n</elements>"];
     
     NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)([\\s\\S]*?)(</elements>\\s*</LKState>)", state];
@@ -3133,33 +3130,60 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 
     NSString *elements = [xml substringWithRange:[match rangeAtIndex:2]];
 
-    // 1. 彻底清除旧属性（包含非法缺少结束符的悬挂标签）
+    // 1. 完全清理历史干扰项
+    NSString *escapedTid = [NSRegularExpression escapedPatternForString:tid];
+    NSString *escapedKp = [NSRegularExpression escapedPatternForString:kp];
     NSString *valPattern = [NSString stringWithFormat:@"\\s*<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>[\\s\\S]*?</LKStateSetValue>\\s*", escapedTid, escapedKp];
     NSRegularExpression *valRegex = [NSRegularExpression regularExpressionWithPattern:valPattern options:0 error:nil];
     elements = [valRegex stringByReplacingMatchesInString:elements options:0 range:NSMakeRange(0, elements.length) withTemplate:@"\n"];
 
-    // 2. 注入安全的苹果原生值标签 (<value type="real" value="XXX"/> 不容易受黑屏BUG影响)
+    // 2. 注入安全的苹果原生值标签 (<value type="real" value="XXX"/>)
     NSString *newVal = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n            <value type=\"real\" value=\"%.2f\"/>\n          </LKStateSetValue>\n", tid, kp, val];
     elements = [elements stringByAppendingString:newVal];
 
     return [xml stringByReplacingCharactersInRange:[match rangeAtIndex:2] withString:elements];
 }
 
+// 专门用来修改主标签里内联属性的超级安全函数 (绝不叠加)
+- (NSString *)updateLayerAttribute:(NSString *)xml layerId:(NSString *)tid attrName:(NSString *)attrName attrValue:(NSString *)attrValue {
+    NSString *escapedTid = [NSRegularExpression escapedPatternForString:tid];
+    // 只找到这个特定 id 的 CALayer 开头标签
+    NSString *tagPattern = [NSString stringWithFormat:@"<CALayer[^>]*?id=\"%@\"[^>]*?>", escapedTid];
+    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:tagPattern options:0 error:nil];
+    NSTextCheckingResult *match = [tagRegex firstMatchInString:xml options:0 range:NSMakeRange(0, xml.length)];
+    
+    if (!match) return xml;
+    
+    NSString *fullTag = [xml substringWithRange:match.range];
+    
+    // 抹除原本存在的同名属性
+    NSString *attrPattern = [NSString stringWithFormat:@"\\s%@=\"[^\"]*\"", attrName];
+    NSRegularExpression *attrRegex = [NSRegularExpression regularExpressionWithPattern:attrPattern options:0 error:nil];
+    fullTag = [attrRegex stringByReplacingMatchesInString:fullTag options:0 range:NSMakeRange(0, fullTag.length) withTemplate:@""];
+    
+    // 把新的属性插在闭合括号 > 之前
+    if ([fullTag hasSuffix:@"/>"]) {
+        fullTag = [fullTag substringToIndex:fullTag.length - 2];
+        fullTag = [fullTag stringByAppendingFormat:@" %@=\"%@\"/>", attrName, attrValue];
+    } else if ([fullTag hasSuffix:@">"]) {
+        fullTag = [fullTag substringToIndex:fullTag.length - 1];
+        fullTag = [fullTag stringByAppendingFormat:@" %@=\"%@\">", attrName, attrValue];
+    }
+    
+    return [xml stringByReplacingCharactersInRange:match.range withString:fullTag];
+}
+
 - (void)saveLayerPosition:(CGPoint)pos targetId:(NSString *)tid {
     NSString *caml = [self activeCamlString];
     if (!caml || !tid) return;
     
-    NSString *escapedTid = [NSRegularExpression escapedPatternForString:tid];
-    
-    // 1. 修改基础 <CALayer> 坐标，双保险防消失
-    NSString *layerPattern = [NSString stringWithFormat:@"(<CALayer[^>]*?id=\"%@\"[^>]*?)(\\sposition=\"[^\"]*\")?([^>]*>)", escapedTid];
-    NSRegularExpression *layerRegex = [NSRegularExpression regularExpressionWithPattern:layerPattern options:0 error:nil];
-    caml = [layerRegex stringByReplacingMatchesInString:caml options:0 range:NSMakeRange(0, caml.length) withTemplate:[NSString stringWithFormat:@"$1 position=\"%.2f %.2f\"$3", pos.x, pos.y]];
+    // 修改基础 <CALayer> 坐标（利用全新安全函数，杜绝叠加 bug）
+    caml = [self updateLayerAttribute:caml layerId:tid attrName:@"position" attrValue:[NSString stringWithFormat:@"%.2f %.2f", pos.x, pos.y]];
 
-    // 2. 修改各动作状态的坐标
+    // 修改动画表状态的坐标
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
     
-    // 【核心黑屏拦截】：如果原来壁纸是混合写 position 的，必须删掉 composite 模式，否则 x/y 注入会产生致命冲突崩溃！
+    // 如果原壁纸使用了复合的 position 控制，直接把它抹掉，因为我们要写入更精确的 .x 和 .y
     caml = [self scrubStateValue:caml targetId:tid keyPath:@"position"];
     
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"position.x" value:pos.x];
@@ -3172,10 +3196,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     NSString *caml = [self activeCamlString];
     if (!caml || !tid) return;
     
-    NSString *escapedTid = [NSRegularExpression escapedPatternForString:tid];
-    NSString *layerPattern = [NSString stringWithFormat:@"(<CALayer[^>]*?id=\"%@\"[^>]*?)(\\sbounds=\"[^\"]*\")?([^>]*>)", escapedTid];
-    NSRegularExpression *layerRegex = [NSRegularExpression regularExpressionWithPattern:layerPattern options:0 error:nil];
-    caml = [layerRegex stringByReplacingMatchesInString:caml options:0 range:NSMakeRange(0, caml.length) withTemplate:[NSString stringWithFormat:@"$1 bounds=\"0 0 %.2f %.2f\"$3", bounds.size.width, bounds.size.height]];
+    caml = [self updateLayerAttribute:caml layerId:tid attrName:@"bounds" attrValue:[NSString stringWithFormat:@"0 0 %.2f %.2f", bounds.size.width, bounds.size.height]];
 
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
     
@@ -3186,9 +3207,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     [self setActiveCamlString:caml];
 }
 
-// =======================================================
-// 【核心修改 Bug 1】：抛弃手动坐标判定，采用 CoreAnimation 原生矩阵转换
-// =======================================================
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     if (!self.selectedLayer || !self.selectedLayerName) return;
     
@@ -3196,7 +3214,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         [self pushUndoState];
         self.initialPanCenter = self.selectedLayer.position;
     } else if (pan.state == UIGestureRecognizerStateChanged) {
-        // 【物理级无误差纠正】：让系统去处理该死的 Y 轴翻转，直接投射当前坐标！
+        // 利用系统原生矩阵 convertPoint，彻底无视 geometryFlipped 反转和缩放误差！
         CGPoint transInContainer = [pan translationInView:self.canvasContainer];
         CGPoint transInSuper = [self.canvasContainer.layer convertPoint:transInContainer toLayer:self.selectedLayer.superlayer];
         CGPoint zeroInSuper = [self.canvasContainer.layer convertPoint:CGPointZero toLayer:self.selectedLayer.superlayer];
@@ -3305,7 +3323,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         self.selectedLayer = hitLayer;
         self.selectedLayerName = hitLayer.name;
         self.selectedLevelName = levelName;
-        self.selectedLevel = matchedLevel; // 绑定层级锚点
+        self.selectedLevel = matchedLevel;
         
         self.selectedLayerId = self.selectedLayerName; 
         ZoneEditorCAMLParser *parser = nil;
@@ -3437,8 +3455,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         else { w = w * (250 / h); h = 250; }
     }
     
-    // 【强制置顶修复】: 默认给个极大的 zPosition，让插入的图直接出现在最前头，绝对不会被其它东西挡住！
-    NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"999\" opacity=\"1\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, fileName];
+    // 【强制置顶 Bug 4】：强制赋予 zPosition="9999" 让新图片绝对压在其它上面
+    NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"9999\" opacity=\"1\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, fileName];
     
     NSRegularExpression *sublayersRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*name=\"Root Layer\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
     if ([sublayersRegex numberOfMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length)] > 0) {
@@ -3454,7 +3472,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"position.y" value:422];
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"bounds.size.width" value:w];
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"bounds.size.height" value:h];
-        camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"zPosition" value:999]; // 给动画表也锁定这个前排参数
+        camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"zPosition" value:9999]; // 让表层状态页锁死其顶层特征
     }
     
     if (self.targetInsertLevel == 0) self.bgCamlString = camlString;
@@ -3512,9 +3530,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }];
 }
 
-// =======================================================
-// 【核心修改 Bug 4】：绑定选取层级，精准识别弹窗
-// =======================================================
 - (void)actionAnimationMenu:(UIButton *)sender {
     if (!self.selectedLayerName || ![self activeCamlString]) return;
     
@@ -3597,10 +3612,10 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 【核心修改 Bug 3】：彻底用原生 zPosition 实现上下移动！
+// 【核心修改 Bug 3】：使用原生 zPosition 完全重构上下移图层
 // =======================================================
-- (void)actionMoveUp:(UIButton *)sender { [self shiftLayerOrder:1]; }    // +1 = 距离屏幕更近，浮在上面
-- (void)actionMoveDown:(UIButton *)sender { [self shiftLayerOrder:-1]; } // -1 = 距离屏幕更远，压在下面
+- (void)actionMoveUp:(UIButton *)sender { [self shiftLayerOrder:1]; }    // +1 = 浮在更上面
+- (void)actionMoveDown:(UIButton *)sender { [self shiftLayerOrder:-1]; } // -1 = 压在更底下
 
 - (void)shiftLayerOrder:(int)direction {
     [self pushUndoState];
@@ -3608,25 +3623,23 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     NSString *realId = self.selectedLayerId ?: self.selectedLayerName;
     if (!camlStr || !realId) return;
 
-    // 修改 CoreAnimation 的渲染深度，每次增减 10
+    // 修改深度，每次增减 10 错开层级
     CGFloat currentZ = self.selectedLayer.zPosition;
     CGFloat newZ = currentZ + (direction * 10.0);
     self.selectedLayer.zPosition = newZ;
 
-    // 定位修改 XML 中对应的底层 zPosition 属性
-    NSString *escapedTid = [NSRegularExpression escapedPatternForString:realId];
-    NSString *layerPattern = [NSString stringWithFormat:@"(<CALayer[^>]*?id=\"%@\"[^>]*?)(\\szPosition=\"[^\"]*\")?([^>]*>)", escapedTid];
-    NSRegularExpression *layerRegex = [NSRegularExpression regularExpressionWithPattern:layerPattern options:0 error:nil];
-    camlStr = [layerRegex stringByReplacingMatchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length) withTemplate:[NSString stringWithFormat:@"$1 zPosition=\"%.1f\"$3", newZ]];
+    // 使用安全函数重新写入主 <CALayer> 标签的 zPosition
+    camlStr = [self updateLayerAttribute:camlStr layerId:realId attrName:@"zPosition" attrValue:[NSString stringWithFormat:@"%.1f", newZ]];
 
-    // 并向各种屏幕动作注入状态缓存，防止后续滑屏动画把它洗掉了
+    // 覆盖所有锁屏动画状态节点，防止后续动画强制把它“洗掉”
     NSArray *states = @[@"Locked", @"Unlock", @"Sleep"];
     for (NSString *state in states) {
+        camlStr = [self scrubStateValue:camlStr targetId:realId keyPath:@"zPosition"];
         camlStr = [self updateOrAddStateValue:camlStr state:state targetId:realId keyPath:@"zPosition" value:newZ];
     }
 
     [self setActiveCamlString:camlStr];
-    [self updateStatusLabelWithIndex]; // 层级发生了变化，强制重新核算排位标号
+    [self updateStatusLabelWithIndex]; // UI文字立刻同步
     self.statusLabel.text = [NSString stringWithFormat:@"图层已%@", direction > 0 ? @"上移" : @"下移"];
 }
 
@@ -3688,17 +3701,17 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 【操作隔离拦截】：所有修改都在内存进行，只有点击保存才推送系统
+// 【操作隔离】：只有点击保存，才会真正写入系统壁纸
 // =======================================================
 - (void)saveAndApply {
     if (self.bgCamlPath && self.bgCamlString) [self.bgCamlString writeToFile:self.bgCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (self.floatCamlPath && self.floatCamlString) [self.floatCamlString writeToFile:self.floatCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (self.fgCamlPath && self.fgCamlString) [self.fgCamlString writeToFile:self.fgCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     
-    // 通知 SpringBoard 重载底层图层树，立刻呈现修改结果
+    // 发送系统刷新通知
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已同步保存，系统的桌面和锁屏壁纸已刷新生效。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已同步保存，并且系统桌面/锁屏壁纸已刷新生效。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         [self dismissViewControllerAnimated:YES completion:nil];
     }]];
