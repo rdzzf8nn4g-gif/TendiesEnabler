@@ -2549,7 +2549,6 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 
-
 // -------------------------------------------------------
 // 2. 核心底层私有类头文件补全
 // -------------------------------------------------------
@@ -2567,9 +2566,8 @@ static NSString * GetPrefsPlistPath() {
 - (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
 @end
 
-
 // -------------------------------------------------------
-// 3. 增强版全系统兼容渲染容器 (ZoneEditorPackageView)
+// 3. 增强版全系统兼容渲染容器
 // -------------------------------------------------------
 @interface ZoneEditorPackageView : UIView
 @property (nonatomic, strong) UIView *uiPackageView; 
@@ -2660,9 +2658,8 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 
-
 // -------------------------------------------------------
-// 4. 增强版 XML 解析引擎 (ZoneEditorCAMLParser)
+// 4. 增强版 XML 解析引擎
 // -------------------------------------------------------
 @interface ZoneEditorCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -2738,21 +2735,13 @@ static NSString * GetPrefsPlistPath() {
     NSString *keyword = logicalState;
     if ([logicalState isEqualToString:@"Unlock"]) keyword = @"Home"; 
     if ([logicalState isEqualToString:@"Locked"]) keyword = @"Lock";
-    
     NSMutableArray *candidates = [NSMutableArray array];
     for (NSString *state in self.availableStates) {
         NSString *lowerState = [state lowercaseString];
-        NSString *lowerLogic = [logicalState lowercaseString];
-        NSString *lowerKey = [keyword lowercaseString];
-        if ([lowerLogic isEqualToString:@"locked"]) {
-            if ([lowerState containsString:@"unlock"] || [lowerState containsString:@"home"]) continue; 
-        }
-        if ([lowerState containsString:lowerLogic] || [lowerState containsString:lowerKey]) {
-            [candidates addObject:state];
-        }
+        if ([logicalState.lowercaseString isEqualToString:@"locked"] && ([lowerState containsString:@"unlock"] || [lowerState containsString:@"home"])) continue; 
+        if ([lowerState containsString:logicalState.lowercaseString] || [lowerState containsString:keyword.lowercaseString]) [candidates addObject:state];
     }
     if (candidates.count == 0) return logicalState;
-    
     NSString *styleKey = isDark ? @"Dark" : @"Light";
     for (NSString *s in candidates) { if ([s containsString:@"PortraitUp"] && [s localizedCaseInsensitiveContainsString:styleKey]) return s; }
     for (NSString *s in candidates) { if ([s localizedCaseInsensitiveContainsString:styleKey]) return s; }
@@ -2761,10 +2750,6 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 
-
-// -------------------------------------------------------
-// 5. KVC 安全赋值函数
-// -------------------------------------------------------
 static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (!layer || !keyPath || !value) return;
     if ([keyPath isEqualToString:@"position.x"]) {
@@ -2781,9 +2766,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     @try { [layer setValue:value forKeyPath:keyPath]; } @catch (NSException *e) {}
 }
 
-
 // -------------------------------------------------------
-// 6. 主页 UI：高级编辑器控制器
+// 6. 主页 UI：高级编辑器控制器 (防消失、防闪退最终版)
 // -------------------------------------------------------
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
@@ -2825,11 +2809,9 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 @property (nonatomic, copy) NSString *selectedLayerId; 
 
 @property (nonatomic, assign) NSInteger targetInsertLevel; 
-
 @property (nonatomic, assign) CGPoint initialPanCenter;
 @property (nonatomic, assign) CGRect initialPinchBounds;
 
-// 【修复 17 个报错的根本原因】：补齐这两个关键属性声明！
 @property (nonatomic, copy) NSString *currentCamlPath;
 @property (nonatomic, copy) NSString *currentCamlString;
 @end
@@ -2883,15 +2865,16 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     ]];
     
     self.statusLabel = [[UILabel alloc] init];
-    self.statusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+    self.statusLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     self.statusLabel.textColor = [UIColor systemBlueColor];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.adjustsFontSizeToFitWidth = YES;
     [self.view addSubview:self.statusLabel];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [NSLayoutConstraint activateConstraints:@[
         [self.statusLabel.topAnchor constraintEqualToAnchor:self.canvasContainer.bottomAnchor constant:10],
         [self.statusLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [self.statusLabel.widthAnchor constraintEqualToAnchor:self.view.widthAnchor]
+        [self.statusLabel.widthAnchor constraintEqualToAnchor:self.view.widthAnchor multiplier:0.9]
     ]];
     
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(canvasTapped:)];
@@ -2906,15 +2889,15 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     [self.canvasContainer addGestureRecognizer:pinch];
     
     self.highlightBorderView = [[UIView alloc] init];
-    self.highlightBorderView.backgroundColor = [[UIColor systemYellowColor] colorWithAlphaComponent:0.1];
+    self.highlightBorderView.backgroundColor = [[UIColor systemYellowColor] colorWithAlphaComponent:0.15];
     self.highlightBorderView.hidden = YES;
     self.highlightBorderView.userInteractionEnabled = NO;
     [self.canvasContainer addSubview:self.highlightBorderView];
     
     self.dashBorderLayer = [CAShapeLayer layer];
-    self.dashBorderLayer.strokeColor = [UIColor systemYellowColor].CGColor;
+    self.dashBorderLayer.strokeColor = [UIColor systemOrangeColor].CGColor;
     self.dashBorderLayer.fillColor = nil;
-    self.dashBorderLayer.lineDashPattern = @[@6, @3];
+    self.dashBorderLayer.lineDashPattern = @[@5, @4];
     self.dashBorderLayer.lineWidth = 2;
     [self.highlightBorderView.layer addSublayer:self.dashBorderLayer];
     
@@ -2982,28 +2965,23 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 - (void)actionUndo {
-    if (self.undoStack.count == 0) return;
+    if (self.undoStack.count == 0) {
+        self.statusLabel.text = @"没有更多可撤销的操作";
+        return;
+    }
     NSDictionary *state = [self.undoStack lastObject];
     [self.undoStack removeLastObject];
     
-    if (state[@"bg"] && self.bgCamlPath) {
-        self.bgCamlString = state[@"bg"];
-        [self.bgCamlString writeToFile:self.bgCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-    if (state[@"float"] && self.floatCamlPath) {
-        self.floatCamlString = state[@"float"];
-        [self.floatCamlString writeToFile:self.floatCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-    if (state[@"fg"] && self.fgCamlPath) {
-        self.fgCamlString = state[@"fg"];
-        [self.fgCamlString writeToFile:self.fgCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
+    if (state[@"bg"]) self.bgCamlString = state[@"bg"];
+    if (state[@"float"]) self.floatCamlString = state[@"float"];
+    if (state[@"fg"]) self.fgCamlString = state[@"fg"];
     
     [self refreshCanvas];
+    self.statusLabel.text = @"已撤销上一步操作";
 }
 
 // =======================================================
-// 无双指针安全加载完整三层架构引擎
+// 渲染引擎与图层绑定
 // =======================================================
 - (void)loadWallpaperEngine {
     if (self.bgView) { [self.bgView removeFromSuperview]; self.bgView = nil; }
@@ -3011,7 +2989,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     if (self.fgView) { [self.fgView removeFromSuperview]; self.fgView = nil; }
     
     self.highlightBorderView.hidden = YES;
-    self.statusLabel.text = @"";
     [self.bgLayerMap removeAllObjects];
     [self.floatLayerMap removeAllObjects];
     [self.fgLayerMap removeAllObjects];
@@ -3057,15 +3034,15 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         if (layerType == 0) {
             weakSelf.bgView = view; weakSelf.bgParser = parser; weakSelf.bgLayerMap = map;
             weakSelf.bgCamlPath = camlPath;
-            weakSelf.bgCamlString = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
+            if (!weakSelf.bgCamlString) weakSelf.bgCamlString = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
         } else if (layerType == 1) {
             weakSelf.floatingView = view; weakSelf.floatParser = parser; weakSelf.floatLayerMap = map;
             weakSelf.floatCamlPath = camlPath;
-            weakSelf.floatCamlString = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
+            if (!weakSelf.floatCamlString) weakSelf.floatCamlString = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
         } else if (layerType == 2) {
             weakSelf.fgView = view; weakSelf.fgParser = parser; weakSelf.fgLayerMap = map;
             weakSelf.fgCamlPath = camlPath;
-            weakSelf.fgCamlString = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
+            if (!weakSelf.fgCamlString) weakSelf.fgCamlString = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
         }
     };
     
@@ -3098,48 +3075,109 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     else if ([self.currentCamlPath isEqualToString:self.fgCamlPath]) self.fgCamlString = str;
 }
 
-- (void)saveLayerKVC:(NSString *)targetId keyPath:(NSString *)keyPath value:(double)val {
+// =======================================================
+// 【核心修改】：精准写入与防重置保护
+// =======================================================
+- (NSString *)cleanStateElements:(NSString *)elements targetId:(NSString *)tid keyPaths:(NSArray *)keyPaths {
+    NSString *res = elements;
+    for (NSString *kp in keyPaths) {
+        NSString *pattern = [NSString stringWithFormat:@"<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>.*?</LKStateSetValue>", tid, kp];
+        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+        res = [regex stringByReplacingMatchesInString:res options:0 range:NSMakeRange(0, res.length) withTemplate:@""];
+    }
+    return res;
+}
+
+- (void)updateParserMemoryForTargetId:(NSString *)tid keyPath:(NSString *)kp value:(id)val {
+    ZoneEditorCAMLParser *parser = nil;
+    if ([self.currentCamlPath isEqualToString:self.bgCamlPath]) parser = self.bgParser;
+    else if ([self.currentCamlPath isEqualToString:self.floatCamlPath]) parser = self.floatParser;
+    else if ([self.currentCamlPath isEqualToString:self.fgCamlPath]) parser = self.fgParser;
+    
+    if (!parser) return;
+    
+    NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
+    BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *realState = [parser resolveRealStateNameFor:logicalState isDark:isDark];
+    
+    NSMutableDictionary *targetDict = parser.statesData[tid];
+    if (!targetDict) { targetDict = [NSMutableDictionary dictionary]; parser.statesData[tid] = targetDict; }
+    NSMutableDictionary *stateDict = targetDict[realState];
+    if (!stateDict) { stateDict = [NSMutableDictionary dictionary]; targetDict[realState] = stateDict; }
+    
+    stateDict[kp] = val;
+    if ([kp isEqualToString:@"position"]) {
+        [stateDict removeObjectForKey:@"position.x"];
+        [stateDict removeObjectForKey:@"position.y"];
+    }
+}
+
+- (void)saveLayerPosition:(CGPoint)pos targetId:(NSString *)tid {
+    [self updateParserMemoryForTargetId:tid keyPath:@"position" value:[NSValue valueWithCGPoint:pos]];
     NSString *caml = [self activeCamlString];
-    if (!caml || !targetId) return;
+    if (!caml || !tid) return;
     
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
     NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)([\\s\\S]*?)(</elements>\\s*</LKState>)", logicalState];
     NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern options:0 error:nil];
     NSTextCheckingResult *stateMatch = [stateRegex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
     
-    if (!stateMatch) return; 
-    
-    NSString *elementsStr = [caml substringWithRange:[stateMatch rangeAtIndex:2]];
-    NSString *setValPattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*)(<value[^>]*>.*?</value>|<value[^>]*/>)(\\s*</LKStateSetValue>)", targetId, keyPath];
-    NSRegularExpression *setValRegex = [NSRegularExpression regularExpressionWithPattern:setValPattern options:0 error:nil];
-    
-    NSString *newValueStr = [NSString stringWithFormat:@"<value type=\"real\" value=\"%.2f\"/>", val];
-    
-    if ([setValRegex numberOfMatchesInString:elementsStr options:0 range:NSMakeRange(0, elementsStr.length)] > 0) {
-        elementsStr = [setValRegex stringByReplacingMatchesInString:elementsStr options:0 range:NSMakeRange(0, elementsStr.length) withTemplate:[NSString stringWithFormat:@"$1%@$5", newValueStr]];
-    } else {
-        NSString *newElement = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n            %@\n          </LKStateSetValue>", targetId, keyPath, newValueStr];
+    if (stateMatch) {
+        NSString *elementsStr = [caml substringWithRange:[stateMatch rangeAtIndex:2]];
+        elementsStr = [self cleanStateElements:elementsStr targetId:tid keyPaths:@[@"position", @"position.x", @"position.y"]];
+        
+        NSString *newElement = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"position\"><value type=\"CGPoint\">%.2f %.2f</value></LKStateSetValue>", tid, pos.x, pos.y];
         elementsStr = [elementsStr stringByAppendingString:newElement];
+        caml = [caml stringByReplacingCharactersInRange:[stateMatch rangeAtIndex:2] withString:elementsStr];
+        [self setActiveCamlString:caml];
     }
+}
+
+- (void)saveLayerBounds:(CGRect)bounds targetId:(NSString *)tid {
+    [self updateParserMemoryForTargetId:tid keyPath:@"bounds.size.width" value:@(bounds.size.width)];
+    [self updateParserMemoryForTargetId:tid keyPath:@"bounds.size.height" value:@(bounds.size.height)];
     
-    NSString *finalCaml = [caml stringByReplacingCharactersInRange:[stateMatch rangeAtIndex:2] withString:elementsStr];
-    [self setActiveCamlString:finalCaml];
+    NSString *caml = [self activeCamlString];
+    if (!caml || !tid) return;
+    
+    NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
+    NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)([\\s\\S]*?)(</elements>\\s*</LKState>)", logicalState];
+    NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern options:0 error:nil];
+    NSTextCheckingResult *stateMatch = [stateRegex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
+    
+    if (stateMatch) {
+        NSString *elementsStr = [caml substringWithRange:[stateMatch rangeAtIndex:2]];
+        elementsStr = [self cleanStateElements:elementsStr targetId:tid keyPaths:@[@"bounds.size.width", @"bounds.size.height"]];
+        
+        NSString *newElement = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"bounds.size.width\"><value type=\"real\" value=\"%.2f\"/></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"bounds.size.height\"><value type=\"real\" value=\"%.2f\"/></LKStateSetValue>", tid, bounds.size.width, tid, bounds.size.height];
+        elementsStr = [elementsStr stringByAppendingString:newElement];
+        caml = [caml stringByReplacingCharactersInRange:[stateMatch rangeAtIndex:2] withString:elementsStr];
+        [self setActiveCamlString:caml];
+    }
 }
 
 // =======================================================
-// 手势移动与缩放
+// 手势移动与缩放 (完美跟手+自动保存不黑屏)
 // =======================================================
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     if (!self.selectedLayer || !self.selectedLayerName) return;
     CGFloat scale = 390.0 / self.canvasContainer.bounds.size.width;
+    
+    // 检查此层是否倒置（防反向拖动）
+    BOOL isFlipped = NO;
+    if ([self.currentCamlPath isEqualToString:self.bgCamlPath]) isFlipped = self.bgParser.isGeometryFlipped;
+    else if ([self.currentCamlPath isEqualToString:self.floatCamlPath]) isFlipped = self.floatParser.isGeometryFlipped;
+    else if ([self.currentCamlPath isEqualToString:self.fgCamlPath]) isFlipped = self.fgParser.isGeometryFlipped;
     
     if (pan.state == UIGestureRecognizerStateBegan) {
         [self pushUndoState];
         self.initialPanCenter = self.selectedLayer.position;
     } else if (pan.state == UIGestureRecognizerStateChanged) {
         CGPoint trans = [pan translationInView:self.canvasContainer];
-        CGPoint newPos = CGPointMake(self.initialPanCenter.x + trans.x * scale, 
-                                     self.initialPanCenter.y + trans.y * scale);
+        CGFloat dy = trans.y * scale;
+        if (isFlipped) dy = -dy; 
+        
+        CGPoint newPos = CGPointMake(self.initialPanCenter.x + trans.x * scale, self.initialPanCenter.y + dy);
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         self.selectedLayer.position = newPos;
@@ -3148,9 +3186,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
         CGPoint finalPos = self.selectedLayer.position;
         NSString *realId = self.selectedLayerId ?: self.selectedLayerName; 
-        [self saveLayerKVC:realId keyPath:@"position.x" value:finalPos.x];
-        [self saveLayerKVC:realId keyPath:@"position.y" value:finalPos.y];
-        [self refreshCanvas];
+        [self saveLayerPosition:finalPos targetId:realId];
+        // 绝不在这里调用 refreshCanvas，让图层留在原地保持连贯性
     }
 }
 
@@ -3174,9 +3211,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     } else if (pinch.state == UIGestureRecognizerStateEnded || pinch.state == UIGestureRecognizerStateCancelled) {
         CGRect finalBounds = self.selectedLayer.bounds;
         NSString *realId = self.selectedLayerId ?: self.selectedLayerName; 
-        [self saveLayerKVC:realId keyPath:@"bounds.size.width" value:finalBounds.size.width];
-        [self saveLayerKVC:realId keyPath:@"bounds.size.height" value:finalBounds.size.height];
-        [self refreshCanvas];
+        [self saveLayerBounds:finalBounds targetId:realId];
     }
 }
 
@@ -3261,7 +3296,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         
         self.tipLabel.hidden = YES;
         self.bottomToolbar.hidden = NO;
-        self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ (%@)", self.selectedLayerName, levelName];
+        self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@]", self.selectedLayerName, levelName];
         [self updateHighlightFrame];
     } else {
         self.selectedLayer = nil;
@@ -3300,14 +3335,14 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     CALayer *presLayer = self.selectedLayer.presentationLayer ?: self.selectedLayer;
     CGRect absoluteRect = [self.canvasContainer.layer convertRect:presLayer.bounds fromLayer:presLayer];
     
-    [UIView animateWithDuration:0.2 animations:^{
+    [UIView animateWithDuration:0.1 animations:^{
         self.highlightBorderView.frame = absoluteRect;
         self.dashBorderLayer.path = [UIBezierPath bezierPathWithRect:self.highlightBorderView.bounds].CGPath;
     }];
 }
 
 // =======================================================
-// 插入图片逻辑
+// 无损插入图片算法
 // =======================================================
 - (void)actionInsertImage {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"插入图片" message:@"请选择要插入的图层级" preferredStyle:UIAlertControllerStyleActionSheet];
@@ -3375,19 +3410,17 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"0\" opacity=\"1\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, fileName];
     
-    NSRegularExpression *sublayersRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*name=\"Root Layer\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
-    if ([sublayersRegex numberOfMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length)] > 0) {
-        camlString = [sublayersRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
-    } else {
-        NSRegularExpression *fallbackRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*id=\"__capRootLayer__\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
-        camlString = [fallbackRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
+    // 【最安全的插入法则】：不管叫不叫 Root Layer，直接查找 XML 中第一个出现的 <sublayers> 塞进去！
+    NSRange firstSublayers = [camlString rangeOfString:@"<sublayers>"];
+    if (firstSublayers.location != NSNotFound) {
+        camlString = [camlString stringByReplacingCharactersInRange:firstSublayers withString:[NSString stringWithFormat:@"<sublayers>%@", layerXml]];
     }
     
     NSArray *states = @[@"Locked", @"Unlock", @"Sleep"];
     for (NSString *state in states) {
         NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)", state];
         NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern options:0 error:nil];
-        NSString *elements = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"position.x\"><value type=\"real\" value=\"195\"/></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"position.y\"><value type=\"real\" value=\"422\"/></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"bounds.size.width\"><value type=\"real\" value=\"%.1f\"/></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"bounds.size.height\"><value type=\"real\" value=\"%.1f\"/></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"opacity\"><value type=\"real\" value=\"1\"/></LKStateSetValue>", newId, newId, newId, w, newId, h, newId];
+        NSString *elements = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"position\"><value type=\"CGPoint\">195 422</value></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"bounds.size.width\"><value type=\"real\" value=\"%.1f\"/></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"bounds.size.height\"><value type=\"real\" value=\"%.1f\"/></LKStateSetValue>\n          <LKStateSetValue targetId=\"%@\" keyPath=\"opacity\"><value type=\"real\" value=\"1\"/></LKStateSetValue>", newId, newId, w, newId, h, newId];
         
         camlString = [stateRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", elements]];
     }
@@ -3398,6 +3431,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     self.selectedLayerName = fileName;
     [self refreshCanvas];
+    self.statusLabel.text = [NSString stringWithFormat:@"成功插入: %@", fileName];
 }
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
@@ -3413,7 +3447,9 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
 }
 
+// =======================================================
 // 工具栏核心交互
+// =======================================================
 - (void)actionReplace:(UIButton *)sender {
     if (!self.selectedLayerName) return;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
@@ -3445,6 +3481,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }];
 }
 
+// 解决图层菜单弹出闪退（修复 popover 定位）
 - (void)actionAnimationMenu:(UIButton *)sender {
     if (!self.selectedLayerName || !self.currentCamlString) return;
     
@@ -3466,11 +3503,16 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
     
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    
     if (alert.popoverPresentationController) {
-        alert.popoverPresentationController.sourceView = sender;
-        alert.popoverPresentationController.sourceRect = sender.bounds;
+        alert.popoverPresentationController.sourceView = self.view; 
+        alert.popoverPresentationController.sourceRect = [sender convertRect:sender.bounds toView:self.view];
     }
-    [self presentViewController:alert animated:YES completion:nil];
+    
+    // 强制派发主线程防止线程死锁
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 - (void)extractAndEditTransitionFrom:(NSString *)from to:(NSString *)to title:(NSString *)title targetId:(NSString *)tid {
@@ -3543,7 +3585,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         camlStr = [insertRegex stringByReplacingMatchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length) withTemplate:[NSString stringWithFormat:@"$1%@", newZ]];
     }
     [self setActiveCamlString:camlStr];
-    [self refreshCanvas];
+    self.statusLabel.text = [NSString stringWithFormat:@"图层 Z 轴偏移: %.1f", self.selectedLayer.zPosition];
 }
 
 - (void)actionDelete:(UIButton *)sender {
@@ -3559,13 +3601,11 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     self.selectedLayer = nil;
     self.selectedLayerName = nil;
     [self refreshCanvas];
+    self.statusLabel.text = @"图层已删除";
 }
 
+// 彻底解决操作焦点丢失的问题
 - (void)refreshCanvas {
-    if (self.bgCamlPath && self.bgCamlString) [self.bgCamlString writeToFile:self.bgCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    if (self.floatCamlPath && self.floatCamlString) [self.floatCamlString writeToFile:self.floatCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    if (self.fgCamlPath && self.fgCamlString) [self.fgCamlString writeToFile:self.fgCamlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    
     NSString *savedSelection = self.selectedLayerName;
     [self loadWallpaperEngine]; 
     
@@ -3578,7 +3618,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         
         if (found) {
             self.selectedLayer = found;
-            self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ (%@)", self.selectedLayerName, levelName];
+            // self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ (%@)", self.selectedLayerName, levelName]; // 不要覆盖其他提示语
             [self updateHighlightFrame];
         } else {
             self.bottomToolbar.hidden = YES;
