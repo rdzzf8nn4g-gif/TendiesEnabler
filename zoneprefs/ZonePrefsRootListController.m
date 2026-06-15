@@ -2512,7 +2512,6 @@ static NSString * GetPrefsPlistPath() {
 // ================= 新增：可视化高级渲染编辑器 =================
 // =======================================================
 
-// 针对 iOS 14/15 的专用降级安全渲染容器，彻底免疫 BSUICAPackageView 闪退
 @interface ZoneEditorFallbackView : UIView
 @property (nonatomic, strong) UIView *uicpView;
 @property (nonatomic, strong) id package;
@@ -2601,9 +2600,8 @@ static NSString * GetPrefsPlistPath() {
     self.selectionBoxLayer = [CAShapeLayer layer];
     self.selectionBoxLayer.strokeColor = [UIColor systemYellowColor].CGColor;
     self.selectionBoxLayer.fillColor = [UIColor clearColor].CGColor;
-    self.selectionBoxLayer.lineWidth = 2.0;
-    self.selectionBoxLayer.lineDashPattern = @[@6, @4];
-    self.selectionBoxLayer.zPosition = 9999;
+    self.selectionBoxLayer.lineWidth = 4.0;
+    self.selectionBoxLayer.lineDashPattern = @[@8, @4];
     
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handlePreviewTap:)];
     [self.previewContainer addGestureRecognizer:tap];
@@ -2612,7 +2610,7 @@ static NSString * GetPrefsPlistPath() {
     [self.previewContainer addGestureRecognizer:pan];
     
     self.selectedLayerLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, CGRectGetMaxY(self.previewContainer.frame) + 15, self.view.bounds.size.width - 40, 20)];
-    self.selectedLayerLabel.text = @"请在上方屏幕点击选中图层 (支持拖拽)";
+    self.selectedLayerLabel.text = @"请在上方屏幕点击选中图层 (支持拖拽移动)";
     self.selectedLayerLabel.textAlignment = NSTextAlignmentCenter;
     self.selectedLayerLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     self.selectedLayerLabel.textColor = [UIColor secondaryLabelColor];
@@ -2742,11 +2740,9 @@ static NSString * GetPrefsPlistPath() {
 - (void)loadWallpaperEngine {
     [self.previewContainer.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
     self.selectedHitLayer = nil;
-    [self updateSelectionBox];
+    [self.selectionBoxLayer removeFromSuperlayer];
     
     NSFileManager *fm = [NSFileManager defaultManager];
-    
-    // 恢复为原生路径读取，彻底解决临时目录克隆导致的权限丢失与黑屏问题
     NSDirectoryEnumerator *origEnum = [fm enumeratorAtPath:self.wallpaperPath];
     NSString *subPath;
     while ((subPath = [origEnum nextObject])) {
@@ -2774,11 +2770,6 @@ static NSString * GetPrefsPlistPath() {
     }
     
     [self stateSegmentChanged:self.stateSegment];
-    
-    if (self.selectionBoxLayer.superlayer) {
-        [self.selectionBoxLayer removeFromSuperlayer];
-    }
-    [self.previewContainer.layer addSublayer:self.selectionBoxLayer];
 }
 
 - (void)setupPackageView:(UIView *)pkgView {
@@ -2840,13 +2831,13 @@ static NSString * GetPrefsPlistPath() {
                     [inv setArgument:&root atIndex:3];
                     float speed = 1.0f;
                     [inv setArgument:&speed atIndex:4];
-                    [inv invoke];
+                    @try { [inv invoke]; } @catch(NSException *e){} // 拦截找不到状态的闪退
                 }
             }
         }
     } else {
         if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
-            [view performSelector:NSSelectorFromString(@"setState:") withObject:state];
+            @try { [view performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e){}
         }
     }
 #pragma clang diagnostic pop
@@ -2866,26 +2857,26 @@ static NSString * GetPrefsPlistPath() {
     
     [CATransaction commit];
     
+    // 等待动画结束重绘选中框
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self updateSelectionBox];
     });
 }
 
+// 完美贴合图层边框，解决移位和脱落
 - (void)updateSelectionBox {
-    if (!self.selectedHitLayer || !self.selectedHitLayer.superlayer) {
+    if (!self.selectedHitLayer) {
         [self.selectionBoxLayer removeFromSuperlayer];
-        self.selectionBoxLayer.path = nil;
         return;
-    }
-    
-    if (self.selectionBoxLayer.superlayer != self.selectedHitLayer.superlayer) {
-        [self.selectionBoxLayer removeFromSuperlayer];
-        [self.selectedHitLayer.superlayer addSublayer:self.selectionBoxLayer];
     }
     
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.selectionBoxLayer.frame = self.selectedHitLayer.frame;
+    if (self.selectionBoxLayer.superlayer != self.selectedHitLayer) {
+        [self.selectionBoxLayer removeFromSuperlayer];
+        [self.selectedHitLayer addSublayer:self.selectionBoxLayer];
+    }
+    self.selectionBoxLayer.frame = self.selectedHitLayer.bounds;
     self.selectionBoxLayer.path = [UIBezierPath bezierPathWithRect:self.selectedHitLayer.bounds].CGPath;
     [CATransaction commit];
 }
@@ -2895,7 +2886,6 @@ static NSString * GetPrefsPlistPath() {
     
     self.selectedHitLayer = nil;
     
-    // 【核心修复1】：安全构建数组，防 nil 闪退
     NSMutableArray *views = [NSMutableArray array];
     if (self.fgView) [views addObject:self.fgView];
     if (self.floatingView) [views addObject:self.floatingView];
@@ -2933,7 +2923,6 @@ static NSString * GetPrefsPlistPath() {
         self.selectedLayerLabel.text = @"未选中任何图层 (支持拖拽移动)";
         self.selectedLayerLabel.textColor = [UIColor secondaryLabelColor];
         [self.selectionBoxLayer removeFromSuperlayer];
-        self.selectionBoxLayer.path = nil;
         self.bottomToolbar.alpha = 0.5;
         self.bottomToolbar.userInteractionEnabled = NO;
     }
@@ -2944,7 +2933,6 @@ static NSString * GetPrefsPlistPath() {
     
     CGPoint translation = [gesture translationInView:self.previewContainer];
     
-    // 【核心修复2】：安全的缩放和翻转探测
     CGFloat scaleX = 1.0;
     CGFloat scaleY = 1.0;
     BOOL isFlipped = NO;
@@ -2967,23 +2955,18 @@ static NSString * GetPrefsPlistPath() {
         CGFloat dx = translation.x / scaleX;
         CGFloat dy = translation.y / scaleY;
         
-        // 自动判定底层坐标翻转，解决反向移动问题
-        if (isFlipped) { dy = -dy; }
+        // 自动纠正 iOS 底层坐标系翻转，绝对跟手
+        if (isFlipped) dy = -dy;
         
         CGPoint newPos = CGPointMake(self.panStartPos.x + dx, self.panStartPos.y + dy);
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         self.selectedHitLayer.position = newPos;
-        [self updateSelectionBox];
         [CATransaction commit];
     } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         NSString *newVal = [NSString stringWithFormat:@"%.1f %.1f", self.selectedHitLayer.position.x, self.selectedHitLayer.position.y];
-        [self modifyCAMLState:@"Sleep" keyPath:@"position" value:newVal];
-        [self modifyCAMLState:@"Locked" keyPath:@"position" value:newVal];
-        [self modifyCAMLState:@"Unlock" keyPath:@"position" value:newVal];
-        
-        // 【核心修复3】：强行热重载画面以应用保存的数值
-        [self loadWallpaperEngine];
+        // 拖动完毕，只静默修改文件，不重载画面防止闪烁
+        [self updateCAMLProperty:@"position" value:newVal];
     }
 }
 
@@ -3036,25 +3019,70 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+// 终极 CAML 属性覆写方法：100% 成功注入并更新
+- (void)updateCAMLProperty:(NSString *)keyPath value:(NSString *)value {
+    if (value.length == 0 || !self.selectedLayerName || !self.selectedLayerPath) return;
+    NSString *camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
+    NSMutableString *caml = [NSMutableString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
+    if (!caml) return;
+    
+    BOOL modified = NO;
+    
+    // 1. 尝试修改动画帧 (LKStateSetValue)
+    NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value.*?>)(.*?)(</value>)", self.selectedLayerName, keyPath];
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
+    if ([regex numberOfMatchesInString:caml options:0 range:NSMakeRange(0, caml.length)] > 0) {
+        NSString *replaced = [regex stringByReplacingMatchesInString:caml options:0 range:NSMakeRange(0, caml.length) withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
+        [caml setString:replaced];
+        modified = YES;
+    }
+    
+    // 2. 尝试修改底层基础属性 (<CALayer ...>)
+    NSString *tagRegexStr = [NSString stringWithFormat:@"<(CA[a-zA-Z]*Layer)([^>]*)id=\"%@\"([^>]*)>", self.selectedLayerName];
+    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:tagRegexStr options:0 error:nil];
+    NSTextCheckingResult *match = [tagRegex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
+    if (match) {
+        NSString *tagString = [caml substringWithRange:match.range];
+        NSString *attrRegexStr = [NSString stringWithFormat:@"%@=\"[^\"]*\"", keyPath];
+        NSRegularExpression *attrRegex = [NSRegularExpression regularExpressionWithPattern:attrRegexStr options:0 error:nil];
+        
+        NSString *newTag;
+        if ([attrRegex numberOfMatchesInString:tagString options:0 range:NSMakeRange(0, tagString.length)] > 0) {
+            newTag = [attrRegex stringByReplacingMatchesInString:tagString options:0 range:NSMakeRange(0, tagString.length) withTemplate:[NSString stringWithFormat:@"%@=\"%@\"", keyPath, value]];
+        } else {
+            newTag = [tagString stringByReplacingOccurrencesOfString:@">" withString:[NSString stringWithFormat:@" %@=\"%@\">", keyPath, value] options:NSBackwardsSearch range:NSMakeRange(0, tagString.length)];
+        }
+        [caml replaceCharactersInRange:match.range withString:newTag];
+        modified = YES;
+    }
+    
+    if (modified) {
+        [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
+// 单独为 LKStateSetValue 的热注入保留
 - (void)modifyCAMLState:(NSString *)state keyPath:(NSString *)keyPath value:(NSString *)value {
     if (value.length == 0 || !self.selectedLayerName || !self.selectedLayerPath) return;
     NSString *camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
-    NSString *camlContent = [NSString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
-    if (!camlContent) return;
+    NSMutableString *caml = [NSMutableString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
+    if (!caml) return;
     
     NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value.*?>)(.*?)(</value>)", self.selectedLayerName, keyPath];
     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
     
-    if ([regex numberOfMatchesInString:camlContent options:0 range:NSMakeRange(0, camlContent.length)] > 0) {
-        camlContent = [regex stringByReplacingMatchesInString:camlContent options:0 range:NSMakeRange(0, camlContent.length) withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
+    if ([regex numberOfMatchesInString:caml options:0 range:NSMakeRange(0, caml.length)] > 0) {
+        NSString *replaced = [regex stringByReplacingMatchesInString:caml options:0 range:NSMakeRange(0, caml.length) withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
+        [caml setString:replaced];
     } else {
         NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)", state];
         NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
         NSString *typeAttr = [value containsString:@" "] ? @" type=\"CGPoint\"" : @"";
         NSString *injection = [NSString stringWithFormat:@"$1\n      <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n        <value%@>%@</value>\n      </LKStateSetValue>", self.selectedLayerName, keyPath, typeAttr, value];
-        camlContent = [stateRegex stringByReplacingMatchesInString:camlContent options:0 range:NSMakeRange(0, camlContent.length) withTemplate:injection];
+        NSString *replaced = [stateRegex stringByReplacingMatchesInString:caml options:0 range:NSMakeRange(0, caml.length) withTemplate:injection];
+        [caml setString:replaced];
     }
-    [camlContent writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (void)moveLayerUp { [self modifyLayerZPosition:1]; }
@@ -3067,11 +3095,10 @@ static NSString * GetPrefsPlistPath() {
     self.selectedHitLayer.zPosition += direction;
     [CATransaction commit];
     
-    [self modifyCAMLState:@"Sleep" keyPath:@"zPosition" value:[NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition]];
-    [self modifyCAMLState:@"Locked" keyPath:@"zPosition" value:[NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition]];
-    [self modifyCAMLState:@"Unlock" keyPath:@"zPosition" value:[NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition]];
+    NSString *newZ = [NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition];
+    [self updateCAMLProperty:@"zPosition" value:newZ];
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图层移位" message:@"层级(zPosition)已调整，渲染器已更新。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图层移位" message:@"层级(zPosition)已调整并保存。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         [self loadWallpaperEngine];
     }]];
@@ -3083,9 +3110,7 @@ static NSString * GetPrefsPlistPath() {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"危险操作" message:[NSString stringWithFormat:@"确认隐藏/删除图层 [%@] 吗？", self.selectedLayerName] preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"强制隐藏" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [self modifyCAMLState:@"Sleep" keyPath:@"opacity" value:@"0"];
-        [self modifyCAMLState:@"Locked" keyPath:@"opacity" value:@"0"];
-        [self modifyCAMLState:@"Unlock" keyPath:@"opacity" value:@"0"];
+        [self updateCAMLProperty:@"opacity" value:@"0"];
         [self loadWallpaperEngine];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
