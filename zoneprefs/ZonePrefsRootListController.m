@@ -2497,7 +2497,6 @@ static NSString * GetPrefsPlistPath() {
 // =======================================================
 
 // 补全最底层核心 CoreAnimation 私有类，破除全系统版本限制
-@interface CAPackage : NSObject
 + (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)error;
 @end
 
