@@ -2552,6 +2552,14 @@ static NSString * GetPrefsPlistPath() {
 @property (nonatomic, copy) NSString *selectedLayerPath;
 @end
 
+// ==========================================
+// 核心修复：添加 Dummy 声明，完美欺骗编译器并绕过 ARC 检查
+// ==========================================
+@interface NSObject (ZoneEditorDummy)
+- (instancetype)initWithContentsOfURL:(NSURL *)url publishedObjectViewClassMap:(NSDictionary *)map;
++ (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)outError;
+@end
+
 @implementation ZoneAdvancedEditorViewController
 
 - (void)viewDidLoad {
@@ -2639,7 +2647,6 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:self.bottomToolbar];
 }
 
-// 【修复 1】：彻底重写防闪退的 Package 加载器
 - (UIView *)createPackageViewWithURL:(NSURL *)url {
     dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
     
@@ -2673,11 +2680,13 @@ static NSString * GetPrefsPlistPath() {
     if (CAPackageClass) {
         @try {
             NSError *err = nil;
-            id package = [(id)CAPackageClass performSelector:NSSelectorFromString(@"packageWithContentsOfURL:type:options:error:") withObject:url withObject:@"com.apple.coreanimation-package"];
+            id package = [(id)CAPackageClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:&err];
+            
             if (!package) {
                 NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
-                package = [(id)CAPackageClass performSelector:NSSelectorFromString(@"packageWithContentsOfURL:type:options:error:") withObject:camlURL withObject:@"com.apple.coreanimation-xml"];
+                package = [(id)CAPackageClass packageWithContentsOfURL:camlURL type:@"com.apple.coreanimation-xml" options:nil error:&err];
             }
+            
             if (package) {
                 CALayer *root = [package valueForKey:@"rootLayer"];
                 if (root && [root isKindOfClass:[CALayer class]]) {
@@ -2697,6 +2706,7 @@ static NSString * GetPrefsPlistPath() {
             }
         } @catch(NSException *e) {}
     }
+    
     return nil;
 }
 
@@ -2840,22 +2850,18 @@ static NSString * GetPrefsPlistPath() {
     [CATransaction commit];
 }
 
-// 【修复 2】：绝对精准的点击检测系
 - (void)handlePreviewTap:(UITapGestureRecognizer *)gesture {
     CGPoint point = [gesture locationInView:self.previewContainer];
     self.selectedHitLayer = nil;
     
-    // 由表及里逐层穿透检测
     NSArray *views = @[self.fgView, self.floatingView, self.bgView];
     
     for (UIView *view in views) {
         if (!view) continue;
         
-        // hitTest 的入参必须是 target layer 父图层的坐标系
         CGPoint layerPoint = [self.previewContainer.layer convertPoint:point toLayer:view.layer.superlayer];
         CALayer *found = [view.layer hitTest:layerPoint];
         
-        // 向上溯源：因为有时候点到的是蒙版或无名占位框，要找真正带名字的 CAML 图层
         while (found && found != view.layer.superlayer) {
             if (found.name && found.name.length > 0 && ![found.name isEqualToString:@"rootLayer"] && ![found.name hasPrefix:@"UICP"]) {
                 self.selectedHitLayer = found;
@@ -2914,7 +2920,7 @@ static NSString * GetPrefsPlistPath() {
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
         CGFloat dx = translation.x / scaleX;
         CGFloat dy = translation.y / scaleY;
-        if (isFlipped) dy = -dy; // 自动反转坐标系修正拖拽偏差
+        if (isFlipped) dy = -dy; 
         
         CGPoint newPos = CGPointMake(self.panStartPos.x + dx, self.panStartPos.y + dy);
         [CATransaction begin];
@@ -2934,7 +2940,6 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:picker animated:YES completion:nil];
 }
 
-// 【修复 3】：精准匹配真实图片后缀名，打破底层图片缓存
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
     UIImage *img = info[UIImagePickerControllerOriginalImage];
     [picker dismissViewControllerAnimated:YES completion:^{
@@ -2942,7 +2947,6 @@ static NSString * GetPrefsPlistPath() {
             NSFileManager *fm = [NSFileManager defaultManager];
             NSString *targetImgPath = nil;
             
-            // 智能检索 Assets 下的原始文件（不拘泥于 png 还是 jpg）
             NSArray *searchDirs = @[self.selectedLayerPath, [self.selectedLayerPath stringByAppendingPathComponent:@"assets"]];
             for (NSString *dir in searchDirs) {
                 NSArray *contents = [fm contentsOfDirectoryAtPath:dir error:nil];
@@ -2963,10 +2967,7 @@ static NSString * GetPrefsPlistPath() {
             BOOL isPNG = [targetImgPath.pathExtension.lowercaseString isEqualToString:@"png"];
             NSData *data = isPNG ? UIImagePNGRepresentation(img) : UIImageJPEGRepresentation(img, 1.0);
             
-            // 强行覆盖
             [data writeToFile:targetImgPath atomically:YES];
-            
-            // 重构整个视图释放旧包缓存
             [self loadWallpaperEngine];
         }
     }];
@@ -3007,7 +3008,6 @@ static NSString * GetPrefsPlistPath() {
     
     BOOL modified = NO;
     
-    // 【修复 4】：增强版 Regex，容纳带有 type="CGPoint" 属性的节点
     NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value[^>]*>)(.*?)(</value>)", self.selectedLayerName, keyPath];
     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
     if ([regex numberOfMatchesInString:caml options:0 range:NSMakeRange(0, caml.length)] > 0) {
@@ -3043,7 +3043,6 @@ static NSString * GetPrefsPlistPath() {
     NSMutableString *caml = [NSMutableString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
     if (!caml) return;
     
-    // 【修复 4 同步强化】
     NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value[^>]*>)(.*?)(</value>)", self.selectedLayerName, keyPath];
     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
     
@@ -3092,7 +3091,6 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 【修复 5】：让后台全局系统级引擎强行丢弃旧缓存重启
 - (void)saveAndApply {
     CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)self.wallpaperPath, CFSTR("com.iosdump.zoneprefs"));
     CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
@@ -3110,9 +3108,7 @@ static NSString * GetPrefsPlistPath() {
     prefs[@"ZonePath"] = self.wallpaperPath;
     [prefs writeToFile:plistPath atomically:YES];
     
-    // 向系统发出强制完全重载的信号
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    // 此通知发送给主引擎让其触发大扫除
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceEngineRebuild" object:nil];
     
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已同步生效！" preferredStyle:UIAlertControllerStyleAlert];
