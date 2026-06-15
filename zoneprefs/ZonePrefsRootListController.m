@@ -2509,8 +2509,75 @@ static NSString * GetPrefsPlistPath() {
 @end
 
 // =======================================================
-// ================= 高级渲染编辑器及 CAML 核心 =================
+// ================= 新增：可视化高级渲染编辑器 =================
 // =======================================================
+
+@class ZoneEditorFallbackView;
+
+typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
+    ZoneCAMLModeFull = 0,
+    ZoneCAMLModeSleepToLocked,
+    ZoneCAMLModeLockedToSleep,
+    ZoneCAMLModeLockedToUnlock,
+    ZoneCAMLModeUnlockToLocked,
+    ZoneCAMLModeSleepToUnlock,
+    ZoneCAMLModeUnlockToSleep
+};
+
+@interface ZoneCAMLTextEditorViewController : UIViewController
+@property (nonatomic, copy) NSString *filePath;
+@property (nonatomic, copy) NSString *initialText;
+@property (nonatomic, copy) NSString *editorTitle;
+@property (nonatomic, copy) void (^saveHandler)(NSString *newText);
+@end
+
+@implementation ZoneCAMLTextEditorViewController {
+    UITextView *_textView;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.title = self.editorTitle ?: @"CAML 编辑";
+
+    self.navigationItem.leftBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"关闭"
+                                         style:UIBarButtonItemStylePlain
+                                        target:self
+                                        action:@selector(closeSelf)];
+
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"保存"
+                                         style:UIBarButtonItemStyleDone
+                                        target:self
+                                        action:@selector(saveText)];
+
+    _textView = [[UITextView alloc] initWithFrame:self.view.bounds];
+    _textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _textView.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+    _textView.textColor = [UIColor labelColor];
+    _textView.backgroundColor = [UIColor systemBackgroundColor];
+    _textView.alwaysBounceVertical = YES;
+    _textView.text = self.initialText ?: @"";
+    [self.view addSubview:_textView];
+}
+
+- (void)closeSelf {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)saveText {
+    NSString *text = _textView.text ?: @"";
+    if (self.filePath.length > 0) {
+        [text writeToFile:self.filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    if (self.saveHandler) {
+        self.saveHandler(text);
+    }
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
 
 @interface ZoneAdvancedEditorViewController : UIViewController
     <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate>
@@ -2545,6 +2612,7 @@ static NSString * GetPrefsPlistPath() {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.title = @"高级实时编辑";
 
@@ -2578,9 +2646,7 @@ static NSString * GetPrefsPlistPath() {
     self.stateSegment = [[UISegmentedControl alloc] initWithItems:items];
     self.stateSegment.frame = CGRectMake(20, 100, self.view.bounds.size.width - 40, 32);
     self.stateSegment.selectedSegmentIndex = 1;
-    [self.stateSegment addTarget:self
-                          action:@selector(stateSegmentChanged:)
-                forControlEvents:UIControlEventValueChanged];
+    [self.stateSegment addTarget:self action:@selector(stateSegmentChanged:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:self.stateSegment];
 
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
@@ -2655,28 +2721,17 @@ static NSString * GetPrefsPlistPath() {
 
 #pragma mark - Engine Loading
 
-static NSArray<NSString *> *ZoneImageExtensions(void) {
-    return @[@"png", @"jpg", @"jpeg", @"heic", @"heif", @"webp"];
-}
-
 - (NSString *)zone_firstExistingImagePathInFolder:(NSString *)folder nameLike:(NSString *)name {
     if (folder.length == 0 || name.length == 0) return nil;
 
     NSFileManager *fm = [NSFileManager defaultManager];
-
     NSString *direct = [folder stringByAppendingPathComponent:name];
     BOOL isDir = NO;
     if ([fm fileExistsAtPath:direct isDirectory:&isDir] && !isDir) return direct;
 
     NSString *base = [name stringByDeletingPathExtension];
-    NSString *ext = [name.pathExtension lowercaseString];
-    if (ext.length > 0) {
-        NSString *sameExt = [folder stringByAppendingPathComponent:name];
-        if ([fm fileExistsAtPath:sameExt]) return sameExt;
-    }
-
-    for (NSString *e in ZoneImageExtensions()) {
-        NSString *candidate = [folder stringByAppendingPathComponent:[base stringByAppendingPathExtension:e]];
+    for (NSString *ext in @[@"png", @"jpg", @"jpeg", @"heic", @"heif", @"webp"]) {
+        NSString *candidate = [folder stringByAppendingPathComponent:[base stringByAppendingPathExtension:ext]];
         if ([fm fileExistsAtPath:candidate]) return candidate;
     }
     return nil;
@@ -2700,12 +2755,15 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
 
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *origEnum = [fm enumeratorAtPath:self.wallpaperPath];
-    NSString *subPath;
+    NSString *subPath = nil;
+
     while ((subPath = [origEnum nextObject])) {
         if ([subPath containsString:@"__MACOSX"]) continue;
         NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:subPath];
         BOOL isDir = NO;
-        if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir && [subPath.pathExtension.lowercaseString isEqualToString:@"ca"]) {
+
+        if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir &&
+            [subPath.pathExtension.lowercaseString isEqualToString:@"ca"]) {
             if ([subPath localizedCaseInsensitiveContainsString:@"Background"]) self.bgPkgPath = fullPath;
             else if ([subPath localizedCaseInsensitiveContainsString:@"Floating"]) self.floatPkgPath = fullPath;
             else if ([subPath localizedCaseInsensitiveContainsString:@"Foreground"]) self.fgPkgPath = fullPath;
@@ -2736,18 +2794,19 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
         if (BSUIPackageClass && [BSUIPackageClass instancesRespondToSelector:@selector(initWithURL:)]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id pkg = [[BSUIPackageClass alloc] performSelector:NSSelectorFromString(@"initWithURL:") withObject:url];
+            id pkg = [[BSUIPackageClass alloc] performSelector:@selector(initWithURL:) withObject:url];
 #pragma clang diagnostic pop
             if (pkg) return pkg;
         }
     }
 
     ZoneEditorFallbackView *container = [[ZoneEditorFallbackView alloc] initWithFrame:CGRectZero];
+
     Class UICPClass = NSClassFromString(@"_UICAPackageView");
-    if (UICPClass && [UICPClass instancesRespondToSelector:NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:")]) {
+    if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
         @try {
             id packageView = [UICPClass alloc];
-            SEL initSel = NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:");
+            SEL initSel = @selector(initWithContentsOfURL:publishedObjectViewClassMap:);
             NSMethodSignature *sig = [packageView methodSignatureForSelector:initSel];
             if (sig) {
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
@@ -2758,6 +2817,7 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
                 [inv setArgument:&nilObj atIndex:3];
                 [inv invoke];
                 [inv getReturnValue:&packageView];
+
                 if (packageView) {
                     [packageView setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
                     [container addSubview:packageView];
@@ -2767,38 +2827,80 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
             }
         } @catch (NSException *e) {}
     }
+
+    Class CAPackageClass = NSClassFromString(@"CAPackage");
+    if (CAPackageClass) {
+        id package = nil;
+        @try {
+            SEL pkgSel = @selector(packageWithContentsOfURL:type:options:error:);
+            NSMethodSignature *sig = [CAPackageClass methodSignatureForSelector:pkgSel];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setSelector:pkgSel];
+                [inv setTarget:CAPackageClass];
+
+                NSString *type1 = @"com.apple.coreanimation-package";
+                id nilOptions = nil;
+                void *nilErr = NULL;
+
+                [inv setArgument:&url atIndex:2];
+                [inv setArgument:&type1 atIndex:3];
+                [inv setArgument:&nilOptions atIndex:4];
+                [inv setArgument:&nilErr atIndex:5];
+                [inv invoke];
+                [inv getReturnValue:&package];
+            }
+        } @catch (NSException *e) {}
+
+        if (!package) {
+            NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
+            @try {
+                SEL pkgSel = @selector(packageWithContentsOfURL:type:options:error:);
+                NSMethodSignature *sig = [CAPackageClass methodSignatureForSelector:pkgSel];
+                if (sig) {
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setSelector:pkgSel];
+                    [inv setTarget:CAPackageClass];
+
+                    NSString *type2 = @"com.apple.coreanimation-xml";
+                    id nilOptions = nil;
+                    void *nilErr = NULL;
+
+                    [inv setArgument:&camlURL atIndex:2];
+                    [inv setArgument:&type2 atIndex:3];
+                    [inv setArgument:&nilOptions atIndex:4];
+                    [inv setArgument:&nilErr atIndex:5];
+                    [inv invoke];
+                    [inv getReturnValue:&package];
+                }
+            } @catch (NSException *e) {}
+        }
+
+        if (package) {
+            [container setValue:package forKey:@"package"];
+            CALayer *root = nil;
+            @try { root = [package valueForKey:@"rootLayer"]; } @catch (NSException *e) {}
+            if (root) {
+                [container.layer addSublayer:root];
+                id stateController = nil;
+                Class CAStateControllerClass = NSClassFromString(@"CAStateController");
+                if (CAStateControllerClass) {
+                    @try {
+                        stateController = [[CAStateControllerClass alloc] initWithLayer:root];
+                    } @catch (NSException *e) {}
+                }
+                container.stateController = stateController;
+            }
+            return container;
+        }
+    }
+
     return container;
 }
 
 - (void)setupPackageView:(UIView *)pkgView {
     if (!pkgView) return;
     pkgView.frame = self.previewContainer.bounds;
-
-    CALayer *rootLayer = nil;
-    if ([pkgView isKindOfClass:[ZoneEditorFallbackView class]]) {
-        ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)pkgView;
-        if (fbView.uicpView) {
-            rootLayer = [fbView.uicpView.layer.sublayers firstObject];
-            if (rootLayer) fbView.uicpView.layer.geometryFlipped = !rootLayer.geometryFlipped;
-        } else if (fbView.package) {
-            @try { rootLayer = [fbView.package valueForKey:@"rootLayer"]; } @catch(NSException *e) {}
-            if (rootLayer) fbView.layer.geometryFlipped = !rootLayer.geometryFlipped;
-        }
-    } else {
-        rootLayer = [pkgView.layer.sublayers firstObject];
-        if (rootLayer) pkgView.layer.geometryFlipped = !rootLayer.geometryFlipped;
-    }
-
-    if (rootLayer) {
-        CGSize realSize = rootLayer.bounds.size;
-        if (realSize.width > 0 && realSize.height > 0) {
-            CGFloat scale = MIN(self.previewContainer.bounds.size.width / realSize.width,
-                                self.previewContainer.bounds.size.height / realSize.height);
-            rootLayer.position = CGPointMake(self.previewContainer.bounds.size.width / 2.0,
-                                             self.previewContainer.bounds.size.height / 2.0);
-            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
-        }
-    }
     [self.previewContainer addSubview:pkgView];
 }
 
@@ -2830,14 +2932,15 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
         ZoneEditorFallbackView *fb = (ZoneEditorFallbackView *)view;
         if (fb.uicpView) root = [fb.uicpView.layer.sublayers firstObject];
         else if (fb.package) {
-            @try { root = [fb.package valueForKey:@"rootLayer"]; } @catch(NSException *e) {}
+            @try { root = [fb.package valueForKey:@"rootLayer"]; } @catch (NSException *e) {}
         }
     } else {
         root = [view.layer.sublayers firstObject];
     }
+
     if (!root) return;
 
-    CALayer *found = ZoneFindLayerByName(root, layerName);
+    CALayer *found = [self zone_findLayerByName:root name:layerName];
     if (!found) return;
 
     self.selectedHitLayer = found;
@@ -2854,22 +2957,20 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
 
 - (void)safeSetState:(NSString *)state forView:(UIView *)view {
     if (!view) return;
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
         ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
-        if (fbView.uicpView && [fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:")]) {
-            [fbView.uicpView performSelector:NSSelectorFromString(@"setState:") withObject:state];
+        if (fbView.uicpView && [fbView.uicpView respondsToSelector:@selector(setState:)]) {
+            [fbView.uicpView performSelector:@selector(setState:) withObject:state];
             return;
         }
         if (fbView.stateController && fbView.package) {
             CALayer *root = nil;
-            @try {
-                root = [fbView.package valueForKey:@"rootLayer"];
-            } @catch(NSException *e) {}
-
+            @try { root = [fbView.package valueForKey:@"rootLayer"]; } @catch (NSException *e) {}
             if (root && [root isKindOfClass:[CALayer class]]) {
-                SEL setSel = NSSelectorFromString(@"setState:ofLayer:transitionSpeed:");
+                SEL setSel = @selector(setState:ofLayer:transitionSpeed:);
                 NSMethodSignature *sig = [fbView.stateController methodSignatureForSelector:setSel];
                 if (sig) {
                     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
@@ -2879,13 +2980,13 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
                     [inv setArgument:&root atIndex:3];
                     float speed = 1.0f;
                     [inv setArgument:&speed atIndex:4];
-                    @try { [inv invoke]; } @catch(NSException *e) {}
+                    @try { [inv invoke]; } @catch (NSException *e) {}
                 }
             }
         }
     } else {
-        if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
-            @try { [view performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e) {}
+        if ([view respondsToSelector:@selector(setState:)]) {
+            @try { [view performSelector:@selector(setState:) withObject:state]; } @catch (NSException *e) {}
         }
     }
 #pragma clang diagnostic pop
@@ -2895,7 +2996,8 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
 
 - (void)stateSegmentChanged:(UISegmentedControl *)sender {
     NSString *states[] = {@"Sleep", @"Locked", @"Unlock"};
-    NSString *targetState = states[MAX(0, MIN(2, sender.selectedSegmentIndex))];
+    NSInteger idx = MAX(0, MIN(2, sender.selectedSegmentIndex));
+    NSString *targetState = states[idx];
 
     [CATransaction begin];
     [CATransaction setDisableActions:NO];
@@ -2914,6 +3016,16 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
 
 #pragma mark - Selection
 
+- (CALayer *)zone_findLayerByName:(CALayer *)layer name:(NSString *)name {
+    if (!layer || name.length == 0) return nil;
+    if ([layer.name isEqualToString:name]) return layer;
+    for (CALayer *sub in layer.sublayers) {
+        CALayer *found = [self zone_findLayerByName:sub name:name];
+        if (found) return found;
+    }
+    return nil;
+}
+
 - (void)updateSelectionBox {
     if (!self.selectedHitLayer) {
         [self.selectionBoxLayer removeFromSuperlayer];
@@ -2922,18 +3034,22 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+
     if (self.selectionBoxLayer.superlayer != self.selectedHitLayer) {
         [self.selectionBoxLayer removeFromSuperlayer];
         [self.selectedHitLayer addSublayer:self.selectionBoxLayer];
     }
+
     self.selectionBoxLayer.frame = self.selectedHitLayer.bounds;
     self.selectionBoxLayer.path = [UIBezierPath bezierPathWithRect:self.selectedHitLayer.bounds].CGPath;
+
     [CATransaction commit];
 }
 
 - (CALayer *)zone_layerHitAtPoint:(CGPoint)point inView:(UIView *)view {
-    CALayer *root = [view.layer presentationLayer] ?: view.layer;
+    CALayer *root = view.layer.presentationLayer ?: view.layer;
     CALayer *hit = [root hitTest:point];
+
     while (hit && hit != root) {
         NSString *name = hit.name;
         BOOL isDrawable = (hit.sublayers.count == 0 || hit.contents != nil || hit.delegate != nil);
@@ -2957,12 +3073,13 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
     self.selectedAssetPath = nil;
 
     NSArray *views = self.fgView ? @[self.fgView,
-                                    self.floatingView ?: [NSNull null],
-                                    self.bgView ?: [NSNull null]] :
-                              @[self.floatingView ?: [NSNull null],
-                                self.bgView ?: [NSNull null]];
+                                     self.floatingView ?: [NSNull null],
+                                     self.bgView ?: [NSNull null]] :
+                                   @[self.floatingView ?: [NSNull null],
+                                     self.bgView ?: [NSNull null]];
+
     for (id obj in views) {
-        if (obj == (id)[NSNull null]) continue;
+        if (obj == [NSNull null]) continue;
         UIView *view = (UIView *)obj;
 
         CGPoint convertedPoint = [self.previewContainer.layer convertPoint:point toLayer:view.layer];
@@ -3001,40 +3118,19 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
     if (!self.selectedHitLayer) return;
 
     CGPoint translation = [gesture translationInView:self.previewContainer];
-    CGFloat scaleX = 1.0;
-    CGFloat scaleY = 1.0;
-    BOOL isFlipped = NO;
-
-    CALayer *scanLayer = self.selectedHitLayer;
-    while (scanLayer && scanLayer != self.previewContainer.layer) {
-        @try {
-            scaleX *= [[scanLayer valueForKeyPath:@"transform.scale.x"] floatValue] ?: 1.0;
-            scaleY *= [[scanLayer valueForKeyPath:@"transform.scale.y"] floatValue] ?: 1.0;
-            if (scanLayer.geometryFlipped) isFlipped = !isFlipped;
-        } @catch(NSException *e) {}
-        scanLayer = scanLayer.superlayer;
-    }
-
-    if (ABS(scaleX) <= 0.01) scaleX = 1.0;
-    if (ABS(scaleY) <= 0.01) scaleY = 1.0;
+    CGPoint newPos = self.selectedHitLayer.position;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.panStartPos = self.selectedHitLayer.position;
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGFloat dx = translation.x / scaleX;
-        CGFloat dy = translation.y / scaleY;
-        if (isFlipped) dy = -dy;
-
-        CGPoint newPos = CGPointMake(self.panStartPos.x + dx, self.panStartPos.y + dy);
+        newPos = CGPointMake(self.panStartPos.x + translation.x, self.panStartPos.y + translation.y);
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         self.selectedHitLayer.position = newPos;
         [CATransaction commit];
     } else if (gesture.state == UIGestureRecognizerStateEnded ||
                gesture.state == UIGestureRecognizerStateCancelled) {
-        NSString *newVal = [NSString stringWithFormat:@"%.1f %.1f",
-                            self.selectedHitLayer.position.x,
-                            self.selectedHitLayer.position.y];
+        NSString *newVal = [NSString stringWithFormat:@"%.1f %.1f", self.selectedHitLayer.position.x, self.selectedHitLayer.position.y];
         [self updateCAMLProperty:@"position" value:newVal];
         [self reloadPreviewPreservingSelection];
     }
@@ -3067,39 +3163,24 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
         [self showPickerWithSourceType:UIImagePickerControllerSourceTypePhotoLibrary];
     }]];
 
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
     if (sheet.popoverPresentationController) {
         sheet.popoverPresentationController.sourceView = self.selectedLayerLabel ?: self.view;
         sheet.popoverPresentationController.sourceRect = self.selectedLayerLabel.bounds;
     }
 
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
 - (void)showPickerWithSourceType:(UIImagePickerControllerSourceType)type {
     if (![UIImagePickerController isSourceTypeAvailable:type]) return;
+
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.delegate = self;
     picker.sourceType = type;
     picker.mediaTypes = @[@"public.image"];
     [self presentViewController:picker animated:YES completion:nil];
-}
-
-- (CGSize)zone_pixelSizeForImageAtPath:(NSString *)path {
-    if (path.length == 0) return CGSizeZero;
-    NSURL *url = [NSURL fileURLWithPath:path];
-    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
-    if (!source) return CGSizeZero;
-    CGSize size = CGSizeZero;
-    CFDictionaryRef props = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
-    if (props) {
-        NSNumber *w = (__bridge NSNumber *)CFDictionaryGetValue(props, kCGImagePropertyPixelWidth);
-        NSNumber *h = (__bridge NSNumber *)CFDictionaryGetValue(props, kCGImagePropertyPixelHeight);
-        if (w && h) size = CGSizeMake(w.doubleValue, h.doubleValue);
-        CFRelease(props);
-    }
-    CFRelease(source);
-    return size;
 }
 
 - (UIImage *)zone_resizedImage:(UIImage *)image targetSize:(CGSize)size {
@@ -3134,13 +3215,15 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
         [fm copyItemAtPath:assetPath toPath:backupPath error:nil];
     }
 
-    CGSize targetSize = [self zone_pixelSizeForImageAtPath:assetPath];
-    UIImage *finalImage = [self zone_resizedImage:image targetSize:targetSize];
+    UIImage *finalImage = [self zone_resizedImage:image targetSize:image.size];
+    NSData *data = nil;
     NSString *ext = assetPath.pathExtension.lowercaseString;
 
-    NSData *data = nil;
-    if ([ext isEqualToString:@"png"]) data = UIImagePNGRepresentation(finalImage);
-    else data = UIImageJPEGRepresentation(finalImage, 1.0);
+    if ([ext isEqualToString:@"png"]) {
+        data = UIImagePNGRepresentation(finalImage);
+    } else {
+        data = UIImageJPEGRepresentation(finalImage, 1.0);
+    }
 
     if (data.length == 0) return;
 
@@ -3232,6 +3315,7 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
     vc.filePath = path;
     vc.initialText = text;
     vc.editorTitle = title;
+
     __weak typeof(self) weakSelf = self;
     vc.saveHandler = ^(NSString *newText) {
         (void)newText;
@@ -3297,68 +3381,13 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
 
 - (void)updateCAMLProperty:(NSString *)keyPath value:(NSString *)value {
     if (value.length == 0 || !self.selectedLayerName || !self.selectedLayerPath) return;
-    NSString *camlPath = [self zone_camlPath];
-    NSMutableString *caml = [NSMutableString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
-    if (!caml) return;
 
-    BOOL modified = NO;
-
-    NSString *escapedName = [NSRegularExpression escapedPatternForString:self.selectedLayerName];
-    NSString *escapedKey = [NSRegularExpression escapedPatternForString:keyPath];
-
-    NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value.*?>)(.*?)(</value>)",
-                         escapedName, escapedKey];
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
-                                                                           options:NSRegularExpressionDotMatchesLineSeparators
-                                                                             error:nil];
-    if ([regex numberOfMatchesInString:caml options:0 range:NSMakeRange(0, caml.length)] > 0) {
-        NSString *replaced = [regex stringByReplacingMatchesInString:caml
-                                                             options:0
-                                                               range:NSMakeRange(0, caml.length)
-                                                        withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
-        [caml setString:replaced];
-        modified = YES;
-    }
-
-    NSString *tagRegexStr = [NSString stringWithFormat:@"<(CA[a-zA-Z]*Layer)([^>]*)id=\"%@\"([^>]*)>",
-                             escapedName];
-    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:tagRegexStr options:0 error:nil];
-    NSTextCheckingResult *match = [tagRegex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
-    if (match) {
-        NSString *tagString = [caml substringWithRange:match.range];
-        NSString *attrRegexStr = [NSString stringWithFormat:@"%@=\"[^\"]*\"", escapedKey];
-        NSRegularExpression *attrRegex = [NSRegularExpression regularExpressionWithPattern:attrRegexStr options:0 error:nil];
-
-        NSString *newTag = nil;
-        if ([attrRegex numberOfMatchesInString:tagString options:0 range:NSMakeRange(0, tagString.length)] > 0) {
-            newTag = [attrRegex stringByReplacingMatchesInString:tagString
-                                                         options:0
-                                                           range:NSMakeRange(0, tagString.length)
-                                                    withTemplate:[NSString stringWithFormat:@"%@=\"%@\"", keyPath, value]];
-        } else {
-            newTag = [tagString stringByReplacingOccurrencesOfString:@">"
-                                                          withString:[NSString stringWithFormat:@" %@=\"%@\">", keyPath, value]
-                                                             options:NSBackwardsSearch
-                                                               range:NSMakeRange(0, tagString.length)];
-        }
-        [caml replaceCharactersInRange:match.range withString:newTag];
-        modified = YES;
-    }
-
-    if (modified) {
-        [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
-- (void)modifyCAMLState:(NSString *)state keyPath:(NSString *)keyPath value:(NSString *)value {
-    if (value.length == 0 || !self.selectedLayerName || !self.selectedLayerPath) return;
     NSString *camlPath = [self zone_camlPath];
     NSMutableString *caml = [NSMutableString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
     if (!caml) return;
 
     NSString *escapedName = [NSRegularExpression escapedPatternForString:self.selectedLayerName];
     NSString *escapedKey = [NSRegularExpression escapedPatternForString:keyPath];
-    NSString *escapedState = [NSRegularExpression escapedPatternForString:state];
 
     NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value.*?>)(.*?)(</value>)",
                          escapedName, escapedKey];
@@ -3373,19 +3402,19 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
                                                         withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
         [caml setString:replaced];
     } else {
-        NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)", escapedState];
+        NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)", escapedKey.length > 0 ? @"Sleep" : @"Sleep"];
         NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern
                                                                                      options:NSRegularExpressionDotMatchesLineSeparators
                                                                                        error:nil];
-        NSString *typeAttr = [value containsString:@" "] ? @" type=\"CGPoint\"" : @"";
-        NSString *injection = [NSString stringWithFormat:@"$1\n      <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n        <value%@>%@</value>\n      </LKStateSetValue>",
-                               self.selectedLayerName, keyPath, typeAttr, value];
+        NSString *injection = [NSString stringWithFormat:@"$1\n      <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n        <value>%@</value>\n      </LKStateSetValue>",
+                               self.selectedLayerName, keyPath, value];
         NSString *replaced = [stateRegex stringByReplacingMatchesInString:caml
                                                                   options:0
                                                                     range:NSMakeRange(0, caml.length)
                                                              withTemplate:injection];
         [caml setString:replaced];
     }
+
     [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
@@ -3393,8 +3422,10 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
 
 - (void)showTransientMessage:(NSString *)message {
     if (message.length == 0) return;
+
     self.selectedLayerLabel.text = message;
     self.selectedLayerLabel.textColor = [UIColor systemOrangeColor];
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (self.selectedLayerName.length > 0) {
             self.selectedLayerLabel.text = [NSString stringWithFormat:@"当前选中: [%@] 所在层: %@", self.selectedLayerName, self.selectedLayerPath.lastPathComponent];
@@ -3436,11 +3467,8 @@ static NSArray<NSString *> *ZoneImageExtensions(void) {
         [parent insertSublayer:self.selectedHitLayer below:siblings[idx - 1]];
     }
 
-    CGFloat z = self.selectedHitLayer.zPosition;
-    z += (direction > 0 ? 1.0 : -1.0);
-    self.selectedHitLayer.zPosition = z;
-
-    [self updateCAMLProperty:@"zPosition" value:[NSString stringWithFormat:@"%.4f", z]];
+    self.selectedHitLayer.zPosition += (direction > 0 ? 1.0 : -1.0);
+    [self updateCAMLProperty:@"zPosition" value:[NSString stringWithFormat:@"%.4f", self.selectedHitLayer.zPosition]];
     [self reloadPreviewPreservingSelection];
 }
 
