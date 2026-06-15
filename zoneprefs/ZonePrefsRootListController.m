@@ -2493,12 +2493,8 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 // =======================================================
-// ================= 独立子页面：可视化高级编辑引擎 =================
+// ================= 独立子页面：CAML 原生代码编辑器 =================
 // =======================================================
-
-// -------------------------------------------------------
-// 1. CAML 原生代码编辑器 (用于编辑动画过渡片段)
-// -------------------------------------------------------
 @interface ZoneCamlCodeEditorViewController : UIViewController
 @property (nonatomic, copy) NSString *camlPath;
 @property (nonatomic, copy) NSString *camlContent;
@@ -2555,11 +2551,17 @@ static NSString * GetPrefsPlistPath() {
 
 
 // -------------------------------------------------------
-// 2. 核心底层私有类头文件补全
+// 2. 核心底层私有类头文件补全 (防止编译报错)
 // -------------------------------------------------------
+@interface _UICAPackageView : UIView
+- (instancetype)initWithContentsOfURL:(NSURL *)url publishedObjectViewClassMap:(NSDictionary *)map;
+- (BOOL)setState:(NSString *)state;
+@end
+
 @interface CAPackage : NSObject
 + (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)error;
 @end
+
 @interface CAStateController : NSObject
 - (instancetype)initWithLayer:(CALayer *)layer;
 - (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
@@ -2742,7 +2744,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 @property (nonatomic, strong) UIView *canvasContainer;
 @property (nonatomic, strong) ZoneEditorPackageView *editorPackageView;
 @property (nonatomic, strong) ZoneEditorCAMLParser *camlParser;
-@property (nonatomic, strong) NSMutableDictionary *layerMap; // 图层字典映射
+@property (nonatomic, strong) NSMutableDictionary *layerMap; 
 
 @property (nonatomic, strong) UIStackView *bottomToolbar;
 @property (nonatomic, strong) UILabel *tipLabel;
@@ -2916,7 +2918,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
 }
 
-// 【彻底修复状态冻结】：依靠 CAML 解析器的数值强制通过 KVC 覆盖状态
+// 依靠 CAML 解析器的数值强制通过 KVC 覆盖状态
 - (void)stateChanged:(UISegmentedControl *)seg {
     NSString *targetState = @[@"Sleep", @"Locked", @"Unlock"][seg.selectedSegmentIndex];
     if (!self.editorPackageView) return;
@@ -2928,7 +2930,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     // 发送系统级状态切换指令 (应对基础变形)
     [self.editorPackageView setState:targetState];
     
-    // 发送手工 KVC 解析指令 (应对 iOS 17 的沙盒冻结，强行覆盖坐标和透明度)
+    // 发送手工 KVC 解析指令 (强制覆盖坐标和透明度)
     for (NSString *targetId in self.camlParser.statesData) {
         CALayer *layer = self.layerMap[targetId];
         if (!layer) continue;
