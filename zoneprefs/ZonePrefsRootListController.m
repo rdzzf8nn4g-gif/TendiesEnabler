@@ -2539,7 +2539,7 @@ static NSString * GetPrefsPlistPath() {
             self.textView.text = [caml substringWithRange:match.range];
         } else {
             self.matchedRange = NSMakeRange(NSNotFound, 0);
-            self.textView.text = [NSString stringWithFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n  <elements>\n    \n  </elements>\n</LKStateTransition>", self.fromState, self.toState, self.layerName];
+            self.textView.text = [NSString stringWithFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n  <elements>\n    \n  </elements>\n</LKStateTransition>", self.fromState, self.toState];
         }
     }
 }
