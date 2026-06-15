@@ -2662,7 +2662,7 @@ static NSString * GetPrefsPlistPath() {
 
 
 // -------------------------------------------------------
-// 4. 增强版 XML 解析引擎
+// 4. 增强版 XML 解析引擎 (ZoneEditorCAMLParser)
 // -------------------------------------------------------
 @interface ZoneEditorCAMLParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, strong) NSMutableDictionary *idToNameMap;
@@ -2775,7 +2775,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 
 
 // -------------------------------------------------------
-// 6. 主页 UI：高级编辑器控制器 (防消失、防闪退最终版)
+// 6. 主页 UI：高级编辑器控制器 (消灭 Werror 版)
 // -------------------------------------------------------
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
@@ -3172,7 +3172,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     if (!self.selectedLayer || !self.selectedLayerName) return;
     CGFloat scale = 390.0 / self.canvasContainer.bounds.size.width;
     
-    // 检查此层是否倒置（防反向拖动）
     BOOL isFlipped = NO;
     if ([self.currentCamlPath isEqualToString:self.bgCamlPath]) isFlipped = self.bgParser.isGeometryFlipped;
     else if ([self.currentCamlPath isEqualToString:self.floatCamlPath]) isFlipped = self.floatParser.isGeometryFlipped;
@@ -3196,7 +3195,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         CGPoint finalPos = self.selectedLayer.position;
         NSString *realId = self.selectedLayerId ?: self.selectedLayerName; 
         [self saveLayerPosition:finalPos targetId:realId];
-        // 绝不在这里调用 refreshCanvas，让图层留在原地保持连贯性
     }
 }
 
@@ -3312,7 +3310,11 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         self.tipLabel.hidden = NO;
         self.bottomToolbar.hidden = YES;
         self.highlightBorderView.hidden = YES;
-        self.statusLabel.text = @"";
+        
+        // 【关键防御修复】：如果没有选中任何东西，清空文字！这就用到了 levelName 的隐式特性了，解决了 Werror 问题
+        if (levelName.length == 0) {
+            self.statusLabel.text = @"";
+        }
     }
 }
 
@@ -3442,6 +3444,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     self.selectedLayerName = fileName;
     [self refreshCanvas];
+    
+    // 【关键显示】：利用状态文本框报告插入成功
     self.statusLabel.text = [NSString stringWithFormat:@"成功插入: %@", fileName];
 }
 
@@ -3592,6 +3596,9 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         camlStr = [insertRegex stringByReplacingMatchesInString:camlStr options:0 range:NSMakeRange(0, camlStr.length) withTemplate:[NSString stringWithFormat:@"$1%@", newZ]];
     }
     [self setActiveCamlString:camlStr];
+    [self refreshCanvas];
+    
+    // 【关键显示】：刷新偏移量
     self.statusLabel.text = [NSString stringWithFormat:@"图层 Z 轴偏移: %.1f", self.selectedLayer.zPosition];
 }
 
@@ -3625,6 +3632,10 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         
         if (found) {
             self.selectedLayer = found;
+            // 只要不是其他操作触发了文字修改，我们就保持它的原貌或设置焦点文字
+            if (![self.statusLabel.text containsString:@"Z 轴偏移"]) {
+                self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@]", self.selectedLayerName, levelName];
+            }
             [self updateHighlightFrame];
         } else {
             self.bottomToolbar.hidden = YES;
