@@ -2512,6 +2512,22 @@ static NSString * GetPrefsPlistPath() {
 // ================= 新增：可视化高级渲染编辑器 =================
 // =======================================================
 
+// 针对 iOS 14/15 的专用降级安全渲染容器，彻底免疫 BSUICAPackageView 闪退
+@interface ZoneEditorFallbackView : UIView
+@property (nonatomic, strong) UIView *uicpView;
+@property (nonatomic, strong) id package;
+@property (nonatomic, strong) id stateController;
+@end
+
+@implementation ZoneEditorFallbackView
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.uicpView) {
+        self.uicpView.frame = self.bounds;
+    }
+}
+@end
+
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
 @property (nonatomic, copy) NSString *wallpaperPath;
@@ -2565,7 +2581,7 @@ static NSString * GetPrefsPlistPath() {
     [self.stateSegment addTarget:self action:@selector(stateSegmentChanged:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:self.stateSegment];
     
-    // 【修复5】：让预览屏的比例完美贴合真实手机屏幕比例，显示完整壁纸
+    // 完美贴合手机屏幕比例
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     CGFloat screenAspect = screenSize.height / screenSize.width;
     CGFloat previewWidth = self.view.bounds.size.width - 60;
@@ -2583,19 +2599,16 @@ static NSString * GetPrefsPlistPath() {
     self.previewContainer.layer.borderColor = [UIColor darkGrayColor].CGColor;
     [self.view addSubview:self.previewContainer];
     
-    // 【修复2】：加入高亮选中框图层
     self.selectionBoxLayer = [CAShapeLayer layer];
     self.selectionBoxLayer.strokeColor = [UIColor systemYellowColor].CGColor;
     self.selectionBoxLayer.fillColor = [UIColor clearColor].CGColor;
     self.selectionBoxLayer.lineWidth = 2.0;
     self.selectionBoxLayer.lineDashPattern = @[@6, @4];
     self.selectionBoxLayer.zPosition = 9999;
-    [self.previewContainer.layer addSublayer:self.selectionBoxLayer];
     
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handlePreviewTap:)];
     [self.previewContainer addGestureRecognizer:tap];
     
-    // 【修复4】：加入拖拽移动手势
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePreviewPan:)];
     [self.previewContainer addGestureRecognizer:pan];
     
@@ -2629,44 +2642,92 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:self.bottomToolbar];
 }
 
-// 【修复1】：使用安全的 NSInvocation 规避 performSelector 在 ARC 下的编译报错和闪退
+// iOS 14.3 终极防崩溃生成器，严格拦截 iOS 16 版本检查
 - (UIView *)createPackageViewWithURL:(NSURL *)url {
     dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
-    Class BSUIPackageClass = NSClassFromString(@"BSUICAPackageView");
-    if (BSUIPackageClass && [BSUIPackageClass instancesRespondToSelector:NSSelectorFromString(@"initWithURL:")]) {
-        id packageView = [BSUIPackageClass alloc];
-        SEL sel = NSSelectorFromString(@"initWithURL:");
-        NSMethodSignature *sig = [packageView methodSignatureForSelector:sel];
-        if (sig) {
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setSelector:sel];
-            [inv setTarget:packageView];
-            [inv setArgument:&url atIndex:2];
-            [inv invoke];
-            id ret = nil;
-            [inv getReturnValue:&ret];
-            return ret;
+    
+    if (@available(iOS 16.0, *)) {
+        Class BSUIPackageClass = NSClassFromString(@"BSUICAPackageView");
+        if (BSUIPackageClass) {
+            id pkg = [[BSUIPackageClass alloc] performSelector:NSSelectorFromString(@"initWithURL:") withObject:url];
+            if (pkg) return pkg;
         }
     }
     
+    ZoneEditorFallbackView *container = [[ZoneEditorFallbackView alloc] initWithFrame:CGRectZero];
+    
     Class UICPClass = NSClassFromString(@"_UICAPackageView");
-    if (UICPClass && [UICPClass instancesRespondToSelector:NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:")]) {
-        id packageView = [UICPClass alloc];
-        SEL sel = NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:");
-        NSMethodSignature *sig = [packageView methodSignatureForSelector:sel];
+    if (UICPClass) {
+        @try {
+            id packageView = [UICPClass alloc];
+            SEL initSel = NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:");
+            NSMethodSignature *sig = [packageView methodSignatureForSelector:initSel];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setSelector:initSel];
+                [inv setTarget:packageView];
+                [inv setArgument:&url atIndex:2];
+                id nilObj = nil;
+                [inv setArgument:&nilObj atIndex:3];
+                [inv invoke];
+                [inv getReturnValue:&packageView];
+                
+                if (packageView) {
+                    [packageView setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
+                    [container addSubview:packageView];
+                    container.uicpView = packageView;
+                    return container;
+                }
+            }
+        } @catch(NSException *e) {}
+    }
+    
+    Class CAPackageClass = NSClassFromString(@"CAPackage");
+    if (CAPackageClass) {
+        NSError *err = nil;
+        id package = nil;
+        SEL pkgSel = NSSelectorFromString(@"packageWithContentsOfURL:type:options:error:");
+        NSMethodSignature *sig = [CAPackageClass methodSignatureForSelector:pkgSel];
         if (sig) {
             NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setSelector:sel];
-            [inv setTarget:packageView];
+            [inv setSelector:pkgSel];
+            [inv setTarget:CAPackageClass];
             [inv setArgument:&url atIndex:2];
-            id nilArg = nil;
-            [inv setArgument:&nilArg atIndex:3];
+            NSString *type1 = @"com.apple.coreanimation-package";
+            [inv setArgument:&type1 atIndex:3];
+            id nilObj = nil;
+            [inv setArgument:&nilObj atIndex:4];
+            NSError **errPtr = &err;
+            [inv setArgument:&errPtr atIndex:5];
             [inv invoke];
-            id ret = nil;
-            [inv getReturnValue:&ret];
-            return ret;
+            [inv getReturnValue:&package];
+            
+            if (!package) {
+                NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
+                NSString *type2 = @"com.apple.coreanimation-xml";
+                [inv setArgument:&camlURL atIndex:2];
+                [inv setArgument:&type2 atIndex:3];
+                [inv invoke];
+                [inv getReturnValue:&package];
+            }
+            
+            if (package) {
+                CALayer *root = [package valueForKey:@"rootLayer"];
+                if (root) {
+                    root.geometryFlipped = NO;
+                    [container.layer addSublayer:root];
+                    Class CAStateControllerClass = NSClassFromString(@"CAStateController");
+                    if (CAStateControllerClass) {
+                        id stateController = [[CAStateControllerClass alloc] performSelector:NSSelectorFromString(@"initWithLayer:") withObject:root];
+                        container.stateController = stateController;
+                        container.package = package;
+                    }
+                    return container;
+                }
+            }
         }
     }
+    
     return nil;
 }
 
@@ -2704,7 +2765,8 @@ static NSString * GetPrefsPlistPath() {
     }
     
     [self stateSegmentChanged:self.stateSegment];
-   // 【修复编译错误】：操作 CALayer 而不是 UIView
+    
+    // 确保高亮层永远在最顶部，不再使用 view 的 bringSubviewToFront 避免编译错误
     if (self.selectionBoxLayer.superlayer) {
         [self.selectionBoxLayer removeFromSuperlayer];
     }
@@ -2714,9 +2776,23 @@ static NSString * GetPrefsPlistPath() {
 - (void)setupPackageView:(UIView *)pkgView {
     if (!pkgView) return;
     pkgView.frame = self.previewContainer.bounds;
-    CALayer *rootLayer = [pkgView.layer.sublayers firstObject];
-    if (rootLayer) {
+    
+    CALayer *rootLayer = nil;
+    if ([pkgView isKindOfClass:[ZoneEditorFallbackView class]]) {
+        ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)pkgView;
+        if (fbView.uicpView) {
+            rootLayer = [fbView.uicpView.layer.sublayers firstObject];
+            fbView.uicpView.layer.geometryFlipped = !rootLayer.geometryFlipped;
+        } else if (fbView.package) {
+            rootLayer = [fbView.package valueForKey:@"rootLayer"];
+            fbView.layer.geometryFlipped = !rootLayer.geometryFlipped;
+        }
+    } else {
+        rootLayer = [pkgView.layer.sublayers firstObject];
         pkgView.layer.geometryFlipped = !rootLayer.geometryFlipped;
+    }
+    
+    if (rootLayer) {
         CGSize realSize = rootLayer.bounds.size;
         if (realSize.width > 0 && realSize.height > 0) {
             CGFloat scale = MIN(self.previewContainer.bounds.size.width / realSize.width, self.previewContainer.bounds.size.height / realSize.height);
@@ -2727,6 +2803,39 @@ static NSString * GetPrefsPlistPath() {
     [self.previewContainer addSubview:pkgView];
 }
 
+- (void)safeSetState:(NSString *)state forView:(UIView *)view {
+    if (!view) return;
+    
+    if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
+        ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
+        if (fbView.uicpView && [fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:")]) {
+            [fbView.uicpView performSelector:NSSelectorFromString(@"setState:") withObject:state];
+            return;
+        }
+        if (fbView.stateController && fbView.package) {
+            CALayer *root = [fbView.package valueForKey:@"rootLayer"];
+            if (root) {
+                SEL setSel = NSSelectorFromString(@"setState:ofLayer:transitionSpeed:");
+                NSMethodSignature *sig = [fbView.stateController methodSignatureForSelector:setSel];
+                if (sig) {
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setSelector:setSel];
+                    [inv setTarget:fbView.stateController];
+                    [inv setArgument:&state atIndex:2];
+                    [inv setArgument:&root atIndex:3];
+                    float speed = 1.0f;
+                    [inv setArgument:&speed atIndex:4];
+                    [inv invoke];
+                }
+            }
+        }
+    } else {
+        if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
+            [view performSelector:NSSelectorFromString(@"setState:") withObject:state];
+        }
+    }
+}
+
 - (void)stateSegmentChanged:(UISegmentedControl *)sender {
     NSString *states[] = {@"Sleep", @"Locked", @"Unlock"};
     NSString *targetState = states[sender.selectedSegmentIndex];
@@ -2735,9 +2844,9 @@ static NSString * GetPrefsPlistPath() {
     [CATransaction setDisableActions:NO];
     [CATransaction setAnimationDuration:0.6];
     
-    if ([self.bgView respondsToSelector:@selector(setState:)]) [self.bgView performSelector:@selector(setState:) withObject:targetState];
-    if ([self.floatingView respondsToSelector:@selector(setState:)]) [self.floatingView performSelector:@selector(setState:) withObject:targetState];
-    if ([self.fgView respondsToSelector:@selector(setState:)]) [self.fgView performSelector:@selector(setState:) withObject:targetState];
+    [self safeSetState:targetState forView:self.bgView];
+    [self safeSetState:targetState forView:self.floatingView];
+    [self safeSetState:targetState forView:self.fgView];
     
     [CATransaction commit];
     
@@ -2746,7 +2855,6 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 刷新选中边框
 - (void)updateSelectionBox {
     if (!self.selectedHitLayer || !self.selectedHitLayer.superlayer) {
         self.selectionBoxLayer.path = nil;
@@ -2770,7 +2878,6 @@ static NSString * GetPrefsPlistPath() {
             while (found && found != view.layer) {
                 if (found.name && found.name.length > 0 && ![found.name isEqualToString:@"rootLayer"]) {
                     self.selectedHitLayer = found;
-                    // 【修复6】：完美绑定真实的缓存路径
                     if (view == self.bgView) self.selectedLayerPath = self.bgPkgPath;
                     else if (view == self.floatingView) self.selectedLayerPath = self.floatPkgPath;
                     else if (view == self.fgView) self.selectedLayerPath = self.fgPkgPath;
@@ -2801,7 +2908,6 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 【修复4】：核心拖拽修改位置并保存到 CAML
 - (void)handlePreviewPan:(UIPanGestureRecognizer *)gesture {
     if (!self.selectedHitLayer) return;
     
@@ -2852,7 +2958,6 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// 【修复7】：动态修改与注入 CAML 动画属性
 - (void)editAnimation {
     if (!self.selectedLayerPath || !self.selectedLayerName) return;
     
@@ -2880,7 +2985,6 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 支持直接替换或无缝注入新节点
 - (void)modifyCAMLState:(NSString *)state keyPath:(NSString *)keyPath value:(NSString *)value {
     if (value.length == 0 || !self.selectedLayerName || !self.selectedLayerPath) return;
     NSString *camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
@@ -2902,7 +3006,6 @@ static NSString * GetPrefsPlistPath() {
     [camlContent writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
-// 【修复3】：使用安全的图层 zPosition 注入，不再暴力修改 XML 层级引发崩溃
 - (void)moveLayerUp { [self modifyLayerZPosition:1]; }
 - (void)moveLayerDown { [self modifyLayerZPosition:-1]; }
 
