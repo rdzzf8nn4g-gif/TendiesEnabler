@@ -2704,7 +2704,11 @@ static NSString * GetPrefsPlistPath() {
     }
     
     [self stateSegmentChanged:self.stateSegment];
-    [self.previewContainer bringSubviewToFront:self.selectionBoxLayer];
+   // 【修复编译错误】：操作 CALayer 而不是 UIView
+    if (self.selectionBoxLayer.superlayer) {
+        [self.selectionBoxLayer removeFromSuperlayer];
+    }
+    [self.previewContainer.layer addSublayer:self.selectionBoxLayer];
 }
 
 - (void)setupPackageView:(UIView *)pkgView {
