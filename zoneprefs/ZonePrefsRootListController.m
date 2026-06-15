@@ -9,6 +9,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <zlib.h> 
+#include <dlfcn.h> 
 
 extern char **environ;
 
