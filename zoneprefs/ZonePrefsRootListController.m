@@ -2531,7 +2531,6 @@ static NSString * GetPrefsPlistPath() {
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
 @property (nonatomic, copy) NSString *wallpaperPath;
-@property (nonatomic, copy) NSString *currentTempDir; // 用于彻底击穿 CAPackage 缓存
 
 @property (nonatomic, strong) UISegmentedControl *stateSegment;
 @property (nonatomic, strong) UIView *previewContainer;
@@ -2657,7 +2656,6 @@ static NSString * GetPrefsPlistPath() {
     }
     
     ZoneEditorFallbackView *container = [[ZoneEditorFallbackView alloc] initWithFrame:CGRectZero];
-    
     Class UICPClass = NSClassFromString(@"_UICAPackageView");
     if (UICPClass) {
         @try {
@@ -2748,7 +2746,7 @@ static NSString * GetPrefsPlistPath() {
     
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    // 1. 扫描原始目录，绑定真实路径 (保证编辑保存到原文件)
+    // 恢复为原生路径读取，彻底解决临时目录克隆导致的权限丢失与黑屏问题
     NSDirectoryEnumerator *origEnum = [fm enumeratorAtPath:self.wallpaperPath];
     NSString *subPath;
     while ((subPath = [origEnum nextObject])) {
@@ -2762,31 +2760,25 @@ static NSString * GetPrefsPlistPath() {
         }
     }
     
-    // 2. 无情击穿 CAPackage 缓存：克隆一份带 UUID 的临时副本用于渲染
-    if (self.currentTempDir && [fm fileExistsAtPath:self.currentTempDir]) {
-        [fm removeItemAtPath:self.currentTempDir error:nil];
-    }
-    self.currentTempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
-    [fm copyItemAtPath:self.wallpaperPath toPath:self.currentTempDir error:nil];
-    
-    // 3. 使用临时目录加载包，享受秒级无缝重载
     if (self.bgPkgPath) {
-        NSString *tempBg = [self.currentTempDir stringByAppendingPathComponent:self.bgPkgPath.lastPathComponent];
-        self.bgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:tempBg isDirectory:YES]];
+        self.bgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:self.bgPkgPath isDirectory:YES]];
         [self setupPackageView:self.bgView];
     }
     if (self.floatPkgPath) {
-        NSString *tempFloat = [self.currentTempDir stringByAppendingPathComponent:self.floatPkgPath.lastPathComponent];
-        self.floatingView = [self createPackageViewWithURL:[NSURL fileURLWithPath:tempFloat isDirectory:YES]];
+        self.floatingView = [self createPackageViewWithURL:[NSURL fileURLWithPath:self.floatPkgPath isDirectory:YES]];
         [self setupPackageView:self.floatingView];
     }
     if (self.fgPkgPath) {
-        NSString *tempFg = [self.currentTempDir stringByAppendingPathComponent:self.fgPkgPath.lastPathComponent];
-        self.fgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:tempFg isDirectory:YES]];
+        self.fgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:self.fgPkgPath isDirectory:YES]];
         [self setupPackageView:self.fgView];
     }
     
     [self stateSegmentChanged:self.stateSegment];
+    
+    if (self.selectionBoxLayer.superlayer) {
+        [self.selectionBoxLayer removeFromSuperlayer];
+    }
+    [self.previewContainer.layer addSublayer:self.selectionBoxLayer];
 }
 
 - (void)setupPackageView:(UIView *)pkgView {
@@ -2879,7 +2871,6 @@ static NSString * GetPrefsPlistPath() {
     });
 }
 
-// 完美贴合的选中框逻辑，挂载到原生父图层内
 - (void)updateSelectionBox {
     if (!self.selectedHitLayer || !self.selectedHitLayer.superlayer) {
         [self.selectionBoxLayer removeFromSuperlayer];
@@ -2903,10 +2894,14 @@ static NSString * GetPrefsPlistPath() {
     CGPoint point = [gesture locationInView:self.previewContainer];
     
     self.selectedHitLayer = nil;
-    NSArray *views = @[self.fgView, self.floatingView, self.bgView];
+    
+    // 【核心修复1】：安全构建数组，防 nil 闪退
+    NSMutableArray *views = [NSMutableArray array];
+    if (self.fgView) [views addObject:self.fgView];
+    if (self.floatingView) [views addObject:self.floatingView];
+    if (self.bgView) [views addObject:self.bgView];
     
     for (UIView *view in views) {
-        if (!view) continue;
         CGPoint convertedPoint = [self.previewContainer.layer convertPoint:point toLayer:view.layer];
         CALayer *found = [view.layer hitTest:convertedPoint];
         if (found) {
@@ -2948,20 +2943,23 @@ static NSString * GetPrefsPlistPath() {
     if (!self.selectedHitLayer) return;
     
     CGPoint translation = [gesture translationInView:self.previewContainer];
-    CALayer *rootLayer = self.selectedHitLayer.superlayer;
-    while (rootLayer && rootLayer.superlayer != self.previewContainer.layer && rootLayer.superlayer != self.selectedHitLayer.superlayer.superlayer) {
-        rootLayer = rootLayer.superlayer;
-    }
     
+    // 【核心修复2】：安全的缩放和翻转探测
     CGFloat scaleX = 1.0;
     CGFloat scaleY = 1.0;
-    @try {
-        scaleX = [[rootLayer valueForKeyPath:@"transform.scale.x"] floatValue];
-        scaleY = [[rootLayer valueForKeyPath:@"transform.scale.y"] floatValue];
-    } @catch(NSException *e){}
+    BOOL isFlipped = NO;
+    CALayer *scanLayer = self.selectedHitLayer;
+    while (scanLayer && scanLayer != self.previewContainer.layer) {
+        @try {
+            scaleX *= [[scanLayer valueForKeyPath:@"transform.scale.x"] floatValue] ?: 1.0;
+            scaleY *= [[scanLayer valueForKeyPath:@"transform.scale.y"] floatValue] ?: 1.0;
+            if (scanLayer.geometryFlipped) isFlipped = !isFlipped;
+        } @catch(NSException *e){}
+        scanLayer = scanLayer.superlayer;
+    }
     
-    if (scaleX <= 0.01) scaleX = 1.0;
-    if (scaleY <= 0.01) scaleY = 1.0;
+    if (ABS(scaleX) <= 0.01) scaleX = 1.0;
+    if (ABS(scaleY) <= 0.01) scaleY = 1.0;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.panStartPos = self.selectedHitLayer.position;
@@ -2970,9 +2968,7 @@ static NSString * GetPrefsPlistPath() {
         CGFloat dy = translation.y / scaleY;
         
         // 自动判定底层坐标翻转，解决反向移动问题
-        if (rootLayer && rootLayer.geometryFlipped) {
-            dy = -dy;
-        }
+        if (isFlipped) { dy = -dy; }
         
         CGPoint newPos = CGPointMake(self.panStartPos.x + dx, self.panStartPos.y + dy);
         [CATransaction begin];
@@ -2985,7 +2981,8 @@ static NSString * GetPrefsPlistPath() {
         [self modifyCAMLState:@"Sleep" keyPath:@"position" value:newVal];
         [self modifyCAMLState:@"Locked" keyPath:@"position" value:newVal];
         [self modifyCAMLState:@"Unlock" keyPath:@"position" value:newVal];
-        // 拖动完毕后自动热重载，确保存储生效
+        
+        // 【核心修复3】：强行热重载画面以应用保存的数值
         [self loadWallpaperEngine];
     }
 }
@@ -3007,7 +3004,7 @@ static NSString * GetPrefsPlistPath() {
             }
             NSData *data = UIImagePNGRepresentation(img);
             [data writeToFile:targetImgPath atomically:YES];
-            [self loadWallpaperEngine]; // 秒级热重载
+            [self loadWallpaperEngine];
         }
     }];
 }
@@ -3075,7 +3072,9 @@ static NSString * GetPrefsPlistPath() {
     [self modifyCAMLState:@"Unlock" keyPath:@"zPosition" value:[NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition]];
     
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图层移位" message:@"层级(zPosition)已调整，渲染器已更新。" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self loadWallpaperEngine];
+    }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
@@ -3111,15 +3110,23 @@ static NSString * GetPrefsPlistPath() {
     
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已保存！\n如发现锁屏画面未改变(受系统级进程动画缓存影响)，请点击注销(Respring)强制系统刷新。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已保存！\n如果在桌面或锁屏没有马上看到变化(受系统进程内存缓存影响)，请点击强制注销使其生效。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"仅保存" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
         [self dismissViewControllerAnimated:YES completion:nil];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"注销并生效" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         [self dismissViewControllerAnimated:YES completion:^{
             pid_t pid;
+            NSString *killallPath = @"/usr/bin/killall";
+#if __has_include(<roothide.h>)
+            killallPath = jbroot(killallPath);
+#else
+            if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
+                killallPath = @"/var/jb/usr/bin/killall";
+            }
+#endif
             const char *args[] = {"killall", "-9", "backboardd", NULL};
-            posix_spawn(&pid, "/usr/bin/killall", NULL, NULL, (char *const *)args, environ);
+            posix_spawn(&pid, [killallPath UTF8String], NULL, NULL, (char *const *)args, environ);
         }];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
