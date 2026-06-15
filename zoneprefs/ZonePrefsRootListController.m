@@ -2595,14 +2595,17 @@ static NSString * GetPrefsPlistPath() {
             self.matchedRange = match.range;
             self.textView.text = [self.fullCamlString substringWithRange:self.matchedRange];
         } else {
-            // 【修复编译错误】：拆分格式化字符串，避免多行混合中文导致 Theos 编译器误判格式化参数数量
+            // 【物理级修复编译错误】：彻底抛弃带中文的 appendFormat，改用连续的 appendString 物理拼接
             self.matchedRange = NSMakeRange(NSNotFound, 0);
             NSString *layerName = self.targetLayerName ? self.targetLayerName : @"图层动画";
             
             NSMutableString *templateStr = [NSMutableString string];
+            
+            // 纯英文字符串，使用 appendFormat 是绝对安全的
             [templateStr appendFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n", self.transitionFrom, self.transitionTo];
+            
             [templateStr appendString:@"  <elements>\n"];
-            [templateStr appendFormat:@"    \n", layerName];
+            [templateStr appendString:@"    \n"];
             [templateStr appendString:@"    \n"];
             [templateStr appendString:@"  </elements>\n"];
             [templateStr appendString:@"</LKStateTransition>"];
