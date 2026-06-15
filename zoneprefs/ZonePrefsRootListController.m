@@ -2493,19 +2493,6 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 // =======================================================
-// ================= 独立子页面：可视化高级编辑引擎 =================
-// =======================================================
-
-// 补全最底层核心 CoreAnimation 私有类，破除全系统版本限制
-+ (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)error;
-@end
-
-@interface CAStateController : NSObject
-- (instancetype)initWithLayer:(CALayer *)layer;
-- (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
-@end
-
-// =======================================================
 // ================= 独立子页面：CAML 原生代码编辑器 =================
 // =======================================================
 @interface ZoneCamlCodeEditorViewController : UIViewController
