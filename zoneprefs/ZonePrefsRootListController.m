@@ -2549,6 +2549,7 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 
+
 // -------------------------------------------------------
 // 2. 核心底层私有类头文件补全
 // -------------------------------------------------------
@@ -2566,8 +2567,9 @@ static NSString * GetPrefsPlistPath() {
 - (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
 @end
 
+
 // -------------------------------------------------------
-// 3. 增强版全系统兼容渲染容器
+// 3. 增强版全系统兼容渲染容器 (ZoneEditorPackageView)
 // -------------------------------------------------------
 @interface ZoneEditorPackageView : UIView
 @property (nonatomic, strong) UIView *uiPackageView; 
@@ -2657,6 +2659,7 @@ static NSString * GetPrefsPlistPath() {
     return NO;
 }
 @end
+
 
 // -------------------------------------------------------
 // 4. 增强版 XML 解析引擎
@@ -2750,6 +2753,10 @@ static NSString * GetPrefsPlistPath() {
 }
 @end
 
+
+// -------------------------------------------------------
+// 5. KVC 安全赋值函数
+// -------------------------------------------------------
 static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (!layer || !keyPath || !value) return;
     if ([keyPath isEqualToString:@"position.x"]) {
@@ -2765,6 +2772,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
     @try { [layer setValue:value forKeyPath:keyPath]; } @catch (NSException *e) {}
 }
+
 
 // -------------------------------------------------------
 // 6. 主页 UI：高级编辑器控制器 (防消失、防闪退最终版)
@@ -2989,6 +2997,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     if (self.fgView) { [self.fgView removeFromSuperview]; self.fgView = nil; }
     
     self.highlightBorderView.hidden = YES;
+    self.statusLabel.text = @"";
     [self.bgLayerMap removeAllObjects];
     [self.floatLayerMap removeAllObjects];
     [self.fgLayerMap removeAllObjects];
@@ -3410,10 +3419,12 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"0\" opacity=\"1\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, fileName];
     
-    // 【最安全的插入法则】：不管叫不叫 Root Layer，直接查找 XML 中第一个出现的 <sublayers> 塞进去！
-    NSRange firstSublayers = [camlString rangeOfString:@"<sublayers>"];
-    if (firstSublayers.location != NSNotFound) {
-        camlString = [camlString stringByReplacingCharactersInRange:firstSublayers withString:[NSString stringWithFormat:@"<sublayers>%@", layerXml]];
+    NSRegularExpression *sublayersRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*name=\"Root Layer\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
+    if ([sublayersRegex numberOfMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length)] > 0) {
+        camlString = [sublayersRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
+    } else {
+        NSRegularExpression *fallbackRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*id=\"__capRootLayer__\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
+        camlString = [fallbackRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
     }
     
     NSArray *states = @[@"Locked", @"Unlock", @"Sleep"];
@@ -3447,9 +3458,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
 }
 
-// =======================================================
 // 工具栏核心交互
-// =======================================================
 - (void)actionReplace:(UIButton *)sender {
     if (!self.selectedLayerName) return;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
@@ -3481,7 +3490,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }];
 }
 
-// 解决图层菜单弹出闪退（修复 popover 定位）
 - (void)actionAnimationMenu:(UIButton *)sender {
     if (!self.selectedLayerName || !self.currentCamlString) return;
     
@@ -3509,7 +3517,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         alert.popoverPresentationController.sourceRect = [sender convertRect:sender.bounds toView:self.view];
     }
     
-    // 强制派发主线程防止线程死锁
     dispatch_async(dispatch_get_main_queue(), ^{
         [self presentViewController:alert animated:YES completion:nil];
     });
@@ -3618,13 +3625,11 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         
         if (found) {
             self.selectedLayer = found;
-            // self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ (%@)", self.selectedLayerName, levelName]; // 不要覆盖其他提示语
             [self updateHighlightFrame];
         } else {
             self.bottomToolbar.hidden = YES;
             self.highlightBorderView.hidden = YES;
             self.tipLabel.hidden = NO;
-            self.statusLabel.text = @"";
         }
     }
 }
