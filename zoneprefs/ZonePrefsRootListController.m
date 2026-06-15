@@ -2377,7 +2377,6 @@ static UIImage *ZoneThumbnailForPath(NSString *path, CGSize targetSize) {
     NSString *sub;
     while ((sub = [enumerator nextObject])) {
         if ([sub hasPrefix:@"__MACOSX"] || [sub containsString:@".DS_Store"]) continue;
-        NSString *ext = sub.pathExtension.lowercaseString;
         if (ZoneIsImageFilePath(sub)) {
             if (![sub hasPrefix:@"."] && ![sub hasSuffix:@".bak"]) {
                 [images addObject:sub];
@@ -2786,8 +2785,6 @@ static UIImage *ZoneThumbnailForPath(NSString *path, CGSize targetSize) {
 }
 
 - (void)buildUI {
-    CGFloat width = self.view.bounds.size.width;
-
     self.stateControl = [[UISegmentedControl alloc] initWithItems:@[@"息屏", @"锁屏", @"解锁"]];
     self.stateControl.selectedSegmentIndex = self.selectedStateIndex;
     [self.stateControl addTarget:self action:@selector(stateChanged:) forControlEvents:UIControlEventValueChanged];
@@ -2834,7 +2831,6 @@ static UIImage *ZoneThumbnailForPath(NSString *path, CGSize targetSize) {
 
     NSArray *titles = @[@"替换素材", @"图层动画", @"上移", @"下移", @"删除图层"];
     SEL actions[] = {@selector(replaceAsset), @selector(editAnimation), @selector(moveLayerUp), @selector(moveLayerDown), @selector(deleteLayer)};
-    CGFloat x = 0;
     NSMutableArray *buttons = [NSMutableArray array];
     for (NSInteger i = 0; i < titles.count; i++) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -3258,4 +3254,3 @@ static UIImage *ZoneThumbnailForPath(NSString *path, CGSize targetSize) {
 @end
 
 
-@end
