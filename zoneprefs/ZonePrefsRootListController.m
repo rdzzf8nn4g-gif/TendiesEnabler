@@ -2783,7 +2783,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 
 
 // -------------------------------------------------------
-// 6. 主页 UI：高级编辑器控制器 (撤销/虚线/手势缩放/插入图层 终极版)
+// 6. 主页 UI：高级编辑器控制器
 // -------------------------------------------------------
 @interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
@@ -2812,24 +2812,26 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 @property (nonatomic, copy) NSString *floatCamlString;
 @property (nonatomic, copy) NSString *fgCamlString;
 
-@property (nonatomic, strong) NSMutableArray *undoStack; // 保存历史 CAML
+@property (nonatomic, strong) NSMutableArray *undoStack; 
 
 @property (nonatomic, strong) UIStackView *bottomToolbar;
 @property (nonatomic, strong) UILabel *tipLabel;
-@property (nonatomic, strong) UILabel *statusLabel; // 显示当前图层层级和名字
+@property (nonatomic, strong) UILabel *statusLabel; 
 
 @property (nonatomic, strong) CALayer *selectedLayer;
 @property (nonatomic, strong) UIView *highlightBorderView;
-@property (nonatomic, strong) CAShapeLayer *dashBorderLayer; // 虚线边框
+@property (nonatomic, strong) CAShapeLayer *dashBorderLayer; 
 @property (nonatomic, copy) NSString *selectedLayerName;
-@property (nonatomic, copy) NSString *selectedLayerId; // 记录真实ID
+@property (nonatomic, copy) NSString *selectedLayerId; 
 
-@property (nonatomic, assign) NSInteger targetInsertLevel; // 0=bg, 1=float, 2=fg
+@property (nonatomic, assign) NSInteger targetInsertLevel; 
 
-// 手势交互相关
 @property (nonatomic, assign) CGPoint initialPanCenter;
 @property (nonatomic, assign) CGRect initialPinchBounds;
 
+// 【修复 17 个报错的根本原因】：补齐这两个关键属性声明！
+@property (nonatomic, copy) NSString *currentCamlPath;
+@property (nonatomic, copy) NSString *currentCamlString;
 @end
 
 @implementation ZoneAdvancedEditorViewController
@@ -2844,7 +2846,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     self.floatLayerMap = [NSMutableDictionary dictionary];
     self.fgLayerMap = [NSMutableDictionary dictionary];
     
-    // 【修改】：导航栏按钮：撤销、添加、保存
     UIBarButtonItem *saveBtn = [[UIBarButtonItem alloc] initWithTitle:@"保存" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndApply)];
     UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(actionInsertImage)];
     UIBarButtonItem *undoBtn = [[UIBarButtonItem alloc] initWithTitle:@"撤销" style:UIBarButtonItemStylePlain target:self action:@selector(actionUndo)];
@@ -2881,7 +2882,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         [self.canvasContainer.heightAnchor constraintEqualToAnchor:self.canvasContainer.widthAnchor multiplier:canvasRatio]
     ]];
     
-    // 【添加】：状态提示 Label（显示名称和层级）
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
     self.statusLabel.textColor = [UIColor systemBlueColor];
@@ -2894,7 +2894,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         [self.statusLabel.widthAnchor constraintEqualToAnchor:self.view.widthAnchor]
     ]];
     
-    // 【手势】：支持点击、拖动平移、双指缩放
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(canvasTapped:)];
     [self.canvasContainer addGestureRecognizer:tap];
     
@@ -2906,7 +2905,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     pinch.delegate = self;
     [self.canvasContainer addGestureRecognizer:pinch];
     
-    // 【修改】：虚线边框效果
     self.highlightBorderView = [[UIView alloc] init];
     self.highlightBorderView.backgroundColor = [[UIColor systemYellowColor] colorWithAlphaComponent:0.1];
     self.highlightBorderView.hidden = YES;
@@ -2980,7 +2978,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     if (self.floatCamlString) state[@"float"] = self.floatCamlString;
     if (self.fgCamlString) state[@"fg"] = self.fgCamlString;
     [self.undoStack addObject:state];
-    if (self.undoStack.count > 15) [self.undoStack removeObjectAtIndex:0]; // 限制撤销步数
+    if (self.undoStack.count > 15) [self.undoStack removeObjectAtIndex:0]; 
 }
 
 - (void)actionUndo {
@@ -3005,7 +3003,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 【核心】无双指针安全加载完整三层架构引擎
+// 无双指针安全加载完整三层架构引擎
 // =======================================================
 - (void)loadWallpaperEngine {
     if (self.bgView) { [self.bgView removeFromSuperview]; self.bgView = nil; }
@@ -3088,9 +3086,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
 }
 
-// =======================================================
-// 【核心修改】：写入 CAML 的高鲁棒性方法
-// =======================================================
 - (NSString *)activeCamlString {
     if ([self.currentCamlPath isEqualToString:self.bgCamlPath]) return self.bgCamlString;
     if ([self.currentCamlPath isEqualToString:self.floatCamlPath]) return self.floatCamlString;
@@ -3132,7 +3127,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 【新增】：手势移动与缩放
+// 手势移动与缩放
 // =======================================================
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     if (!self.selectedLayer || !self.selectedLayerName) return;
@@ -3152,7 +3147,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         [self updateHighlightFrame];
     } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
         CGPoint finalPos = self.selectedLayer.position;
-        // 苹果有些壁纸存的是名字有些是ID，我们遍历字典反向寻找 ID
         NSString *realId = self.selectedLayerId ?: self.selectedLayerName; 
         [self saveLayerKVC:realId keyPath:@"position.x" value:finalPos.x];
         [self saveLayerKVC:realId keyPath:@"position.y" value:finalPos.y];
@@ -3186,7 +3180,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
 }
 
-// 解决状态切换问题
 - (void)stateChanged:(UISegmentedControl *)seg {
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][seg.selectedSegmentIndex];
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -3198,7 +3191,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     void (^applyState)(ZoneEditorPackageView *, ZoneEditorCAMLParser *, NSMutableDictionary *) = ^(ZoneEditorPackageView *view, ZoneEditorCAMLParser *parser, NSMutableDictionary *map) {
         if (!view || !parser) return;
         NSString *realState = [parser resolveRealStateNameFor:logicalState isDark:isDark];
-        [view setState:realState];
+        [view setState:realState]; 
         
         for (NSString *targetId in parser.statesData) {
             NSString *layerName = parser.idToNameMap[targetId];
@@ -3250,8 +3243,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         self.selectedLayer = hitLayer;
         self.selectedLayerName = hitLayer.name;
         
-        // 反查真实 targetId
-        self.selectedLayerId = self.selectedLayerName; // 默认
+        self.selectedLayerId = self.selectedLayerName; 
         ZoneEditorCAMLParser *parser = nil;
         if ([levelName isEqualToString:@"前景层"]) parser = self.fgParser;
         else if ([levelName isEqualToString:@"悬浮层"]) parser = self.floatParser;
@@ -3315,7 +3307,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 【全新】：插入图片逻辑
+// 插入图片逻辑
 // =======================================================
 - (void)actionInsertImage {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"插入图片" message:@"请选择要插入的图层级" preferredStyle:UIAlertControllerStyleActionSheet];
@@ -3338,7 +3330,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         UIImagePickerController *picker = [[UIImagePickerController alloc] init];
         picker.delegate = self;
         picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-        picker.view.tag = 999; // 标记为插入模式
+        picker.view.tag = 999; 
         [self presentViewController:picker animated:YES completion:nil];
     }]];
     if (@available(iOS 14.0, *)) {
@@ -3365,7 +3357,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     if (!camlPath || !camlString) return;
     
-    // 写入资产
     NSString *assetsDir = [camlPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"assets"];
     [[NSFileManager defaultManager] createDirectoryAtPath:assetsDir withIntermediateDirectories:YES attributes:nil error:nil];
     
@@ -3376,26 +3367,22 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     NSData *data = UIImagePNGRepresentation(img);
     [data writeToFile:targetPath atomically:YES];
     
-    // 尺寸换算，最大边限制 250
     CGFloat w = img.size.width; CGFloat h = img.size.height;
     if (w > 250 || h > 250) {
         if (w > h) { h = h * (250 / w); w = 250; }
         else { w = w * (250 / h); h = 250; }
     }
     
-    // 1. 注入 <CALayer>
     NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"0\" opacity=\"1\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, fileName];
     
     NSRegularExpression *sublayersRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*name=\"Root Layer\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
     if ([sublayersRegex numberOfMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length)] > 0) {
         camlString = [sublayersRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
     } else {
-        // Fallback for some CAML structure
         NSRegularExpression *fallbackRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*id=\"__capRootLayer__\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
         camlString = [fallbackRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
     }
     
-    // 2. 注入三大 State
     NSArray *states = @[@"Locked", @"Unlock", @"Sleep"];
     for (NSString *state in states) {
         NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)", state];
@@ -3409,7 +3396,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     else if (self.targetInsertLevel == 1) self.floatCamlString = camlString;
     else if (self.targetInsertLevel == 2) self.fgCamlString = camlString;
     
-    // 自动选中插入的图层
     self.selectedLayerName = fileName;
     [self refreshCanvas];
 }
@@ -3427,13 +3413,13 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
 }
 
-// 工具栏核心交互 - 替换
+// 工具栏核心交互
 - (void)actionReplace:(UIButton *)sender {
     if (!self.selectedLayerName) return;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.delegate = self;
     picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    picker.view.tag = 111; // 标记为替换模式
+    picker.view.tag = 111; 
     [self presentViewController:picker animated:YES completion:nil];
 }
 
@@ -3459,7 +3445,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }];
 }
 
-// 工具栏 - 图层动画
 - (void)actionAnimationMenu:(UIButton *)sender {
     if (!self.selectedLayerName || !self.currentCamlString) return;
     
