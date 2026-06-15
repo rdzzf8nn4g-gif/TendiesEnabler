@@ -19,6 +19,19 @@ extern char **environ;
 #define jbroot(path) path
 #endif
 
+// ==========================================
+// 核心原生类声明 (解决低版本 NSInvocation 内存泄漏与闪退)
+// ==========================================
+@interface CAPackage : NSObject
++ (id)packageWithContentsOfURL:(NSURL *)url type:(NSString *)type options:(NSDictionary *)options error:(NSError **)error;
+@property (readonly) CALayer *rootLayer;
+@end
+
+@interface CAStateController : NSObject
+- (instancetype)initWithLayer:(CALayer *)layer;
+- (void)setState:(NSString *)state ofLayer:(CALayer *)layer transitionSpeed:(float)speed;
+@end
+
 // ========================================================
 // 引擎 1：纯血 C 语言在轨解压引擎 (沙盒穿透 + 内存激增免疫版)
 // ========================================================
@@ -2509,78 +2522,108 @@ static NSString * GetPrefsPlistPath() {
 @end
 
 // =======================================================
+// ================= 新增：图层动画 CAML 源码编辑器 =================
+// =======================================================
+@interface ZoneCAMLEditorViewController : UIViewController
+@property (nonatomic, copy) NSString *camlPath;
+@property (nonatomic, copy) NSString *fromState;
+@property (nonatomic, copy) NSString *toState;
+@property (nonatomic, copy) NSString *layerName;
+@property (nonatomic, strong) UITextView *textView;
+@property (nonatomic, assign) NSRange matchedRange;
+@end
+
+@implementation ZoneCAMLEditorViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.title = self.fromState ? [NSString stringWithFormat:@"%@ -> %@", self.fromState, self.toState] : @"完整 CAML";
+    
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消" style:UIBarButtonItemStylePlain target:self action:@selector(cancel)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存" style:UIBarButtonItemStyleDone target:self action:@selector(save)];
+    
+    self.textView = [[UITextView alloc] initWithFrame:self.view.bounds];
+    self.textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.textView.font = [UIFont systemFontOfSize:14];
+    self.textView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
+    self.textView.textColor = [UIColor greenColor];
+    self.textView.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
+    [self.view addSubview:self.textView];
+    
+    NSString *caml = [NSString stringWithContentsOfFile:self.camlPath encoding:NSUTF8StringEncoding error:nil];
+    if (!caml) caml = @"";
+    
+    if (!self.fromState) {
+        // 完整 CAML 模式
+        self.textView.text = caml;
+        self.matchedRange = NSMakeRange(0, caml.length);
+    } else {
+        // 匹配特定的 LKStateTransition
+        NSString *pattern = [NSString stringWithFormat:@"(?s)<LKStateTransition[^>]*fromState=\"%@[^>]*toState=\"%@\".*?</LKStateTransition>", self.fromState, self.toState];
+        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+        NSTextCheckingResult *match = [regex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
+        
+        if (match) {
+            self.matchedRange = match.range;
+            self.textView.text = [caml substringWithRange:match.range];
+        } else {
+            // 没有找到，生成一个模板供用户直接填入
+            self.matchedRange = NSMakeRange(NSNotFound, 0);
+            self.textView.text = [NSString stringWithFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n  <elements>\n    <!-- 在此添加对图层 [%@] 的动画属性 -->\n  </elements>\n</LKStateTransition>", self.fromState, self.toState, self.layerName];
+        }
+    }
+}
+
+- (void)cancel {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)save {
+    NSString *caml = [NSString stringWithContentsOfFile:self.camlPath encoding:NSUTF8StringEncoding error:nil];
+    NSMutableString *mut = [caml mutableCopy];
+    
+    if (self.matchedRange.location != NSNotFound) {
+        [mut replaceCharactersInRange:self.matchedRange withString:self.textView.text];
+    } else {
+        // 作为新的 Transition 插入
+        NSRange insertRange = [mut rangeOfString:@"</stateTransitions>"];
+        if (insertRange.location != NSNotFound) {
+            [mut insertString:[NSString stringWithFormat:@"%@\n", self.textView.text] atIndex:insertRange.location];
+        } else {
+            NSRange endLayer = [mut rangeOfString:@"</CALayer>" options:NSBackwardsSearch];
+            if (endLayer.location != NSNotFound) {
+                [mut insertString:[NSString stringWithFormat:@"<stateTransitions>\n%@\n</stateTransitions>\n", self.textView.text] atIndex:endLayer.location];
+            }
+        }
+    }
+    
+    [mut writeToFile:self.camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [self dismissViewControllerAnimated:YES completion:^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneReloadEnginePreview" object:nil];
+    }];
+}
+@end
+
+// =======================================================
 // ================= 新增：可视化高级渲染编辑器 =================
 // =======================================================
 
-@class ZoneEditorFallbackView;
-
-typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
-    ZoneCAMLModeFull = 0,
-    ZoneCAMLModeSleepToLocked,
-    ZoneCAMLModeLockedToSleep,
-    ZoneCAMLModeLockedToUnlock,
-    ZoneCAMLModeUnlockToLocked,
-    ZoneCAMLModeSleepToUnlock,
-    ZoneCAMLModeUnlockToSleep
-};
-
-@interface ZoneCAMLTextEditorViewController : UIViewController
-@property (nonatomic, copy) NSString *filePath;
-@property (nonatomic, copy) NSString *initialText;
-@property (nonatomic, copy) NSString *editorTitle;
-@property (nonatomic, copy) void (^saveHandler)(NSString *newText);
+@interface ZoneEditorFallbackView : UIView
+@property (nonatomic, strong) UIView *uicpView;
+@property (nonatomic, strong) id package;
+@property (nonatomic, strong) id stateController;
 @end
 
-@implementation ZoneCAMLTextEditorViewController {
-    UITextView *_textView;
-}
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.title = self.editorTitle ?: @"CAML 编辑";
-
-    self.navigationItem.leftBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"关闭"
-                                         style:UIBarButtonItemStylePlain
-                                        target:self
-                                        action:@selector(closeSelf)];
-
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"保存"
-                                         style:UIBarButtonItemStyleDone
-                                        target:self
-                                        action:@selector(saveText)];
-
-    _textView = [[UITextView alloc] initWithFrame:self.view.bounds];
-    _textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _textView.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
-    _textView.textColor = [UIColor labelColor];
-    _textView.backgroundColor = [UIColor systemBackgroundColor];
-    _textView.alwaysBounceVertical = YES;
-    _textView.text = self.initialText ?: @"";
-    [self.view addSubview:_textView];
-}
-
-- (void)closeSelf {
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)saveText {
-    NSString *text = _textView.text ?: @"";
-    if (self.filePath.length > 0) {
-        [text writeToFile:self.filePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+@implementation ZoneEditorFallbackView
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.uicpView) {
+        self.uicpView.frame = self.bounds;
     }
-    if (self.saveHandler) {
-        self.saveHandler(text);
-    }
-    [self dismissViewControllerAnimated:YES completion:nil];
 }
 @end
 
-@interface ZoneAdvancedEditorViewController : UIViewController
-    <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate>
+@interface ZoneAdvancedEditorViewController : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, copy) NSString *wallpaperName;
 @property (nonatomic, copy) NSString *wallpaperPath;
 
@@ -2603,43 +2646,34 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
 
 @property (nonatomic, copy) NSString *selectedLayerName;
 @property (nonatomic, copy) NSString *selectedLayerPath;
-@property (nonatomic, copy) NSString *selectedAssetPath;
 @end
 
 @implementation ZoneAdvancedEditorViewController
 
-#pragma mark - Life Cycle
-
 - (void)viewDidLoad {
     [super viewDidLoad];
-
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.title = @"高级实时编辑";
-
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"保存生效"
-                                         style:UIBarButtonItemStyleDone
-                                        target:self
-                                        action:@selector(saveAndApply)];
-
-    if (!self.navigationController.viewControllers.firstObject ||
-        self.navigationController.viewControllers.firstObject == self) {
-        self.navigationItem.leftBarButtonItem =
-            [[UIBarButtonItem alloc] initWithTitle:@"关闭"
-                                             style:UIBarButtonItemStylePlain
-                                            target:self
-                                            action:@selector(dismissSelf)];
+    
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存生效" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndApply)];
+    if (!self.navigationController.viewControllers.firstObject || self.navigationController.viewControllers.firstObject == self) {
+        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(dismissSelf)];
     }
+
+    // 监听 CAML 编辑器保存后的刷新命令
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(loadWallpaperEngine) name:@"ZoneReloadEnginePreview" object:nil];
 
     [self setupUI];
     [self loadWallpaperEngine];
 }
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
 - (void)dismissSelf {
     [self dismissViewControllerAnimated:YES completion:nil];
 }
-
-#pragma mark - UI
 
 - (void)setupUI {
     NSArray *items = @[@"息屏 (Sleep)", @"锁屏 (Locked)", @"解锁 (Unlock)"];
@@ -2648,7 +2682,7 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
     self.stateSegment.selectedSegmentIndex = 1;
     [self.stateSegment addTarget:self action:@selector(stateSegmentChanged:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:self.stateSegment];
-
+    
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     CGFloat screenAspect = screenSize.height / screenSize.width;
     CGFloat previewWidth = self.view.bounds.size.width - 60;
@@ -2657,56 +2691,45 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
         previewHeight = self.view.bounds.size.height - 300;
         previewWidth = previewHeight / screenAspect;
     }
-
-    self.previewContainer = [[UIView alloc] initWithFrame:CGRectMake((self.view.bounds.size.width - previewWidth) / 2.0,
-                                                                     150,
-                                                                     previewWidth,
-                                                                     previewHeight)];
+    
+    self.previewContainer = [[UIView alloc] initWithFrame:CGRectMake((self.view.bounds.size.width - previewWidth)/2, 150, previewWidth, previewHeight)];
     self.previewContainer.backgroundColor = [UIColor blackColor];
     self.previewContainer.layer.cornerRadius = 24;
     self.previewContainer.layer.masksToBounds = YES;
     self.previewContainer.layer.borderWidth = 4;
     self.previewContainer.layer.borderColor = [UIColor darkGrayColor].CGColor;
     [self.view addSubview:self.previewContainer];
-
+    
     self.selectionBoxLayer = [CAShapeLayer layer];
     self.selectionBoxLayer.strokeColor = [UIColor systemYellowColor].CGColor;
     self.selectionBoxLayer.fillColor = [UIColor clearColor].CGColor;
     self.selectionBoxLayer.lineWidth = 4.0;
     self.selectionBoxLayer.lineDashPattern = @[@8, @4];
-
-    UITapGestureRecognizer *tap =
-        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handlePreviewTap:)];
+    
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handlePreviewTap:)];
     [self.previewContainer addGestureRecognizer:tap];
-
-    UIPanGestureRecognizer *pan =
-        [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePreviewPan:)];
+    
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePreviewPan:)];
     [self.previewContainer addGestureRecognizer:pan];
-
-    self.selectedLayerLabel = [[UILabel alloc] initWithFrame:CGRectMake(20,
-                                                                        CGRectGetMaxY(self.previewContainer.frame) + 15,
-                                                                        self.view.bounds.size.width - 40,
-                                                                        20)];
+    
+    self.selectedLayerLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, CGRectGetMaxY(self.previewContainer.frame) + 15, self.view.bounds.size.width - 40, 20)];
     self.selectedLayerLabel.text = @"请在上方屏幕点击选中图层 (支持拖拽移动)";
     self.selectedLayerLabel.textAlignment = NSTextAlignmentCenter;
     self.selectedLayerLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     self.selectedLayerLabel.textColor = [UIColor secondaryLabelColor];
     [self.view addSubview:self.selectedLayerLabel];
-
-    self.bottomToolbar = [[UIStackView alloc] initWithFrame:CGRectMake(20,
-                                                                        CGRectGetMaxY(self.selectedLayerLabel.frame) + 15,
-                                                                        self.view.bounds.size.width - 40,
-                                                                        44)];
+    
+    self.bottomToolbar = [[UIStackView alloc] initWithFrame:CGRectMake(20, CGRectGetMaxY(self.selectedLayerLabel.frame) + 15, self.view.bounds.size.width - 40, 44)];
     self.bottomToolbar.axis = UILayoutConstraintAxisHorizontal;
     self.bottomToolbar.distribution = UIStackViewDistributionFillEqually;
     self.bottomToolbar.spacing = 10;
     self.bottomToolbar.alpha = 0.5;
     self.bottomToolbar.userInteractionEnabled = NO;
-
+    
     NSArray *btnTitles = @[@"替换素材", @"图层动画", @"上移", @"下移", @"删除"];
     NSArray *btnSelectors = @[@"replaceMaterial", @"editAnimation", @"moveLayerUp", @"moveLayerDown", @"deleteLayer"];
-
-    for (int i = 0; i < btnTitles.count; i++) {
+    
+    for (int i=0; i<btnTitles.count; i++) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
         [btn setTitle:btnTitles[i] forState:UIControlStateNormal];
         btn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
@@ -2719,57 +2742,93 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
     [self.view addSubview:self.bottomToolbar];
 }
 
-#pragma mark - Engine Loading
+// 帮助弹窗提示
+- (void)showToast:(NSString *)msg {
+    UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 200, 40)];
+    toast.center = CGPointMake(self.view.bounds.size.width/2, self.view.bounds.size.height - 100);
+    toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
+    toast.textColor = [UIColor whiteColor];
+    toast.textAlignment = NSTextAlignmentCenter;
+    toast.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    toast.text = msg;
+    toast.layer.cornerRadius = 20;
+    toast.layer.masksToBounds = YES;
+    toast.alpha = 0.0;
+    [self.view addSubview:toast];
 
-- (NSString *)zone_firstExistingImagePathInFolder:(NSString *)folder nameLike:(NSString *)name {
-    if (folder.length == 0 || name.length == 0) return nil;
+    [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 1.0; } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.3 delay:1.0 options:0 animations:^{ toast.alpha = 0.0; } completion:^(BOOL finished) {
+            [toast removeFromSuperview];
+        }];
+    }];
+}
 
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *direct = [folder stringByAppendingPathComponent:name];
-    BOOL isDir = NO;
-    if ([fm fileExistsAtPath:direct isDirectory:&isDir] && !isDir) return direct;
-
-    NSString *base = [name stringByDeletingPathExtension];
-    for (NSString *ext in @[@"png", @"jpg", @"jpeg", @"heic", @"heif", @"webp"]) {
-        NSString *candidate = [folder stringByAppendingPathComponent:[base stringByAppendingPathExtension:ext]];
-        if ([fm fileExistsAtPath:candidate]) return candidate;
+// 彻底修复低系统上的 Package 创建逻辑，告别 NSInvocation 闪退
+- (UIView *)createPackageViewWithURL:(NSURL *)url {
+    dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
+    
+    if (@available(iOS 16.0, *)) {
+        Class BSUIPackageClass = NSClassFromString(@"BSUICAPackageView");
+        if (BSUIPackageClass) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id pkg = [[BSUIPackageClass alloc] performSelector:NSSelectorFromString(@"initWithURL:") withObject:url];
+#pragma clang diagnostic pop
+            if (pkg) return pkg;
+        }
     }
+    
+    ZoneEditorFallbackView *container = [[ZoneEditorFallbackView alloc] initWithFrame:CGRectZero];
+    
+    // 使用直接声明的 CAPackage 类操作，完全丢弃导致崩溃的反射代码
+    Class capClass = NSClassFromString(@"CAPackage");
+    if (capClass && [capClass respondsToSelector:@selector(packageWithContentsOfURL:type:options:error:)]) {
+        id package = [capClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:nil];
+        if (!package) {
+            NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
+            package = [capClass packageWithContentsOfURL:camlURL type:@"com.apple.coreanimation-xml" options:nil error:nil];
+        }
+        
+        if (package) {
+            CALayer *root = nil;
+            @try { root = [package valueForKey:@"rootLayer"]; } @catch(NSException *e){}
+            
+            if (root && [root isKindOfClass:[CALayer class]]) {
+                root.geometryFlipped = NO;
+                [container.layer addSublayer:root];
+                
+                Class CAStateControllerClass = NSClassFromString(@"CAStateController");
+                if (CAStateControllerClass) {
+                    container.stateController = [[CAStateControllerClass alloc] initWithLayer:root];
+                    container.package = package;
+                }
+                return container;
+            }
+        }
+    }
+    
     return nil;
 }
 
 - (void)loadWallpaperEngine {
     [self.previewContainer.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
-
     self.selectedHitLayer = nil;
-    self.selectedLayerName = nil;
-    self.selectedLayerPath = nil;
-    self.selectedAssetPath = nil;
     [self.selectionBoxLayer removeFromSuperlayer];
-
-    self.bgPkgPath = nil;
-    self.floatPkgPath = nil;
-    self.fgPkgPath = nil;
-    self.bgView = nil;
-    self.floatingView = nil;
-    self.fgView = nil;
-
+    
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *origEnum = [fm enumeratorAtPath:self.wallpaperPath];
-    NSString *subPath = nil;
-
+    NSString *subPath;
     while ((subPath = [origEnum nextObject])) {
         if ([subPath containsString:@"__MACOSX"]) continue;
         NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:subPath];
         BOOL isDir = NO;
-
-        if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir &&
-            [subPath.pathExtension.lowercaseString isEqualToString:@"ca"]) {
+        if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir && [subPath.pathExtension.lowercaseString isEqualToString:@"ca"]) {
             if ([subPath localizedCaseInsensitiveContainsString:@"Background"]) self.bgPkgPath = fullPath;
             else if ([subPath localizedCaseInsensitiveContainsString:@"Floating"]) self.floatPkgPath = fullPath;
             else if ([subPath localizedCaseInsensitiveContainsString:@"Foreground"]) self.fgPkgPath = fullPath;
         }
     }
-
+    
     if (self.bgPkgPath) {
         self.bgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:self.bgPkgPath isDirectory:YES]];
         [self setupPackageView:self.bgView];
@@ -2782,248 +2841,73 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
         self.fgView = [self createPackageViewWithURL:[NSURL fileURLWithPath:self.fgPkgPath isDirectory:YES]];
         [self setupPackageView:self.fgView];
     }
-
+    
     [self stateSegmentChanged:self.stateSegment];
-}
-
-- (UIView *)createPackageViewWithURL:(NSURL *)url {
-    dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
-
-    if (@available(iOS 16.0, *)) {
-        Class BSUIPackageClass = NSClassFromString(@"BSUICAPackageView");
-        if (BSUIPackageClass && [BSUIPackageClass instancesRespondToSelector:@selector(initWithURL:)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id pkg = [[BSUIPackageClass alloc] performSelector:@selector(initWithURL:) withObject:url];
-#pragma clang diagnostic pop
-            if (pkg) return pkg;
-        }
-    }
-
-    ZoneEditorFallbackView *container = [[ZoneEditorFallbackView alloc] initWithFrame:CGRectZero];
-
-    Class UICPClass = NSClassFromString(@"_UICAPackageView");
-    if (UICPClass && [UICPClass instancesRespondToSelector:@selector(initWithContentsOfURL:publishedObjectViewClassMap:)]) {
-        @try {
-            id packageView = [UICPClass alloc];
-            SEL initSel = @selector(initWithContentsOfURL:publishedObjectViewClassMap:);
-            NSMethodSignature *sig = [packageView methodSignatureForSelector:initSel];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setSelector:initSel];
-                [inv setTarget:packageView];
-                [inv setArgument:&url atIndex:2];
-                id nilObj = nil;
-                [inv setArgument:&nilObj atIndex:3];
-                [inv invoke];
-                [inv getReturnValue:&packageView];
-
-                if (packageView) {
-                    [packageView setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
-                    [container addSubview:packageView];
-                    container.uicpView = packageView;
-                    return container;
-                }
-            }
-        } @catch (NSException *e) {}
-    }
-
-    Class CAPackageClass = NSClassFromString(@"CAPackage");
-    if (CAPackageClass) {
-        id package = nil;
-        @try {
-            SEL pkgSel = @selector(packageWithContentsOfURL:type:options:error:);
-            NSMethodSignature *sig = [CAPackageClass methodSignatureForSelector:pkgSel];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setSelector:pkgSel];
-                [inv setTarget:CAPackageClass];
-
-                NSString *type1 = @"com.apple.coreanimation-package";
-                id nilOptions = nil;
-                void *nilErr = NULL;
-
-                [inv setArgument:&url atIndex:2];
-                [inv setArgument:&type1 atIndex:3];
-                [inv setArgument:&nilOptions atIndex:4];
-                [inv setArgument:&nilErr atIndex:5];
-                [inv invoke];
-                [inv getReturnValue:&package];
-            }
-        } @catch (NSException *e) {}
-
-        if (!package) {
-            NSURL *camlURL = [url URLByAppendingPathComponent:@"main.caml"];
-            @try {
-                SEL pkgSel = @selector(packageWithContentsOfURL:type:options:error:);
-                NSMethodSignature *sig = [CAPackageClass methodSignatureForSelector:pkgSel];
-                if (sig) {
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    [inv setSelector:pkgSel];
-                    [inv setTarget:CAPackageClass];
-
-                    NSString *type2 = @"com.apple.coreanimation-xml";
-                    id nilOptions = nil;
-                    void *nilErr = NULL;
-
-                    [inv setArgument:&camlURL atIndex:2];
-                    [inv setArgument:&type2 atIndex:3];
-                    [inv setArgument:&nilOptions atIndex:4];
-                    [inv setArgument:&nilErr atIndex:5];
-                    [inv invoke];
-                    [inv getReturnValue:&package];
-                }
-            } @catch (NSException *e) {}
-        }
-
-        if (package) {
-            [container setValue:package forKey:@"package"];
-            CALayer *root = nil;
-            @try { root = [package valueForKey:@"rootLayer"]; } @catch (NSException *e) {}
-            if (root) {
-                [container.layer addSublayer:root];
-                id stateController = nil;
-                Class CAStateControllerClass = NSClassFromString(@"CAStateController");
-                if (CAStateControllerClass) {
-                    @try {
-                        stateController = [[CAStateControllerClass alloc] initWithLayer:root];
-                    } @catch (NSException *e) {}
-                }
-                container.stateController = stateController;
-            }
-            return container;
-        }
-    }
-
-    return container;
 }
 
 - (void)setupPackageView:(UIView *)pkgView {
     if (!pkgView) return;
     pkgView.frame = self.previewContainer.bounds;
-    [self.previewContainer addSubview:pkgView];
-}
-
-- (void)reloadPreviewPreservingSelection {
-    NSString *savedName = [self.selectedLayerName copy];
-    NSString *savedPath = [self.selectedLayerPath copy];
-    NSString *savedAsset = [self.selectedAssetPath copy];
-
-    [self loadWallpaperEngine];
-
-    if (savedName.length > 0 && savedPath.length > 0) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self restoreSelectionWithLayerName:savedName path:savedPath asset:savedAsset];
-        });
-    }
-}
-
-- (void)restoreSelectionWithLayerName:(NSString *)layerName path:(NSString *)path asset:(NSString *)assetPath {
-    if (layerName.length == 0 || path.length == 0) return;
-
-    UIView *view = nil;
-    if ([path isEqualToString:self.bgPkgPath]) view = self.bgView;
-    else if ([path isEqualToString:self.floatPkgPath]) view = self.floatingView;
-    else if ([path isEqualToString:self.fgPkgPath]) view = self.fgView;
-    if (!view) return;
-
-    CALayer *root = nil;
-    if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
-        ZoneEditorFallbackView *fb = (ZoneEditorFallbackView *)view;
-        if (fb.uicpView) root = [fb.uicpView.layer.sublayers firstObject];
-        else if (fb.package) {
-            @try { root = [fb.package valueForKey:@"rootLayer"]; } @catch (NSException *e) {}
+    
+    CALayer *rootLayer = nil;
+    if ([pkgView isKindOfClass:[ZoneEditorFallbackView class]]) {
+        ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)pkgView;
+        if (fbView.package) {
+            @try { rootLayer = [fbView.package valueForKey:@"rootLayer"]; } @catch(NSException *e){}
+            if (rootLayer) fbView.layer.geometryFlipped = !rootLayer.geometryFlipped;
         }
     } else {
-        root = [view.layer.sublayers firstObject];
+        rootLayer = [pkgView.layer.sublayers firstObject];
+        pkgView.layer.geometryFlipped = !rootLayer.geometryFlipped;
     }
-
-    if (!root) return;
-
-    CALayer *found = [self zone_findLayerByName:root name:layerName];
-    if (!found) return;
-
-    self.selectedHitLayer = found;
-    self.selectedLayerName = layerName;
-    self.selectedLayerPath = path;
-    self.selectedAssetPath = assetPath ?: [self zone_firstExistingImagePathInFolder:path nameLike:layerName];
-
-    self.selectedLayerLabel.text = [NSString stringWithFormat:@"当前选中: [%@] 所在层: %@", self.selectedLayerName, self.selectedLayerPath.lastPathComponent];
-    self.selectedLayerLabel.textColor = [UIColor systemBlueColor];
-    self.bottomToolbar.alpha = 1.0;
-    self.bottomToolbar.userInteractionEnabled = YES;
-    [self updateSelectionBox];
+    
+    if (rootLayer) {
+        CGSize realSize = rootLayer.bounds.size;
+        if (realSize.width > 0 && realSize.height > 0) {
+            CGFloat scale = MIN(self.previewContainer.bounds.size.width / realSize.width, self.previewContainer.bounds.size.height / realSize.height);
+            rootLayer.position = CGPointMake(self.previewContainer.bounds.size.width / 2.0, self.previewContainer.bounds.size.height / 2.0);
+            rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
+        }
+    }
+    [self.previewContainer addSubview:pkgView];
 }
 
 - (void)safeSetState:(NSString *)state forView:(UIView *)view {
     if (!view) return;
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
         ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
-        if (fbView.uicpView && [fbView.uicpView respondsToSelector:@selector(setState:)]) {
-            [fbView.uicpView performSelector:@selector(setState:) withObject:state];
-            return;
-        }
         if (fbView.stateController && fbView.package) {
             CALayer *root = nil;
-            @try { root = [fbView.package valueForKey:@"rootLayer"]; } @catch (NSException *e) {}
+            @try { root = [fbView.package valueForKey:@"rootLayer"]; } @catch(NSException *e){}
             if (root && [root isKindOfClass:[CALayer class]]) {
-                SEL setSel = @selector(setState:ofLayer:transitionSpeed:);
-                NSMethodSignature *sig = [fbView.stateController methodSignatureForSelector:setSel];
-                if (sig) {
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    [inv setSelector:setSel];
-                    [inv setTarget:fbView.stateController];
-                    [inv setArgument:&state atIndex:2];
-                    [inv setArgument:&root atIndex:3];
-                    float speed = 1.0f;
-                    [inv setArgument:&speed atIndex:4];
-                    @try { [inv invoke]; } @catch (NSException *e) {}
-                }
+                [(CAStateController *)fbView.stateController setState:state ofLayer:root transitionSpeed:1.0f];
             }
         }
     } else {
-        if ([view respondsToSelector:@selector(setState:)]) {
-            @try { [view performSelector:@selector(setState:) withObject:state]; } @catch (NSException *e) {}
+        if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            @try { [view performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e){}
+#pragma clang diagnostic pop
         }
     }
-#pragma clang diagnostic pop
 }
-
-#pragma mark - Segmented State
 
 - (void)stateSegmentChanged:(UISegmentedControl *)sender {
     NSString *states[] = {@"Sleep", @"Locked", @"Unlock"};
-    NSInteger idx = MAX(0, MIN(2, sender.selectedSegmentIndex));
-    NSString *targetState = states[idx];
-
+    NSString *targetState = states[sender.selectedSegmentIndex];
+    
     [CATransaction begin];
     [CATransaction setDisableActions:NO];
-    [CATransaction setAnimationDuration:0.35];
-
+    [CATransaction setAnimationDuration:0.6];
     [self safeSetState:targetState forView:self.bgView];
     [self safeSetState:targetState forView:self.floatingView];
     [self safeSetState:targetState forView:self.fgView];
-
     [CATransaction commit];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.40 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self updateSelectionBox];
     });
-}
-
-#pragma mark - Selection
-
-- (CALayer *)zone_findLayerByName:(CALayer *)layer name:(NSString *)name {
-    if (!layer || name.length == 0) return nil;
-    if ([layer.name isEqualToString:name]) return layer;
-    for (CALayer *sub in layer.sublayers) {
-        CALayer *found = [self zone_findLayerByName:sub name:name];
-        if (found) return found;
-    }
-    return nil;
 }
 
 - (void)updateSelectionBox {
@@ -3031,32 +2915,23 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
         [self.selectionBoxLayer removeFromSuperlayer];
         return;
     }
-
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-
     if (self.selectionBoxLayer.superlayer != self.selectedHitLayer) {
         [self.selectionBoxLayer removeFromSuperlayer];
         [self.selectedHitLayer addSublayer:self.selectionBoxLayer];
     }
-
     self.selectionBoxLayer.frame = self.selectedHitLayer.bounds;
     self.selectionBoxLayer.path = [UIBezierPath bezierPathWithRect:self.selectedHitLayer.bounds].CGPath;
-
     [CATransaction commit];
 }
 
-- (CALayer *)zone_layerHitAtPoint:(CGPoint)point inView:(UIView *)view {
-    CALayer *root = view.layer.presentationLayer ?: view.layer;
-    CALayer *hit = [root hitTest:point];
-
-    while (hit && hit != root) {
-        NSString *name = hit.name;
-        BOOL isDrawable = (hit.sublayers.count == 0 || hit.contents != nil || hit.delegate != nil);
-        if (hit != self.selectionBoxLayer &&
-            name.length > 0 &&
-            ![name isEqualToString:@"rootLayer"] &&
-            isDrawable) {
+// 核心优化：递归寻找有效命名图层，排除包包装器造成的捕获偏移
+- (CALayer *)hitTestNamedLayerInTree:(CALayer *)layer point:(CGPoint)p {
+    CALayer *hit = [layer hitTest:p];
+    while (hit && hit != layer) {
+        // 图层拥有合法的名字且非根节点时，就说明点中了实际业务图层
+        if (hit.name.length > 0 && ![hit.name isEqualToString:@"rootLayer"]) {
             return hit;
         }
         hit = hit.superlayer;
@@ -3066,47 +2941,38 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
 
 - (void)handlePreviewTap:(UITapGestureRecognizer *)gesture {
     CGPoint point = [gesture locationInView:self.previewContainer];
-
     self.selectedHitLayer = nil;
-    self.selectedLayerName = nil;
-    self.selectedLayerPath = nil;
-    self.selectedAssetPath = nil;
-
-    NSArray *views = self.fgView ? @[self.fgView,
-                                     self.floatingView ?: [NSNull null],
-                                     self.bgView ?: [NSNull null]] :
-                                   @[self.floatingView ?: [NSNull null],
-                                     self.bgView ?: [NSNull null]];
-
-    for (id obj in views) {
-        if (obj == [NSNull null]) continue;
-        UIView *view = (UIView *)obj;
-
+    
+    // 逆向遍历：前景 -> 悬浮 -> 背景
+    NSArray *views = @[self.fgView ?: [NSNull null], self.floatingView ?: [NSNull null], self.bgView ?: [NSNull null]];
+    NSArray *paths = @[self.fgPkgPath ?: @"", self.floatPkgPath ?: @"", self.bgPkgPath ?: @""];
+    
+    for (int i=0; i<views.count; i++) {
+        id viewObj = views[i];
+        if ([viewObj isKindOfClass:[NSNull class]]) continue;
+        UIView *view = (UIView *)viewObj;
+        
         CGPoint convertedPoint = [self.previewContainer.layer convertPoint:point toLayer:view.layer];
-        CALayer *found = [self zone_layerHitAtPoint:convertedPoint inView:view];
-        if (!found) continue;
-
-        self.selectedHitLayer = found;
-        if (view == self.bgView) self.selectedLayerPath = self.bgPkgPath;
-        else if (view == self.floatingView) self.selectedLayerPath = self.floatPkgPath;
-        else if (view == self.fgView) self.selectedLayerPath = self.fgPkgPath;
-
-        self.selectedLayerName = found.name.length > 0 ? found.name : nil;
-        self.selectedAssetPath = self.selectedLayerName ? [self zone_firstExistingImagePathInFolder:self.selectedLayerPath nameLike:self.selectedLayerName] : nil;
-        break;
+        CALayer *found = [self hitTestNamedLayerInTree:view.layer point:convertedPoint];
+        if (found) {
+            self.selectedHitLayer = found;
+            self.selectedLayerPath = paths[i];
+            break;
+        }
     }
-
-    if (self.selectedHitLayer && self.selectedLayerName.length > 0) {
+    
+    if (self.selectedHitLayer) {
+        self.selectedLayerName = self.selectedHitLayer.name;
         self.selectedLayerLabel.text = [NSString stringWithFormat:@"当前选中: [%@] 所在层: %@", self.selectedLayerName, self.selectedLayerPath.lastPathComponent];
         self.selectedLayerLabel.textColor = [UIColor systemBlueColor];
+        
         [self updateSelectionBox];
         self.bottomToolbar.alpha = 1.0;
         self.bottomToolbar.userInteractionEnabled = YES;
     } else {
         self.selectedLayerName = nil;
         self.selectedLayerPath = nil;
-        self.selectedAssetPath = nil;
-        self.selectedLayerLabel.text = @"未选中任何可编辑图层";
+        self.selectedLayerLabel.text = @"未选中任何图层 (支持拖拽移动)";
         self.selectedLayerLabel.textColor = [UIColor secondaryLabelColor];
         [self.selectionBoxLayer removeFromSuperlayer];
         self.bottomToolbar.alpha = 0.5;
@@ -3116,386 +2982,207 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
 
 - (void)handlePreviewPan:(UIPanGestureRecognizer *)gesture {
     if (!self.selectedHitLayer) return;
-
+    
     CGPoint translation = [gesture translationInView:self.previewContainer];
-    CGPoint newPos = self.selectedHitLayer.position;
+    CGFloat scaleX = 1.0;
+    CGFloat scaleY = 1.0;
+    BOOL isFlipped = NO;
+    CALayer *scanLayer = self.selectedHitLayer;
+    while (scanLayer && scanLayer != self.previewContainer.layer) {
+        @try {
+            scaleX *= [[scanLayer valueForKeyPath:@"transform.scale.x"] floatValue] ?: 1.0;
+            scaleY *= [[scanLayer valueForKeyPath:@"transform.scale.y"] floatValue] ?: 1.0;
+            if (scanLayer.geometryFlipped) isFlipped = !isFlipped;
+        } @catch(NSException *e){}
+        scanLayer = scanLayer.superlayer;
+    }
+    
+    if (ABS(scaleX) <= 0.01) scaleX = 1.0;
+    if (ABS(scaleY) <= 0.01) scaleY = 1.0;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.panStartPos = self.selectedHitLayer.position;
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
-        newPos = CGPointMake(self.panStartPos.x + translation.x, self.panStartPos.y + translation.y);
+        CGFloat dx = translation.x / scaleX;
+        CGFloat dy = translation.y / scaleY;
+        if (isFlipped) dy = -dy; // 修正坐标翻转
+        
+        CGPoint newPos = CGPointMake(self.panStartPos.x + dx, self.panStartPos.y + dy);
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         self.selectedHitLayer.position = newPos;
         [CATransaction commit];
-    } else if (gesture.state == UIGestureRecognizerStateEnded ||
-               gesture.state == UIGestureRecognizerStateCancelled) {
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         NSString *newVal = [NSString stringWithFormat:@"%.1f %.1f", self.selectedHitLayer.position.x, self.selectedHitLayer.position.y];
         [self updateCAMLProperty:@"position" value:newVal];
-        [self reloadPreviewPreservingSelection];
     }
 }
-
-#pragma mark - Replace Material
 
 - (void)replaceMaterial {
-    if (!self.selectedLayerPath || !self.selectedLayerName) return;
-
-    NSString *assetPath = self.selectedAssetPath ?: [self zone_firstExistingImagePathInFolder:self.selectedLayerPath nameLike:self.selectedLayerName];
-    if (assetPath.length == 0) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"无法替换"
-                                                                       message:@"没有找到这个图层对应的图片文件。"
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-
-    self.selectedAssetPath = assetPath;
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"替换素材"
-                                                                    message:self.selectedLayerName
-                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:@"相册"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self showPickerWithSourceType:UIImagePickerControllerSourceTypePhotoLibrary];
-    }]];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-
-    if (sheet.popoverPresentationController) {
-        sheet.popoverPresentationController.sourceView = self.selectedLayerLabel ?: self.view;
-        sheet.popoverPresentationController.sourceRect = self.selectedLayerLabel.bounds;
-    }
-
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)showPickerWithSourceType:(UIImagePickerControllerSourceType)type {
-    if (![UIImagePickerController isSourceTypeAvailable:type]) return;
-
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.delegate = self;
-    picker.sourceType = type;
-    picker.mediaTypes = @[@"public.image"];
+    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
     [self presentViewController:picker animated:YES completion:nil];
 }
 
-- (UIImage *)zone_resizedImage:(UIImage *)image targetSize:(CGSize)size {
-    if (!image) return nil;
-    if (size.width <= 0 || size.height <= 0) return image;
-
-    UIGraphicsBeginImageContextWithOptions(size, NO, 1.0);
-    [image drawInRect:CGRectMake(0, 0, size.width, size.height)];
-    UIImage *out = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return out ?: image;
-}
-
+// 核心优化：保存后实时将内存里的 CGImage 塞回渲染引擎，秒级预览无需读盘
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
     UIImage *img = info[UIImagePickerControllerOriginalImage];
     [picker dismissViewControllerAnimated:YES completion:^{
-        if (!img || self.selectedAssetPath.length == 0) return;
-        [self saveImage:img toAssetPath:self.selectedAssetPath];
+        if (img && self.selectedLayerPath && self.selectedLayerName) {
+            NSString *targetImgPath = [self.selectedLayerPath stringByAppendingPathComponent:self.selectedLayerName];
+            if (![[NSFileManager defaultManager] fileExistsAtPath:targetImgPath]) {
+                targetImgPath = [targetImgPath stringByAppendingPathExtension:@"png"];
+            }
+            NSData *data = UIImagePNGRepresentation(img);
+            [data writeToFile:targetImgPath atomically:YES];
+            
+            // 🔥 直接强行替换内存层渲染，让高级预览瞬间生效
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.selectedHitLayer.contents = (__bridge id)img.CGImage;
+            [CATransaction commit];
+            [self showToast:@"图片替换已更新"];
+        }
     }];
 }
 
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-    [picker dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)saveImage:(UIImage *)image toAssetPath:(NSString *)assetPath {
-    if (!image || assetPath.length == 0) return;
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *backupPath = [assetPath stringByAppendingString:@".bak"];
-    if (![fm fileExistsAtPath:backupPath]) {
-        [fm copyItemAtPath:assetPath toPath:backupPath error:nil];
-    }
-
-    UIImage *finalImage = [self zone_resizedImage:image targetSize:image.size];
-    NSData *data = nil;
-    NSString *ext = assetPath.pathExtension.lowercaseString;
-
-    if ([ext isEqualToString:@"png"]) {
-        data = UIImagePNGRepresentation(finalImage);
-    } else {
-        data = UIImageJPEGRepresentation(finalImage, 1.0);
-    }
-
-    if (data.length == 0) return;
-
-    [data writeToFile:assetPath atomically:YES];
-    chown(assetPath.UTF8String, 501, 501);
-    chmod(assetPath.UTF8String, 0777);
-
-    [self reloadPreviewPreservingSelection];
-}
-
-#pragma mark - Animation Editing
-
-- (NSString *)zone_camlPath {
-    return [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
-}
-
-- (NSString *)zone_fullCAMLText {
-    return [NSString stringWithContentsOfFile:[self zone_camlPath]
-                                     encoding:NSUTF8StringEncoding
-                                        error:nil] ?: @"";
-}
-
-- (NSString *)zone_extractStateBlock:(NSString *)stateName layerName:(NSString *)layerName fullCAML:(NSString *)caml {
-    if (stateName.length == 0 || caml.length == 0) return caml ?: @"";
-
-    NSString *escaped = [NSRegularExpression escapedPatternForString:stateName];
-    NSString *pattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>)(.*?)(</LKState>)", escaped];
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
-                                                                           options:NSRegularExpressionDotMatchesLineSeparators
-                                                                             error:nil];
-    NSTextCheckingResult *match = [regex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
-    if (!match) return caml;
-
-    NSString *block = [caml substringWithRange:match.range];
-    if (layerName.length == 0) return block;
-
-    NSMutableArray<NSString *> *filtered = [NSMutableArray array];
-    NSArray<NSString *> *lines = [block componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    for (NSString *line in lines) {
-        if ([line containsString:layerName] || filtered.count > 0) {
-            [filtered addObject:line];
-        }
-    }
-    return filtered.count > 0 ? [filtered componentsJoinedByString:@"\n"] : block;
-}
-
-- (void)openCAMLTextEditorForMode:(ZoneCAMLMode)mode {
+// 核心优化：图层动画按钮变更为功能齐全的弹窗
+- (void)editAnimation {
     if (!self.selectedLayerPath || !self.selectedLayerName) return;
-
-    NSString *path = [self zone_camlPath];
-    NSString *caml = [self zone_fullCAMLText];
-    if (caml.length == 0) return;
-
-    NSString *title = @"CAML 编辑";
-    NSString *text = caml;
-
-    switch (mode) {
-        case ZoneCAMLModeFull:
-            title = @"当前图片完整的 CAML";
-            text = caml;
-            break;
-        case ZoneCAMLModeSleepToLocked:
-            title = @"息屏 → 锁屏";
-            text = [self zone_extractStateBlock:@"Sleep" layerName:self.selectedLayerName fullCAML:caml];
-            break;
-        case ZoneCAMLModeLockedToSleep:
-            title = @"锁屏 → 息屏";
-            text = [self zone_extractStateBlock:@"Locked" layerName:self.selectedLayerName fullCAML:caml];
-            break;
-        case ZoneCAMLModeLockedToUnlock:
-            title = @"锁屏 → 解锁";
-            text = [self zone_extractStateBlock:@"Locked" layerName:self.selectedLayerName fullCAML:caml];
-            break;
-        case ZoneCAMLModeUnlockToLocked:
-            title = @"解锁 → 锁屏";
-            text = [self zone_extractStateBlock:@"Unlock" layerName:self.selectedLayerName fullCAML:caml];
-            break;
-        case ZoneCAMLModeSleepToUnlock:
-            title = @"息屏 → 解锁";
-            text = [self zone_extractStateBlock:@"Sleep" layerName:self.selectedLayerName fullCAML:caml];
-            break;
-        case ZoneCAMLModeUnlockToSleep:
-            title = @"解锁 → 息屏";
-            text = [self zone_extractStateBlock:@"Unlock" layerName:self.selectedLayerName fullCAML:caml];
-            break;
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"图层动画编辑" message:[NSString stringWithFormat:@"当前图层: %@", self.selectedLayerName] preferredStyle:UIAlertControllerStyleActionSheet];
+    
+    NSArray *transitions = @[
+        @{@"title": @"息屏 到 锁屏", @"from": @"Sleep", @"to": @"Locked"},
+        @{@"title": @"锁屏 到 息屏", @"from": @"Locked", @"to": @"Sleep"},
+        @{@"title": @"锁屏 到 解锁", @"from": @"Locked", @"to": @"Unlock"},
+        @{@"title": @"解锁 到 锁屏", @"from": @"Unlock", @"to": @"Locked"},
+        @{@"title": @"息屏 到 解锁", @"from": @"Sleep", @"to": @"Unlock"},
+        @{@"title": @"解锁 到 息屏", @"from": @"Unlock", @"to": @"Sleep"}
+    ];
+    
+    for (NSDictionary *dict in transitions) {
+        [alert addAction:[UIAlertAction actionWithTitle:dict[@"title"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [self openCAMLEditorForTransitionFrom:dict[@"from"] to:dict[@"to"]];
+        }]];
     }
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"编辑完整 CAML" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [self openCAMLEditorForTransitionFrom:nil to:nil];
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    
+    if (alert.popoverPresentationController) {
+        alert.popoverPresentationController.sourceView = self.bottomToolbar;
+        alert.popoverPresentationController.sourceRect = self.bottomToolbar.bounds;
+    }
+    
+    [self presentViewController:alert animated:YES completion:nil];
+}
 
-    ZoneCAMLTextEditorViewController *vc = [ZoneCAMLTextEditorViewController new];
-    vc.filePath = path;
-    vc.initialText = text;
-    vc.editorTitle = title;
-
-    __weak typeof(self) weakSelf = self;
-    vc.saveHandler = ^(NSString *newText) {
-        (void)newText;
-        [weakSelf reloadPreviewPreservingSelection];
-    };
-
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+- (void)openCAMLEditorForTransitionFrom:(NSString *)from to:(NSString *)to {
+    ZoneCAMLEditorViewController *editor = [[ZoneCAMLEditorViewController alloc] init];
+    editor.camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
+    editor.fromState = from;
+    editor.toState = to;
+    editor.layerName = self.selectedLayerName;
+    
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:editor];
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
     [self presentViewController:nav animated:YES completion:nil];
 }
 
-- (void)editAnimation {
-    if (!self.selectedLayerPath || !self.selectedLayerName) return;
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:self.selectedLayerName
-                                                                    message:@"选择要编辑的 CAML 片段"
-                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-
-    [sheet addAction:[UIAlertAction actionWithTitle:@"息屏到锁屏"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self openCAMLTextEditorForMode:ZoneCAMLModeSleepToLocked];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"锁屏到息屏"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self openCAMLTextEditorForMode:ZoneCAMLModeLockedToSleep];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"锁屏到解锁"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self openCAMLTextEditorForMode:ZoneCAMLModeLockedToUnlock];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"解锁到锁屏"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self openCAMLTextEditorForMode:ZoneCAMLModeUnlockToLocked];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"息屏到解锁"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self openCAMLTextEditorForMode:ZoneCAMLModeSleepToUnlock];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"解锁到息屏"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self openCAMLTextEditorForMode:ZoneCAMLModeUnlockToSleep];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"当前图片完整的 CAML"
-                                              style:UIAlertActionStyleDestructive
-                                            handler:^(UIAlertAction * _Nonnull action) {
-        [self openCAMLTextEditorForMode:ZoneCAMLModeFull];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-
-    if (sheet.popoverPresentationController) {
-        sheet.popoverPresentationController.sourceView = self.selectedLayerLabel ?: self.view;
-        sheet.popoverPresentationController.sourceRect = self.selectedLayerLabel.bounds;
-    }
-
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
 - (void)updateCAMLProperty:(NSString *)keyPath value:(NSString *)value {
     if (value.length == 0 || !self.selectedLayerName || !self.selectedLayerPath) return;
-
-    NSString *camlPath = [self zone_camlPath];
+    NSString *camlPath = [self.selectedLayerPath stringByAppendingPathComponent:@"main.caml"];
     NSMutableString *caml = [NSMutableString stringWithContentsOfFile:camlPath encoding:NSUTF8StringEncoding error:nil];
     if (!caml) return;
-
-    NSString *escapedName = [NSRegularExpression escapedPatternForString:self.selectedLayerName];
-    NSString *escapedKey = [NSRegularExpression escapedPatternForString:keyPath];
-
-    NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value.*?>)(.*?)(</value>)",
-                         escapedName, escapedKey];
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
-                                                                           options:NSRegularExpressionDotMatchesLineSeparators
-                                                                             error:nil];
-
+    
+    BOOL modified = NO;
+    NSString *pattern = [NSString stringWithFormat:@"(<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>\\s*<value.*?>)(.*?)(</value>)", self.selectedLayerName, keyPath];
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
     if ([regex numberOfMatchesInString:caml options:0 range:NSMakeRange(0, caml.length)] > 0) {
-        NSString *replaced = [regex stringByReplacingMatchesInString:caml
-                                                             options:0
-                                                               range:NSMakeRange(0, caml.length)
-                                                        withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
+        NSString *replaced = [regex stringByReplacingMatchesInString:caml options:0 range:NSMakeRange(0, caml.length) withTemplate:[NSString stringWithFormat:@"$1%@$3", value]];
         [caml setString:replaced];
-    } else {
-        NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)", escapedKey.length > 0 ? @"Sleep" : @"Sleep"];
-        NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern
-                                                                                     options:NSRegularExpressionDotMatchesLineSeparators
-                                                                                       error:nil];
-        NSString *injection = [NSString stringWithFormat:@"$1\n      <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n        <value>%@</value>\n      </LKStateSetValue>",
-                               self.selectedLayerName, keyPath, value];
-        NSString *replaced = [stateRegex stringByReplacingMatchesInString:caml
-                                                                  options:0
-                                                                    range:NSMakeRange(0, caml.length)
-                                                             withTemplate:injection];
-        [caml setString:replaced];
+        modified = YES;
     }
-
-    [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-}
-
-#pragma mark - Layer Move
-
-- (void)showTransientMessage:(NSString *)message {
-    if (message.length == 0) return;
-
-    self.selectedLayerLabel.text = message;
-    self.selectedLayerLabel.textColor = [UIColor systemOrangeColor];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (self.selectedLayerName.length > 0) {
-            self.selectedLayerLabel.text = [NSString stringWithFormat:@"当前选中: [%@] 所在层: %@", self.selectedLayerName, self.selectedLayerPath.lastPathComponent];
-            self.selectedLayerLabel.textColor = [UIColor systemBlueColor];
+    
+    NSString *tagRegexStr = [NSString stringWithFormat:@"<(CA[a-zA-Z]*Layer)([^>]*)id=\"%@\"([^>]*)>", self.selectedLayerName];
+    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:tagRegexStr options:0 error:nil];
+    NSTextCheckingResult *match = [tagRegex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
+    if (match) {
+        NSString *tagString = [caml substringWithRange:match.range];
+        NSString *attrRegexStr = [NSString stringWithFormat:@"%@=\"[^\"]*\"", keyPath];
+        NSRegularExpression *attrRegex = [NSRegularExpression regularExpressionWithPattern:attrRegexStr options:0 error:nil];
+        
+        NSString *newTag;
+        if ([attrRegex numberOfMatchesInString:tagString options:0 range:NSMakeRange(0, tagString.length)] > 0) {
+            newTag = [attrRegex stringByReplacingMatchesInString:tagString options:0 range:NSMakeRange(0, tagString.length) withTemplate:[NSString stringWithFormat:@"%@=\"%@\"", keyPath, value]];
         } else {
-            self.selectedLayerLabel.text = @"未选中任何可编辑图层";
-            self.selectedLayerLabel.textColor = [UIColor secondaryLabelColor];
+            newTag = [tagString stringByReplacingOccurrencesOfString:@">" withString:[NSString stringWithFormat:@" %@=\"%@\">", keyPath, value] options:NSBackwardsSearch range:NSMakeRange(0, tagString.length)];
         }
-    });
+        [caml replaceCharactersInRange:match.range withString:newTag];
+        modified = YES;
+    }
+    
+    if (modified) [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
-- (void)moveLayerUp {
-    [self modifyLayerOrder:1];
-}
+- (void)moveLayerUp { [self modifyLayerZPosition:1]; }
+- (void)moveLayerDown { [self modifyLayerZPosition:-1]; }
 
-- (void)moveLayerDown {
-    [self modifyLayerOrder:-1];
-}
-
-- (void)modifyLayerOrder:(NSInteger)direction {
-    if (!self.selectedHitLayer || !self.selectedHitLayer.superlayer || !self.selectedLayerName) return;
-
+// 核心优化：去除了烦人的弹窗确认，默默更新，到底/顶时才发消息
+- (void)modifyLayerZPosition:(int)direction {
+    if (!self.selectedHitLayer || !self.selectedLayerName) return;
     CALayer *parent = self.selectedHitLayer.superlayer;
-    NSArray *siblings = parent.sublayers ?: @[];
-    NSUInteger idx = [siblings indexOfObject:self.selectedHitLayer];
-    if (idx == NSNotFound) return;
+    if (!parent) return;
 
-    if (direction > 0) {
-        if (idx >= siblings.count - 1) {
-            [self showTransientMessage:@"已经在最上层"];
-            return;
-        }
-        [parent insertSublayer:self.selectedHitLayer above:siblings[idx + 1]];
-    } else {
-        if (idx == 0) {
-            [self showTransientMessage:@"已经在最下层"];
-            return;
-        }
-        [parent insertSublayer:self.selectedHitLayer below:siblings[idx - 1]];
+    CGFloat currentZ = self.selectedHitLayer.zPosition;
+    CGFloat maxZ = -CGFLOAT_MAX;
+    CGFloat minZ = CGFLOAT_MAX;
+    
+    for (CALayer *sub in parent.sublayers) {
+        if (sub == self.selectedHitLayer) continue;
+        if (sub.zPosition > maxZ) maxZ = sub.zPosition;
+        if (sub.zPosition < minZ) minZ = sub.zPosition;
     }
 
-    self.selectedHitLayer.zPosition += (direction > 0 ? 1.0 : -1.0);
-    [self updateCAMLProperty:@"zPosition" value:[NSString stringWithFormat:@"%.4f", self.selectedHitLayer.zPosition]];
-    [self reloadPreviewPreservingSelection];
-}
+    if (direction > 0 && currentZ > maxZ && parent.sublayers.count > 1) {
+        [self showToast:@"已在最上层"]; return;
+    }
+    if (direction < 0 && currentZ < minZ && parent.sublayers.count > 1) {
+        [self showToast:@"已在最下层"]; return;
+    }
 
-#pragma mark - Delete Layer
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    // 跨越同级图层
+    self.selectedHitLayer.zPosition += (direction * 10.0);
+    [CATransaction commit];
+    
+    NSString *newZ = [NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition];
+    [self updateCAMLProperty:@"zPosition" value:newZ];
+    
+    [self showToast:direction > 0 ? @"已上移一层" : @"已下移一层"];
+}
 
 - (void)deleteLayer {
     if (!self.selectedLayerName || !self.selectedLayerPath) return;
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"危险操作"
-                                                                   message:[NSString stringWithFormat:@"确认隐藏/删除图层 [%@] 吗？", self.selectedLayerName]
-                                                            preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"危险操作" message:[NSString stringWithFormat:@"确认隐藏/删除图层 [%@] 吗？", self.selectedLayerName] preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"强制隐藏"
-                                              style:UIAlertActionStyleDestructive
-                                            handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"强制隐藏" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         [self updateCAMLProperty:@"opacity" value:@"0"];
-        [self reloadPreviewPreservingSelection];
+        [self loadWallpaperEngine];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-#pragma mark - Save
-
 - (void)saveAndApply {
     CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)self.wallpaperPath, CFSTR("com.iosdump.zoneprefs"));
     CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-
+    
     NSString *plistPath = @"/var/mobile/Library/Preferences/com.iosdump.zoneprefs.plist";
 #if __has_include(<roothide.h>)
     plistPath = jbroot(plistPath);
@@ -3504,19 +3191,32 @@ typedef NS_ENUM(NSInteger, ZoneCAMLMode) {
         plistPath = [@"/var/jb" stringByAppendingPathComponent:plistPath];
     }
 #endif
-
+    
     NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
     prefs[@"ZonePath"] = self.wallpaperPath;
     [prefs writeToFile:plistPath atomically:YES];
-
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         CFSTR("com.iosdump.zoneprefs/ReloadPrefs"),
-                                         NULL,
-                                         NULL,
-                                         YES);
-
-    [self reloadPreviewPreservingSelection];
-    [self showTransientMessage:@"已保存并实时刷新"];
+    
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已保存！\n如果在桌面或锁屏没有马上看到变化(受系统进程内存缓存影响)，请点击强制注销使其生效。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"仅保存" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"注销并生效" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [self dismissViewControllerAnimated:YES completion:^{
+            pid_t pid;
+            NSString *killallPath = @"/usr/bin/killall";
+#if __has_include(<roothide.h>)
+            killallPath = jbroot(killallPath);
+#else
+            if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
+                killallPath = @"/var/jb/usr/bin/killall";
+            }
+#endif
+            const char *args[] = {"killall", "-9", "backboardd", NULL};
+            posix_spawn(&pid, [killallPath UTF8String], NULL, NULL, (char *const *)args, environ);
+        }];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
-
 @end
