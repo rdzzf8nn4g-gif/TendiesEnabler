@@ -9,7 +9,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <zlib.h> 
-#import <dlfcn.h> // <--- 加上这一行！！！
+#import <dlfcn.h> 
 
 extern char **environ;
 
@@ -72,9 +72,6 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
 
         if (extraLen > 0) fseek(fp, extraLen, SEEK_CUR);
 
-        // ==========================================
-        // 【核心优化】：开启自动释放池，防止海量小文件导致字符串内存堆积
-        // ==========================================
         @autoreleasepool {
             NSString *fileName = [NSString stringWithUTF8String:name];
             if (!fileName) fileName = @"unknown_file";
@@ -170,7 +167,7 @@ static BOOL microIndustrialUnzip(NSString *source, NSString *destination) {
                     fclose(fp); return NO;
                 }
             }
-        } // 结束 @autoreleasepool，临时字符串在此被安全粉碎
+        } 
     }
     fclose(fp);
     return extractedAny;
@@ -183,7 +180,6 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
     pid_t pid;
     int status;
     
-    // 1. 智能寻找 unzip 工具：优先越狱版，系统原生版兜底（防止越狱环境没装 unzip 导致直接罢工）
     NSString *unzipBin = @"/usr/bin/unzip"; 
 #if __has_include(<roothide.h>)
     if ([[NSFileManager defaultManager] fileExistsAtPath:jbroot(@"/usr/bin/unzip")]) {
@@ -197,7 +193,6 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
     }
 #endif
 
-    // 2. 注入免疫参数：-o(强制覆盖) -q(静默) -x(强行排除 Mac 系统垃圾文件，防止引发解压中断)
     const char *argv[] = {
         "unzip", 
         "-o", 
@@ -215,11 +210,6 @@ static BOOL industrialUnzip(NSString *source, NSString *destination) {
         if (waitpid(pid, &status, 0) != -1) {
             if (WIFEXITED(status)) {
                 int exitCode = WEXITSTATUS(status);
-                // 3. 【核心放水区域】：大幅提高对不规范 ZIP 的容忍度
-                // 0 = 完美解压
-                // 1 = 有轻微警告但成功
-                // 2 = ZIP 格式存在通用错误（比如被第三方工具暴力篡改过头文件），但实际上数据已经释出
-                // 3 = 严重结构错误，但在很多情况下核心媒体文件依然能被强行抽出来
                 return (exitCode <= 3); 
             }
         }
@@ -416,7 +406,6 @@ static NSString * GetPrefsPlistPath() {
 @property (nonatomic, assign) BOOL isVideoMode;
 @property (nonatomic, assign) NSInteger currentVideoTarget;
 
-// === 新增：用于图片替换的上下文变量 ===
 @property (nonatomic, assign) BOOL isPickingForReplacement;
 @property (nonatomic, copy) NSString *replacingWallpaperName;
 @property (nonatomic, copy) NSString *replacingImagePath;
@@ -1283,7 +1272,6 @@ static NSString * GetPrefsPlistPath() {
             cell.textLabel.textColor = [UIColor labelColor];
         }
         
-        // 全版本直接读取开关状态，默认开启
         BOOL isAnimEnabled = prefs[@"EnableAnimSpeed"] ? [prefs[@"EnableAnimSpeed"] boolValue] : YES;
         BOOL isReplaceEnabled = prefs[@"EnableReplaceImage"] ? [prefs[@"EnableReplaceImage"] boolValue] : NO;
         
@@ -1956,9 +1944,6 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// ==========================================
-// 修改 1：替换原有的 openReplaceImageController: 并新增高级编辑入口
-// ==========================================
 - (void)openReplaceImageController:(UIButton *)sender {
     NSString *wpName = sender.accessibilityIdentifier;
     NSString *wpPath = [GetWallpapersDir() stringByAppendingPathComponent:wpName];
@@ -1983,7 +1968,6 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:actionSheet animated:YES completion:nil];
 }
 
-// 抽离出的基础替换入口
 - (void)pushBasicReplaceVC:(NSString *)name path:(NSString *)path {
     UITableViewStyle style = UITableViewStyleGrouped;
     if (@available(iOS 13.0, *)) {
@@ -2004,7 +1988,6 @@ static NSString * GetPrefsPlistPath() {
     }
 }
 
-// 高级编辑器入口
 - (void)pushAdvancedEditorVC:(NSString *)name path:(NSString *)path {
     UIViewController *vc = [[NSClassFromString(@"ZoneAdvancedEditorViewController") alloc] init];
     [vc setValue:name forKey:@"wallpaperName"];
@@ -2038,7 +2021,6 @@ static NSString * GetPrefsPlistPath() {
     self.view.backgroundColor = [UIColor blackColor];
     self.title = self.imagePath.lastPathComponent;
     
-    // 【新增】：现代化的顶部导航栏按钮
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(dismissSelf)];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存相册" style:UIBarButtonItemStyleDone target:self action:@selector(saveImageToAlbum)];
     
@@ -2072,7 +2054,6 @@ static NSString * GetPrefsPlistPath() {
                                         scrollView.contentSize.height * 0.5 + offsetY);
 }
 
-// 【新增】：保存图片到相册的逻辑
 - (void)saveImageToAlbum {
     if (self.imageView.image) {
         UIImageWriteToSavedPhotosAlbum(self.imageView.image, self, @selector(image:didFinishSavingWithError:contextInfo:), nil);
@@ -2186,7 +2167,6 @@ static NSString * GetPrefsPlistPath() {
     
     UIGraphicsBeginImageContextWithOptions(self.targetSize, NO, 1.0);
     
-    // 【核心修复】：支持透明图片无损转换！每次绘制前强制清空上下文，保证纯透明通道。
     CGContextRef context = UIGraphicsGetCurrentContext();
     CGContextClearRect(context, CGRectMake(0, 0, self.targetSize.width, self.targetSize.height));
     
@@ -2273,7 +2253,6 @@ static NSString * GetPrefsPlistPath() {
     NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:imgSubPath];
     BOOL hasBackup = [[NSFileManager defaultManager] fileExistsAtPath:[fullPath stringByAppendingString:@".bak"]];
     
-    // 获取图片真实物理尺寸 (极速读取文件头，不加载整图，无惧内存堆积与卡顿)
     CGSize imgSize = CGSizeZero;
     NSURL *imgURL = [NSURL fileURLWithPath:fullPath];
     CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)imgURL, NULL);
@@ -2307,7 +2286,6 @@ static NSString * GetPrefsPlistPath() {
         cell.imageView.image = nil;
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             @autoreleasepool {
-                // 用 NSData 读取彻底破除强缓存
                 NSData *imgData = [NSData dataWithContentsOfFile:fullPath];
                 UIImage *img = [UIImage imageWithData:imgData];
                 if (img) {
@@ -2340,7 +2318,6 @@ static NSString * GetPrefsPlistPath() {
         NSString *imgSubPath = self.imageFiles[indexPath.row];
         NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:imgSubPath];
         
-        // 【新增】：带导航栏的预览页，支持保存
         ZoneImagePreviewViewController *vc = [[ZoneImagePreviewViewController alloc] init];
         vc.imagePath = fullPath;
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
@@ -2374,7 +2351,6 @@ static NSString * GetPrefsPlistPath() {
             [fm removeItemAtPath:fullPath error:nil];
             [fm moveItemAtPath:[fullPath stringByAppendingString:@".bak"] toPath:fullPath error:nil];
             [self.thumbCache removeObjectForKey:imgSubPath];
-            // 【修复杂闪】：采用平滑的 Fade 动画单行刷新
             [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
             if (self.reloadCallback) self.reloadCallback();
         }]];
@@ -2432,7 +2408,6 @@ static NSString * GetPrefsPlistPath() {
 - (void)presentCropViewControllerWithImage:(UIImage *)img {
     if (!img || !self.replacingImagePath) return;
     
-    // 【核心修复】：直接读取底层图像物理分辨率，无视苹果的 2x/3x 缩放点数机制
     NSData *origData = [NSData dataWithContentsOfFile:self.replacingImagePath];
     UIImage *orig = [UIImage imageWithData:origData];
     if (!orig) return;
@@ -2481,7 +2456,6 @@ static NSString * GetPrefsPlistPath() {
         [self.thumbCache setObject:newThumb forKey:fileName];
     }
     
-    // 【终极修复】：放入主线程异步队列，等弹窗动画彻底结束后调用 loadImages，让它强制触发全局刷新！
     dispatch_async(dispatch_get_main_queue(), ^{
         [self loadImages];
         if (self.reloadCallback) self.reloadCallback();
@@ -2507,7 +2481,6 @@ static NSString * GetPrefsPlistPath() {
     
     if (didRestore) {
         [self.thumbCache removeAllObjects];
-        // 【防闪烁修复】：列表恢复图片时用优雅的交叉溶解动画代替瞬间白屏
         [UIView transitionWithView:self.tableView duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
             [self loadImages];
         } completion:^(BOOL finished) {
@@ -2554,11 +2527,9 @@ static NSString * GetPrefsPlistPath() {
     if (!caml) caml = @"";
     
     if (!self.fromState) {
-        // 完整 CAML 模式
         self.textView.text = caml;
         self.matchedRange = NSMakeRange(0, caml.length);
     } else {
-        // 匹配特定的 LKStateTransition
         NSString *pattern = [NSString stringWithFormat:@"(?s)<LKStateTransition[^>]*fromState=\"%@[^>]*toState=\"%@\".*?</LKStateTransition>", self.fromState, self.toState];
         NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
         NSTextCheckingResult *match = [regex firstMatchInString:caml options:0 range:NSMakeRange(0, caml.length)];
@@ -2567,7 +2538,6 @@ static NSString * GetPrefsPlistPath() {
             self.matchedRange = match.range;
             self.textView.text = [caml substringWithRange:match.range];
         } else {
-            // 没有找到，生成一个模板供用户直接填入
             self.matchedRange = NSMakeRange(NSNotFound, 0);
             self.textView.text = [NSString stringWithFormat:@"<LKStateTransition fromState=\"%@\" toState=\"%@\">\n  <elements>\n    <!-- 在此添加对图层 [%@] 的动画属性 -->\n  </elements>\n</LKStateTransition>", self.fromState, self.toState, self.layerName];
         }
@@ -2585,7 +2555,6 @@ static NSString * GetPrefsPlistPath() {
     if (self.matchedRange.location != NSNotFound) {
         [mut replaceCharactersInRange:self.matchedRange withString:self.textView.text];
     } else {
-        // 作为新的 Transition 插入
         NSRange insertRange = [mut rangeOfString:@"</stateTransitions>"];
         if (insertRange.location != NSNotFound) {
             [mut insertString:[NSString stringWithFormat:@"%@\n", self.textView.text] atIndex:insertRange.location];
@@ -2660,8 +2629,7 @@ static NSString * GetPrefsPlistPath() {
         self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(dismissSelf)];
     }
 
-    // 监听 CAML 编辑器保存后的刷新命令
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(loadWallpaperEngine) name:@"ZoneReloadEnginePreview" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadEnginePreview) name:@"ZoneReloadEnginePreview" object:nil];
 
     [self setupUI];
     [self loadWallpaperEngine];
@@ -2742,11 +2710,10 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:self.bottomToolbar];
 }
 
-// 帮助弹窗提示
 - (void)showToast:(NSString *)msg {
-    UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 200, 40)];
+    UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 220, 40)];
     toast.center = CGPointMake(self.view.bounds.size.width/2, self.view.bounds.size.height - 100);
-    toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
+    toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
     toast.textColor = [UIColor whiteColor];
     toast.textAlignment = NSTextAlignmentCenter;
     toast.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
@@ -2757,13 +2724,12 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:toast];
 
     [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 1.0; } completion:^(BOOL finished) {
-        [UIView animateWithDuration:0.3 delay:1.0 options:0 animations:^{ toast.alpha = 0.0; } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.3 delay:1.5 options:0 animations:^{ toast.alpha = 0.0; } completion:^(BOOL finished) {
             [toast removeFromSuperview];
         }];
     }];
 }
 
-// 彻底修复低系统上的 Package 创建逻辑，告别 NSInvocation 闪退
 - (UIView *)createPackageViewWithURL:(NSURL *)url {
     dlopen("/System/Library/PrivateFrameworks/BaseBoardUI.framework/BaseBoardUI", RTLD_LAZY);
     
@@ -2780,7 +2746,25 @@ static NSString * GetPrefsPlistPath() {
     
     ZoneEditorFallbackView *container = [[ZoneEditorFallbackView alloc] initWithFrame:CGRectZero];
     
-    // 使用直接声明的 CAPackage 类操作，完全丢弃导致崩溃的反射代码
+    Class UICPClass = NSClassFromString(@"_UICAPackageView");
+    if (UICPClass) {
+        @try {
+            id packageView = [UICPClass alloc];
+            if ([packageView respondsToSelector:NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:")]) {
+                id (*imp)(id, SEL, id, id) = (id(*)(id, SEL, id, id))[packageView methodForSelector:NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:")];
+                if (imp) {
+                    packageView = imp(packageView, NSSelectorFromString(@"initWithContentsOfURL:publishedObjectViewClassMap:"), url, nil);
+                    if (packageView) {
+                        [packageView setAutoresizingMask:(UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight)];
+                        [container addSubview:packageView];
+                        container.uicpView = packageView;
+                        return container;
+                    }
+                }
+            }
+        } @catch(NSException *e) {}
+    }
+    
     Class capClass = NSClassFromString(@"CAPackage");
     if (capClass && [capClass respondsToSelector:@selector(packageWithContentsOfURL:type:options:error:)]) {
         id package = [capClass packageWithContentsOfURL:url type:@"com.apple.coreanimation-package" options:nil error:nil];
@@ -2876,7 +2860,17 @@ static NSString * GetPrefsPlistPath() {
     if (!view) return;
     if ([view isKindOfClass:[ZoneEditorFallbackView class]]) {
         ZoneEditorFallbackView *fbView = (ZoneEditorFallbackView *)view;
-        if (fbView.stateController && fbView.package) {
+        if (fbView.uicpView) {
+            if ([fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:animated:")]) {
+                void (*imp)(id, SEL, id, BOOL) = (void(*)(id, SEL, id, BOOL))[fbView.uicpView methodForSelector:NSSelectorFromString(@"setState:animated:")];
+                if (imp) imp(fbView.uicpView, NSSelectorFromString(@"setState:animated:"), state, YES);
+            } else if ([fbView.uicpView respondsToSelector:NSSelectorFromString(@"setState:")]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                @try { [fbView.uicpView performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e){}
+                #pragma clang diagnostic pop
+            }
+        } else if (fbView.stateController && fbView.package) {
             CALayer *root = nil;
             @try { root = [fbView.package valueForKey:@"rootLayer"]; } @catch(NSException *e){}
             if (root && [root isKindOfClass:[CALayer class]]) {
@@ -2884,11 +2878,14 @@ static NSString * GetPrefsPlistPath() {
             }
         }
     } else {
-        if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        if ([view respondsToSelector:NSSelectorFromString(@"setState:animated:")]) {
+            void (*imp)(id, SEL, id, BOOL) = (void(*)(id, SEL, id, BOOL))[view methodForSelector:NSSelectorFromString(@"setState:animated:")];
+            if (imp) imp(view, NSSelectorFromString(@"setState:animated:"), state, YES);
+        } else if ([view respondsToSelector:NSSelectorFromString(@"setState:")]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             @try { [view performSelector:NSSelectorFromString(@"setState:") withObject:state]; } @catch(NSException *e){}
-#pragma clang diagnostic pop
+            #pragma clang diagnostic pop
         }
     }
 }
@@ -2926,11 +2923,9 @@ static NSString * GetPrefsPlistPath() {
     [CATransaction commit];
 }
 
-// 核心优化：递归寻找有效命名图层，排除包包装器造成的捕获偏移
 - (CALayer *)hitTestNamedLayerInTree:(CALayer *)layer point:(CGPoint)p {
     CALayer *hit = [layer hitTest:p];
     while (hit && hit != layer) {
-        // 图层拥有合法的名字且非根节点时，就说明点中了实际业务图层
         if (hit.name.length > 0 && ![hit.name isEqualToString:@"rootLayer"]) {
             return hit;
         }
@@ -2943,7 +2938,6 @@ static NSString * GetPrefsPlistPath() {
     CGPoint point = [gesture locationInView:self.previewContainer];
     self.selectedHitLayer = nil;
     
-    // 逆向遍历：前景 -> 悬浮 -> 背景
     NSArray *views = @[self.fgView ?: [NSNull null], self.floatingView ?: [NSNull null], self.bgView ?: [NSNull null]];
     NSArray *paths = @[self.fgPkgPath ?: @"", self.floatPkgPath ?: @"", self.bgPkgPath ?: @""];
     
@@ -3005,7 +2999,7 @@ static NSString * GetPrefsPlistPath() {
     } else if (gesture.state == UIGestureRecognizerStateChanged) {
         CGFloat dx = translation.x / scaleX;
         CGFloat dy = translation.y / scaleY;
-        if (isFlipped) dy = -dy; // 修正坐标翻转
+        if (isFlipped) dy = -dy; 
         
         CGPoint newPos = CGPointMake(self.panStartPos.x + dx, self.panStartPos.y + dy);
         [CATransaction begin];
@@ -3025,7 +3019,6 @@ static NSString * GetPrefsPlistPath() {
     [self presentViewController:picker animated:YES completion:nil];
 }
 
-// 核心优化：保存后实时将内存里的 CGImage 塞回渲染引擎，秒级预览无需读盘
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
     UIImage *img = info[UIImagePickerControllerOriginalImage];
     [picker dismissViewControllerAnimated:YES completion:^{
@@ -3037,17 +3030,17 @@ static NSString * GetPrefsPlistPath() {
             NSData *data = UIImagePNGRepresentation(img);
             [data writeToFile:targetImgPath atomically:YES];
             
-            // 🔥 直接强行替换内存层渲染，让高级预览瞬间生效
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             self.selectedHitLayer.contents = (__bridge id)img.CGImage;
             [CATransaction commit];
+            
+            [self bustCacheAndApply];
             [self showToast:@"图片替换已更新"];
         }
     }];
 }
 
-// 核心优化：图层动画按钮变更为功能齐全的弹窗
 - (void)editAnimation {
     if (!self.selectedLayerPath || !self.selectedLayerName) return;
     
@@ -3130,10 +3123,42 @@ static NSString * GetPrefsPlistPath() {
     if (modified) [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
+- (void)bustCacheAndApply {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *contents = [fm contentsOfDirectoryAtPath:self.wallpaperPath error:nil];
+    for (NSString *subPath in contents) {
+        if ([subPath.pathExtension.lowercaseString isEqualToString:@"ca"]) {
+            NSString *fullPath = [self.wallpaperPath stringByAppendingPathComponent:subPath];
+            NSString *nameWithoutExt = [subPath stringByDeletingPathExtension];
+            
+            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"_rev\\d+$" options:0 error:nil];
+            NSString *baseName = [regex stringByReplacingMatchesInString:nameWithoutExt options:0 range:NSMakeRange(0, nameWithoutExt.length) withTemplate:@""];
+            
+            int randomSuffix = arc4random_uniform(100000);
+            NSString *newName = [NSString stringWithFormat:@"%@_rev%d.ca", baseName, randomSuffix];
+            NSString *newFullPath = [self.wallpaperPath stringByAppendingPathComponent:newName];
+            
+            [fm moveItemAtPath:fullPath toPath:newFullPath error:nil];
+            
+            if ([self.bgPkgPath isEqualToString:fullPath]) self.bgPkgPath = newFullPath;
+            if ([self.floatPkgPath isEqualToString:fullPath]) self.floatPkgPath = newFullPath;
+            if ([self.fgPkgPath isEqualToString:fullPath]) self.fgPkgPath = newFullPath;
+            if ([self.selectedLayerPath isEqualToString:fullPath]) self.selectedLayerPath = newFullPath;
+        }
+    }
+    
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+}
+
+- (void)reloadEnginePreview {
+    [self bustCacheAndApply];
+    [self loadWallpaperEngine];
+    [self showToast:@"已应用修改"];
+}
+
 - (void)moveLayerUp { [self modifyLayerZPosition:1]; }
 - (void)moveLayerDown { [self modifyLayerZPosition:-1]; }
 
-// 核心优化：去除了烦人的弹窗确认，默默更新，到底/顶时才发消息
 - (void)modifyLayerZPosition:(int)direction {
     if (!self.selectedHitLayer || !self.selectedLayerName) return;
     CALayer *parent = self.selectedHitLayer.superlayer;
@@ -3158,13 +3183,13 @@ static NSString * GetPrefsPlistPath() {
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    // 跨越同级图层
     self.selectedHitLayer.zPosition += (direction * 10.0);
     [CATransaction commit];
     
     NSString *newZ = [NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition];
     [self updateCAMLProperty:@"zPosition" value:newZ];
     
+    [self bustCacheAndApply]; 
     [self showToast:direction > 0 ? @"已上移一层" : @"已下移一层"];
 }
 
@@ -3174,49 +3199,14 @@ static NSString * GetPrefsPlistPath() {
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"强制隐藏" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         [self updateCAMLProperty:@"opacity" value:@"0"];
+        [self bustCacheAndApply];
         [self loadWallpaperEngine];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)saveAndApply {
-    CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)self.wallpaperPath, CFSTR("com.iosdump.zoneprefs"));
-    CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
-    
-    NSString *plistPath = @"/var/mobile/Library/Preferences/com.iosdump.zoneprefs.plist";
-#if __has_include(<roothide.h>)
-    plistPath = jbroot(plistPath);
-#else
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/"]) {
-        plistPath = [@"/var/jb" stringByAppendingPathComponent:plistPath];
-    }
-#endif
-    
-    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] ?: [NSMutableDictionary dictionary];
-    prefs[@"ZonePath"] = self.wallpaperPath;
-    [prefs writeToFile:plistPath atomically:YES];
-    
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已保存！\n如果在桌面或锁屏没有马上看到变化(受系统进程内存缓存影响)，请点击强制注销使其生效。" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"仅保存" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-        [self dismissViewControllerAnimated:YES completion:nil];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"注销并生效" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [self dismissViewControllerAnimated:YES completion:^{
-            pid_t pid;
-            NSString *killallPath = @"/usr/bin/killall";
-#if __has_include(<roothide.h>)
-            killallPath = jbroot(killallPath);
-#else
-            if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
-                killallPath = @"/var/jb/usr/bin/killall";
-            }
-#endif
-            const char *args[] = {"killall", "-9", "backboardd", NULL};
-            posix_spawn(&pid, [killallPath UTF8String], NULL, NULL, (char *const *)args, environ);
-        }];
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
+    [self bustCacheAndApply];
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 @end
