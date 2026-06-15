@@ -2528,7 +2528,7 @@ static NSString * GetPrefsPlistPath() {
 @end
 
 // =======================================================
-// CAML 独立代码编辑器
+// 全新模块：CAML 独立代码编辑器 (支持智能代码截取与回注)
 // =======================================================
 @interface ZoneCAMLEditorViewController : UIViewController
 @property (nonatomic, copy) NSString *camlPath;
@@ -2550,7 +2550,7 @@ static NSString * GetPrefsPlistPath() {
 
     self.textView = [[UITextView alloc] initWithFrame:self.view.bounds];
     self.textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.textView.font = [UIFont fontWithName:@"Menlo" size:13];
+    self.textView.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
     self.textView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
     self.textView.textColor = [UIColor whiteColor];
     self.textView.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -2568,7 +2568,10 @@ static NSString * GetPrefsPlistPath() {
         return;
     }
     
-    // 智能截取属于该图层在目标状态下的代码块
+    // 🛡️ 【核心修复】：分离 < 和 !-- 防止 Theos 编译环境脚本把注释当做真注释给抹除导致空字符串报错
+    NSString *cStart = @"<"; cStart = [cStart stringByAppendingString:@"!-"]; cStart = [cStart stringByAppendingString:@"-"];
+    NSString *cEnd = @"-"; cEnd = [cEnd stringByAppendingString:@"->"];
+    
     NSString *statePattern = [NSString stringWithFormat:@"<LKState[^>]*name=\"%@\"[^>]*>(.*?)</LKState>", self.targetState];
     NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
     NSTextCheckingResult *stateMatch = [stateRegex firstMatchInString:content options:0 range:NSMakeRange(0, content.length)];
@@ -2586,10 +2589,10 @@ static NSString * GetPrefsPlistPath() {
             }
             self.textView.text = extracted;
         } else {
-            self.textView.text = [NSString stringWithFormat:@"\n<LKStateSetValue targetId=\"%@\" keyPath=\"opacity\">\n  <value type=\"real\">1.0</value>\n</LKStateSetValue>", self.layerName];
+            self.textView.text = [NSString stringWithFormat:@"%@ 当前状态无此图层动画，可直接在此编辑添加 %@\n<LKStateSetValue targetId=\"%@\" keyPath=\"opacity\">\n  <value type=\"real\">1.0</value>\n</LKStateSetValue>", cStart, cEnd, self.layerName];
         }
     } else {
-        self.textView.text = [NSString stringWithFormat:@"", self.targetState];
+        self.textView.text = [NSString stringWithFormat:@"%@ 未找到 %@ 状态定义，请检查 CAML 文件完整性 %@", cStart, self.targetState, cEnd];
     }
 }
 
@@ -2598,7 +2601,6 @@ static NSString * GetPrefsPlistPath() {
     if (self.isFullMode) {
         [self.textView.text writeToFile:self.camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } else {
-        // 智能注回 CAML 文件
         NSString *statePattern = [NSString stringWithFormat:@"(<LKState[^>]*name=\"%@\"[^>]*>\\s*<elements>)(.*?)(</elements>\\s*</LKState>)", self.targetState];
         NSRegularExpression *stateRegex = [NSRegularExpression regularExpressionWithPattern:statePattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
         NSTextCheckingResult *stateMatch = [stateRegex firstMatchInString:content options:0 range:NSMakeRange(0, content.length)];
@@ -2745,7 +2747,7 @@ static NSString * GetPrefsPlistPath() {
     [self.view addSubview:self.bottomToolbar];
 }
 
-// 提取轻量提示组件（Toast）
+// 🎯 【新增】：轻量级 Toast 提示组件，摆脱繁琐的 Alert 拦截操作
 - (void)showToast:(NSString *)msg {
     UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 240, 40)];
     toast.center = CGPointMake(self.view.bounds.size.width / 2, self.view.bounds.size.height - 100);
@@ -2770,7 +2772,7 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// 核心触发全局刷新
+// 🎯 【新增】：跨进程通信全局重载，实现“真·实时生效”
 - (void)triggerGlobalReload {
     CFPreferencesSetAppValue(CFSTR("ZonePath"), (__bridge CFStringRef)self.wallpaperPath, CFSTR("com.iosdump.zoneprefs"));
     CFPreferencesAppSynchronize(CFSTR("com.iosdump.zoneprefs"));
@@ -2786,6 +2788,7 @@ static NSString * GetPrefsPlistPath() {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             id pkg = nil;
+            // 包裹 @try-@catch 彻底隔绝低系统版本识别导致的崩溃
             @try { pkg = [[BSUIPackageClass alloc] performSelector:NSSelectorFromString(@"initWithURL:") withObject:url]; } @catch(NSException *e){}
             if (pkg) return pkg;
 #pragma clang diagnostic pop
@@ -3006,22 +3009,26 @@ static NSString * GetPrefsPlistPath() {
     [CATransaction commit];
 }
 
-// 核心修复：纯手工深度探测防止点击错乱
+// 🎯 【核心修复】：利用纯手工层级探测算法，无视任何缩放变换导致的触控点错乱
 - (CALayer *)deepestLayerAtPoint:(CGPoint)p inLayer:(CALayer *)rootLayer {
     if (rootLayer.isHidden || rootLayer.opacity < 0.01) return nil;
     
     CGPoint convertedPoint = [self.previewContainer.layer convertPoint:p toLayer:rootLayer];
-    if (!CGRectContainsPoint(rootLayer.bounds, convertedPoint)) return nil;
+    
+    if (rootLayer.masksToBounds && !CGRectContainsPoint(rootLayer.bounds, convertedPoint)) {
+        return nil;
+    }
     
     CALayer *hit = nil;
-    // 逆向遍历确保永远点中可视最上层
     for (CALayer *sub in [rootLayer.sublayers reverseObjectEnumerator]) {
         hit = [self deepestLayerAtPoint:p inLayer:sub];
         if (hit) return hit;
     }
     
-    if (rootLayer.name.length > 0 && ![rootLayer.name isEqualToString:@"rootLayer"]) {
-        return rootLayer;
+    if (CGRectContainsPoint(rootLayer.bounds, convertedPoint)) {
+        if (rootLayer.name.length > 0 && ![rootLayer.name isEqualToString:@"rootLayer"]) {
+            return rootLayer;
+        }
     }
     return nil;
 }
@@ -3098,7 +3105,7 @@ static NSString * GetPrefsPlistPath() {
         NSString *newVal = [NSString stringWithFormat:@"%.1f %.1f", self.selectedHitLayer.position.x, self.selectedHitLayer.position.y];
         [self updateCAMLProperty:@"position" value:newVal];
         [self triggerGlobalReload];
-        [self showToast:@"位置已自动保存"];
+        [self showToast:@"位置已自动保存并生效"];
     }
 }
 
@@ -3127,9 +3134,7 @@ static NSString * GetPrefsPlistPath() {
     }];
 }
 
-// ==========================================
-// 全新抽离的图层动画选择逻辑
-// ==========================================
+// 🎯 【新增】：呼出独立 CAML 弹窗编辑器选择菜单
 - (void)editAnimation {
     if (!self.selectedLayerPath || !self.selectedLayerName) return;
     
@@ -3216,7 +3221,7 @@ static NSString * GetPrefsPlistPath() {
     if (modified) [caml writeToFile:camlPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
-// 核心优化：上下移不弹窗
+// 🎯 【核心优化】：上下移取消弹窗，全自动计算兄弟节点并 Toast 反馈
 - (void)moveLayerUp { [self modifyLayerZPosition:1]; }
 - (void)moveLayerDown { [self modifyLayerZPosition:-1]; }
 
@@ -3238,6 +3243,8 @@ static NSString * GetPrefsPlistPath() {
     }];
 
     NSUInteger currentIndex = [sorted indexOfObject:self.selectedHitLayer];
+    if (currentIndex == NSNotFound) return;
+    
     if (direction > 0 && currentIndex == sorted.count - 1) {
         [self showToast:@"已经是最顶层"];
         return;
@@ -3257,7 +3264,7 @@ static NSString * GetPrefsPlistPath() {
     NSString *newZ = [NSString stringWithFormat:@"%f", self.selectedHitLayer.zPosition];
     [self updateCAMLProperty:@"zPosition" value:newZ];
     
-    [self showToast:@"层级已调整，正在自动保存生效"];
+    [self showToast:@"层级已调整，已自动保存生效"];
     [self triggerGlobalReload];
 }
 
@@ -3276,6 +3283,26 @@ static NSString * GetPrefsPlistPath() {
 
 - (void)saveAndApply {
     [self triggerGlobalReload];
-    [self showToast:@"保存成功并已实时生效"];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"配置已保存并尝试实时生效！\n如果系统桌面因内存限制未能马上看到变化，可点击强制注销刷新缓存。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"完成" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"注销 (Respring)" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [self dismissViewControllerAnimated:YES completion:^{
+            pid_t pid;
+            NSString *killallPath = @"/usr/bin/killall";
+#if __has_include(<roothide.h>)
+            killallPath = jbroot(killallPath);
+#else
+            if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/usr/bin/killall"]) {
+                killallPath = @"/var/jb/usr/bin/killall";
+            }
+#endif
+            const char *args[] = {"killall", "-9", "backboardd", NULL};
+            posix_spawn(&pid, [killallPath UTF8String], NULL, NULL, (char *const *)args, environ);
+        }];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 @end
