@@ -2926,7 +2926,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 }
 
 // =======================================================
-// 【核心修复】无缝加载完整三层架构引擎
+// 【核心 ARC 修复】：无双指针安全加载完整三层架构引擎
 // =======================================================
 - (void)loadWallpaperEngine {
     if (self.bgView) { [self.bgView removeFromSuperview]; self.bgView = nil; }
@@ -2955,29 +2955,49 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         }
     }
     
-    void (^setupLayer)(NSString *, ZoneEditorPackageView **, ZoneEditorCAMLParser **, NSMutableDictionary **, NSString **) = ^(NSString *path, ZoneEditorPackageView **view, ZoneEditorCAMLParser **parser, NSMutableDictionary **map, NSString **camlPath) {
+    // 使用 weakSelf 和 layerType 索引安全赋值，彻底避开 ARC 写回警告 (write-back error)
+    __weak typeof(self) weakSelf = self;
+    void (^setupLayer)(NSString *, NSInteger) = ^(NSString *path, NSInteger layerType) {
         if (!path) return;
-        *camlPath = [path stringByAppendingPathComponent:@"main.caml"];
-        *view = [[ZoneEditorPackageView alloc] initWithURL:[NSURL fileURLWithPath:path isDirectory:YES]];
-        (*view).frame = self.canvasContainer.bounds;
-        [self.canvasContainer insertSubview:*view atIndex:self.canvasContainer.subviews.count]; // 顺序叠加
+        NSString *camlPath = [path stringByAppendingPathComponent:@"main.caml"];
+        ZoneEditorPackageView *view = [[ZoneEditorPackageView alloc] initWithURL:[NSURL fileURLWithPath:path isDirectory:YES]];
+        view.frame = weakSelf.canvasContainer.bounds;
+        [weakSelf.canvasContainer insertSubview:view atIndex:weakSelf.canvasContainer.subviews.count]; // 顺序叠加
         
-        *parser = [[ZoneEditorCAMLParser alloc] init];
-        [*parser parseFile:*camlPath];
+        ZoneEditorCAMLParser *parser = [[ZoneEditorCAMLParser alloc] init];
+        [parser parseFile:camlPath];
         
-        CALayer *rootLayer = (*view).rootLayer;
+        NSMutableDictionary *map = [NSMutableDictionary dictionary];
+        CALayer *rootLayer = view.rootLayer;
         if (rootLayer) {
-            (*view).layer.geometryFlipped = !(*parser).isGeometryFlipped;
-            CGFloat scale = self.canvasContainer.bounds.size.width / 390.0; 
+            view.layer.geometryFlipped = !parser.isGeometryFlipped;
+            CGFloat scale = weakSelf.canvasContainer.bounds.size.width / 390.0; 
             rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
-            rootLayer.position = CGPointMake(self.canvasContainer.bounds.size.width / 2.0, self.canvasContainer.bounds.size.height / 2.0);
-            [self buildLayerMap:rootLayer targetMap:*map];
+            rootLayer.position = CGPointMake(weakSelf.canvasContainer.bounds.size.width / 2.0, weakSelf.canvasContainer.bounds.size.height / 2.0);
+            [weakSelf buildLayerMap:rootLayer targetMap:map];
+        }
+        
+        if (layerType == 0) {
+            weakSelf.bgView = view;
+            weakSelf.bgParser = parser;
+            weakSelf.bgLayerMap = map;
+            weakSelf.bgCamlPath = camlPath;
+        } else if (layerType == 1) {
+            weakSelf.floatingView = view;
+            weakSelf.floatParser = parser;
+            weakSelf.floatLayerMap = map;
+            weakSelf.floatCamlPath = camlPath;
+        } else if (layerType == 2) {
+            weakSelf.fgView = view;
+            weakSelf.fgParser = parser;
+            weakSelf.fgLayerMap = map;
+            weakSelf.fgCamlPath = camlPath;
         }
     };
     
-    setupLayer(foundBg, &_bgView, &_bgParser, &_bgLayerMap, &_bgCamlPath);
-    setupLayer(foundFloat, &_floatingView, &_floatParser, &_floatLayerMap, &_floatCamlPath);
-    setupLayer(foundFg, &_fgView, &_fgParser, &_fgLayerMap, &_fgCamlPath);
+    setupLayer(foundBg, 0);
+    setupLayer(foundFloat, 1);
+    setupLayer(foundFg, 2);
     
     [self.canvasContainer bringSubviewToFront:self.highlightBorderView]; // 边框放最上层
     
