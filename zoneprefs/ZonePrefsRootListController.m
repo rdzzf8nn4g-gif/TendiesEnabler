@@ -2516,6 +2516,20 @@ static NSString * GetPrefsPlistPath() {
 @property (nonatomic, copy) NSString *currentCamlString;
 @end
 
+// ==========================================
+// 补全系统私有类的头文件声明，防止编译报错
+// ==========================================
+@interface BSUICAPackageView : UIView
+- (instancetype)initWithURL:(NSURL *)url;
+- (BOOL)setState:(NSString *)state;
+- (BOOL)setState:(NSString *)state animated:(BOOL)animated;
+@end
+
+@interface _UICAPackageView : UIView
+- (instancetype)initWithContentsOfURL:(NSURL *)url publishedObjectViewClassMap:(NSDictionary *)map;
+- (BOOL)setState:(NSString *)state;
+@end
+
 @implementation ZoneAdvancedEditorViewController
 
 - (void)viewDidLoad {
