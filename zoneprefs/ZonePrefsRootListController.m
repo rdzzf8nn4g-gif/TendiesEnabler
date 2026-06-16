@@ -3603,19 +3603,19 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"%.1f\" opacity=\"0\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, newZ, fileName];
     
-    // 【终极防错插入算法】：把图层精确追加到父级 sublayers 的最后一行，真正保证触控可选中！
+    // 【核心修复】：直接把新建的层追加到 sublayers 的最后一行，真正保证能被第一顺位点中！
     NSRange lastSublayersRange = [camlString rangeOfString:@"</sublayers>" options:NSBackwardsSearch];
     if (lastSublayersRange.location != NSNotFound) {
         camlString = [camlString stringByReplacingCharactersInRange:lastSublayersRange withString:[NSString stringWithFormat:@"%@\n        </sublayers>", layerXml]];
     } else {
-        // 如果文件结构破损缺失 sublayers 标签，就强行打到最后面
         camlString = [camlString stringByAppendingString:layerXml];
     }
     
-    NSArray *states = @[@"Locked", @"Unlock", @"Sleep"];
-    NSString *currentStateName = states[self.stateSegment.selectedSegmentIndex];
+    // 修复状态错乱：严格对齐当前 Segment 的数组顺序 0=Sleep, 1=Locked, 2=Unlock
+    NSArray *stateNames = @[@"Sleep", @"Locked", @"Unlock"];
+    NSString *currentStateName = stateNames[self.stateSegment.selectedSegmentIndex];
     
-    for (NSString *state in states) {
+    for (NSString *state in stateNames) {
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"position.x" value:195];
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"position.y" value:422];
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"bounds.size.width" value:w];
@@ -3831,7 +3831,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (maxZ == -CGFLOAT_MAX) maxZ = 0;
     if (minZ == CGFLOAT_MAX) minZ = 0;
 
-    // 【新增极限值拦截提示】
     if (direction > 0 && currentZ > maxZ) {
         [self showTemporaryStatus:@"已在最上层"];
         return;
@@ -3933,7 +3932,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"保存成功" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"您的所有修改已被永久保存至配置。\n系统锁屏/桌面壁纸已同步刷新。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
