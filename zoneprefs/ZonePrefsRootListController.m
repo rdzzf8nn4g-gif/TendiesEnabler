@@ -2757,7 +2757,7 @@ static NSString * GetPrefsPlistPath() {
 // -------------------------------------------------------
 // 5. KVC 安全赋值函数
 // -------------------------------------------------------
-static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
+static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (!layer || !keyPath || !value) return;
     if ([keyPath isEqualToString:@"position.x"]) {
         CGPoint p = layer.position; p.x = [value doubleValue]; layer.position = p; return;
@@ -2771,6 +2771,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         layer.position = [value CGPointValue]; return;
     } else if ([keyPath isEqualToString:@"zPosition"]) {
         layer.zPosition = [value doubleValue]; return;
+    } else if ([keyPath isEqualToString:@"transform.rotation.z"]) {
+        [layer setValue:@([value doubleValue]) forKeyPath:keyPath]; return;
     }
     @try { [layer setValue:value forKeyPath:keyPath]; } @catch (NSException *e) {}
 }
@@ -2813,6 +2815,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 @property (nonatomic, strong) UIStackView *bottomToolbar;
 @property (nonatomic, strong) UILabel *tipLabel;
 @property (nonatomic, strong) UILabel *statusLabel; 
+@property (nonatomic, strong) UILabel *hintLabel; 
 
 @property (nonatomic, strong) CALayer *selectedLayer;
 @property (nonatomic, strong) UIView *highlightBorderView;
@@ -2825,6 +2828,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 @property (nonatomic, assign) NSInteger targetInsertLevel; 
 @property (nonatomic, assign) CGPoint initialPanCenter;
 @property (nonatomic, assign) CGRect initialPinchBounds;
+@property (nonatomic, assign) CGFloat initialRotationAngle;
 @property (nonatomic, assign) NSInteger statusMessageId; // 控制状态文字生命周期
 
 @property (nonatomic, copy) NSString *currentCamlPath;
@@ -2837,19 +2841,23 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.title = @"高级编辑";
     
+    // 【无损安全备份机制 .bak，防卡死全异步处理】
     self.originalWallpaperPath = self.wallpaperPath;
-    NSString *backupPath = [self.originalWallpaperPath stringByAppendingString:@"_backup"];
+    NSString *backupPath = [self.originalWallpaperPath stringByAppendingPathExtension:@"bak"];
     self.workspacePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
     
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:backupPath]) {
-        [fm copyItemAtPath:self.originalWallpaperPath toPath:backupPath error:nil];
-    }
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:backupPath]) {
+            [fm copyItemAtPath:self.originalWallpaperPath toPath:backupPath error:nil];
+        }
+    });
     
+    NSFileManager *fm = [NSFileManager defaultManager];
     [fm createDirectoryAtPath:self.workspacePath withIntermediateDirectories:YES attributes:nil error:nil];
     NSArray *contents = [fm contentsOfDirectoryAtPath:self.originalWallpaperPath error:nil];
     for (NSString *item in contents) {
-        if ([item isEqualToString:@"_backup"]) continue;
+        if ([item hasSuffix:@".bak"]) continue;
         [fm copyItemAtPath:[self.originalWallpaperPath stringByAppendingPathComponent:item]
                     toPath:[self.workspacePath stringByAppendingPathComponent:item]
                      error:nil];
@@ -2863,7 +2871,15 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     UIBarButtonItem *saveBtn = [[UIBarButtonItem alloc] initWithTitle:@"保存" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndApply)];
     UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(actionInsertImage)];
-    UIBarButtonItem *undoBtn = [[UIBarButtonItem alloc] initWithTitle:@"撤销" style:UIBarButtonItemStylePlain target:self action:@selector(actionUndo)];
+    
+    // 【替换撤销按钮为系统原生的带有箭头的圈圈 UI】
+    UIBarButtonItem *undoBtn;
+    if (@available(iOS 13.0, *)) {
+        undoBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.uturn.backward.circle"] style:UIBarButtonItemStylePlain target:self action:@selector(actionUndo)];
+    } else {
+        undoBtn = [[UIBarButtonItem alloc] initWithTitle:@"撤销" style:UIBarButtonItemStylePlain target:self action:@selector(actionUndo)];
+    }
+    
     self.navigationItem.rightBarButtonItems = @[saveBtn, addBtn, undoBtn];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(closeEditor)];
     
@@ -2933,6 +2949,11 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     pinch.delegate = self;
     [self.canvasContainer addGestureRecognizer:pinch];
     
+    // 【新增：双指旋转手势】
+    UIRotationGestureRecognizer *rotation = [[UIRotationGestureRecognizer alloc] initWithTarget:self action:@selector(handleRotation:)];
+    rotation.delegate = self;
+    [self.canvasContainer addGestureRecognizer:rotation];
+    
     self.highlightBorderView = [[UIView alloc] init];
     self.highlightBorderView.backgroundColor = [[UIColor systemYellowColor] colorWithAlphaComponent:0.15];
     self.highlightBorderView.hidden = YES;
@@ -2960,16 +2981,30 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     self.bottomToolbar.hidden = YES;
     [self.view addSubview:self.bottomToolbar];
     
+    // 【新增：底部操作提示文字】
+    self.hintLabel = [[UILabel alloc] init];
+    self.hintLabel.text = @"点选图层•拖动/双指捏合/双指旋转";
+    self.hintLabel.textColor = [UIColor secondaryLabelColor];
+    self.hintLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    self.hintLabel.textAlignment = NSTextAlignmentCenter;
+    self.hintLabel.hidden = YES;
+    [self.view addSubview:self.hintLabel];
+    
     self.tipLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.bottomToolbar.translatesAutoresizingMaskIntoConstraints = NO;
+    self.hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    
     [NSLayoutConstraint activateConstraints:@[
-        [self.tipLabel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-30],
+        [self.tipLabel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-40],
         [self.tipLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         
-        [self.bottomToolbar.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-20],
+        [self.hintLabel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-5],
+        [self.hintLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        
+        [self.bottomToolbar.bottomAnchor constraintEqualToAnchor:self.hintLabel.topAnchor constant:-10],
         [self.bottomToolbar.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [self.bottomToolbar.widthAnchor constraintEqualToAnchor:self.view.widthAnchor multiplier:0.95],
-        [self.bottomToolbar.heightAnchor constraintEqualToConstant:50]
+        [self.bottomToolbar.heightAnchor constraintEqualToConstant:35]
     ]];
     
     [self setupToolbarButtons];
@@ -3003,13 +3038,21 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
 - (void)setupToolbarButtons {
     NSArray *titles = @[@"替换素材", @"图层动画", @"上移", @"下移", @"删除图层"];
     NSArray *actions = @[@"actionReplace:", @"actionAnimationMenu:", @"actionMoveUp:", @"actionMoveDown:", @"actionDelete:"];
+    NSArray *colors = @[[UIColor systemBlueColor], [UIColor systemGreenColor], [UIColor systemOrangeColor], [UIColor systemOrangeColor], [UIColor systemRedColor]];
     
     for (int i = 0; i < titles.count; i++) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         [btn setTitle:titles[i] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        [btn setTitleColor:colors[i] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+        
+        // 【UI 升级：圈圈包裹字体】
+        btn.layer.cornerRadius = 14;
+        btn.layer.borderWidth = 1;
+        btn.layer.borderColor = ((UIColor *)colors[i]).CGColor;
+        btn.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
+        
         [btn addTarget:self action:NSSelectorFromString(actions[i]) forControlEvents:UIControlEventTouchUpInside];
-        if (i == 4) [btn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
         [self.bottomToolbar addArrangedSubview:btn];
     }
 }
@@ -3043,28 +3086,42 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"警告" message:@"确定要恢复到最初的壁纸状态吗？\n所有未保存或已保存的修改都将丢失。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定恢复" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        NSString *backupPath = [self.originalWallpaperPath stringByAppendingString:@"_backup"];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if ([fm fileExistsAtPath:backupPath]) {
-            [fm removeItemAtPath:self.originalWallpaperPath error:nil];
-            [fm copyItemAtPath:backupPath toPath:self.originalWallpaperPath error:nil];
-            [fm removeItemAtPath:self.workspacePath error:nil];
-            [fm copyItemAtPath:backupPath toPath:self.workspacePath error:nil];
-            
-            self.bgCamlString = nil;
-            self.floatCamlString = nil;
-            self.fgCamlString = nil;
-            [self.undoStack removeAllObjects];
-            self.selectedLayer = nil;
-            self.selectedLayerName = nil;
-            
-            [self refreshCanvas];
-            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
-            
-            [self showTemporaryStatus:@"已恢复默认壁纸 (系统已同步)"];
-        } else {
-            [self showTemporaryStatus:@"未找到该壁纸的备份数据"];
-        }
+        
+        UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在恢复..." message:nil preferredStyle:UIAlertControllerStyleAlert];
+        [self presentViewController:loadingAlert animated:YES completion:^{
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+                NSString *backupPath = [self.originalWallpaperPath stringByAppendingPathExtension:@"bak"];
+                NSFileManager *fm = [NSFileManager defaultManager];
+                BOOL restored = NO;
+                if ([fm fileExistsAtPath:backupPath]) {
+                    [fm removeItemAtPath:self.originalWallpaperPath error:nil];
+                    [fm copyItemAtPath:backupPath toPath:self.originalWallpaperPath error:nil];
+                    [fm removeItemAtPath:self.workspacePath error:nil];
+                    [fm copyItemAtPath:backupPath toPath:self.workspacePath error:nil];
+                    restored = YES;
+                }
+                
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [loadingAlert dismissViewControllerAnimated:YES completion:^{
+                        if (restored) {
+                            self.bgCamlString = nil;
+                            self.floatCamlString = nil;
+                            self.fgCamlString = nil;
+                            [self.undoStack removeAllObjects];
+                            self.selectedLayer = nil;
+                            self.selectedLayerName = nil;
+                            
+                            [self refreshCanvas];
+                            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
+                            
+                            [self showTemporaryStatus:@"已恢复默认壁纸 (系统已同步)"];
+                        } else {
+                            [self showTemporaryStatus:@"未找到该壁纸的备份数据"];
+                        }
+                    }];
+                });
+            });
+        }];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -3195,7 +3252,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     NSRegularExpression *valRegex = [NSRegularExpression regularExpressionWithPattern:valPattern options:0 error:nil];
     elements = [valRegex stringByReplacingMatchesInString:elements options:0 range:NSMakeRange(0, elements.length) withTemplate:@"\n"];
 
-    NSString *newVal = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n            <value type=\"real\" value=\"%.2f\"/>\n          </LKStateSetValue>\n", tid, kp, val];
+    NSString *newVal = [NSString stringWithFormat:@"\n          <LKStateSetValue targetId=\"%@\" keyPath=\"%@\">\n            <value type=\"real\" value=\"%.4f\"/>\n          </LKStateSetValue>\n", tid, kp, val];
     elements = [elements stringByAppendingString:newVal];
 
     return [xml stringByReplacingCharactersInRange:[match rangeAtIndex:2] withString:elements];
@@ -3232,7 +3289,8 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     caml = [self updateLayerAttribute:caml layerId:tid attrName:@"position" attrValue:[NSString stringWithFormat:@"%.2f %.2f", pos.x, pos.y]];
 
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
-    caml = [self scrubStateValue:caml targetId:tid keyPath:@"position"];
+    caml = [self scrubStateValue:caml targetId:tid keyPath:@"position.x"];
+    caml = [self scrubStateValue:caml targetId:tid keyPath:@"position.y"];
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"position.x" value:pos.x];
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"position.y" value:pos.y];
 
@@ -3246,9 +3304,23 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     caml = [self updateLayerAttribute:caml layerId:tid attrName:@"bounds" attrValue:[NSString stringWithFormat:@"0 0 %.2f %.2f", bounds.size.width, bounds.size.height]];
 
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
-    caml = [self scrubStateValue:caml targetId:tid keyPath:@"bounds"];
+    caml = [self scrubStateValue:caml targetId:tid keyPath:@"bounds.size.width"];
+    caml = [self scrubStateValue:caml targetId:tid keyPath:@"bounds.size.height"];
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"bounds.size.width" value:bounds.size.width];
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"bounds.size.height" value:bounds.size.height];
+    
+    [self setActiveCamlString:caml];
+}
+
+- (void)saveLayerRotation:(CGFloat)angle targetId:(NSString *)tid {
+    NSString *caml = [self activeCamlString];
+    if (!caml || !tid) return;
+    
+    caml = [self updateLayerAttribute:caml layerId:tid attrName:@"transform.rotation.z" attrValue:[NSString stringWithFormat:@"%.4f", angle]];
+
+    NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
+    caml = [self scrubStateValue:caml targetId:tid keyPath:@"transform.rotation.z"];
+    caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"transform.rotation.z" value:angle];
     
     [self setActiveCamlString:caml];
 }
@@ -3304,6 +3376,28 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     }
 }
 
+- (void)handleRotation:(UIRotationGestureRecognizer *)rot {
+    if (!self.selectedLayer || !self.selectedLayerName) return;
+    
+    if (rot.state == UIGestureRecognizerStateBegan) {
+        [self pushUndoState];
+        NSNumber *currentZ = [self.selectedLayer valueForKeyPath:@"transform.rotation.z"];
+        self.initialRotationAngle = currentZ ? [currentZ floatValue] : 0.0;
+    } else if (rot.state == UIGestureRecognizerStateChanged) {
+        CGFloat newAngle = self.initialRotationAngle + rot.rotation;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        ZoneSafeSetLayerKVC(self.selectedLayer, @"transform.rotation.z", @(newAngle));
+        [CATransaction commit];
+        [self updateHighlightFrame];
+    } else if (rot.state == UIGestureRecognizerStateEnded || rot.state == UIGestureRecognizerStateCancelled) {
+        NSNumber *currentZ = [self.selectedLayer valueForKeyPath:@"transform.rotation.z"];
+        CGFloat finalAngle = currentZ ? [currentZ floatValue] : 0.0;
+        NSString *realId = self.selectedLayerId ?: self.selectedLayerName; 
+        [self saveLayerRotation:finalAngle targetId:realId];
+    }
+}
+
 - (void)stateChanged:(UISegmentedControl *)seg {
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][seg.selectedSegmentIndex];
     BOOL isDark = (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -3325,7 +3419,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
             NSDictionary *vals = parser.statesData[targetId][realState];
             for (NSString *keyPath in vals) {
                 [layer removeAnimationForKey:keyPath];
-                ZoneEditorSafeSetLayerKVC(layer, keyPath, vals[keyPath]);
+                ZoneSafeSetLayerKVC(layer, keyPath, vals[keyPath]);
             }
         }
     };
@@ -3385,12 +3479,14 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         
         self.tipLabel.hidden = YES;
         self.bottomToolbar.hidden = NO;
+        self.hintLabel.hidden = NO; // 显示双指操作提示
         [self updateStatusLabelWithIndex];
         [self updateHighlightFrame];
     } else {
         self.selectedLayer = nil;
         self.tipLabel.hidden = NO;
         self.bottomToolbar.hidden = YES;
+        self.hintLabel.hidden = YES; // 隐藏双指操作提示
         self.highlightBorderView.hidden = YES;
         self.statusLabel.text = @"";
     }
@@ -3402,8 +3498,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         CALayer *presLayer = sub.presentationLayer ?: sub;
         if (presLayer.isHidden || presLayer.opacity < 0.01) continue; 
         
-        // 【核心修复】：由于父图层 masksToBounds=NO，子图层可能溢出边界
-        // 因此必须优先递归遍历所有可见子图层，而不受父视图 bounds 的阻拦
         CALayer *deep = [self findImageLayerAtPoint:pt inLayer:sub];
         if (deep) return deep;
         
@@ -3496,7 +3590,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         else { w = w * (250 / h); h = 250; }
     }
     
-    // 【核心修复】：找到当前层级的最大 Z 轴，让新插入层刚好位居最顶端，从而受上下移动控制！
     CGFloat maxZ = 0.0;
     NSDictionary *layerMap = (self.targetInsertLevel == 0) ? self.bgLayerMap : ((self.targetInsertLevel == 1) ? self.floatLayerMap : self.fgLayerMap);
     for (CALayer *ly in layerMap.allValues) {
@@ -3611,7 +3704,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     });
 }
 
-// 【核心修复】：为动画代码抽取完整的 fromState 和 toState 区块，便于同步修改参数
+// 【动画提取修复】：完整的分别抓取源与目标状态及转场进行同步编辑
 - (void)extractAndEditTransitionFrom:(NSString *)from to:(NSString *)to title:(NSString *)title targetId:(NSString *)tid {
     NSString *caml = [self activeCamlString];
     
@@ -3658,7 +3751,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
         if (isFull) {
             camlStr = newContent;
         } else {
-            // 【核心修复】：基于用户编辑重新分离注入独立的区块，安全替换
             if (![from isEqualToString:@"*"]) {
                 NSString *fromStatePattern = [NSString stringWithFormat:@"<LKState[^>]*name=\"%@\"[^>]*>.*?</LKState>", from];
                 NSRegularExpression *fromRegex = [NSRegularExpression regularExpressionWithPattern:fromStatePattern options:NSRegularExpressionDotMatchesLineSeparators error:nil];
@@ -3735,7 +3827,6 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     if (maxZ == -CGFLOAT_MAX) maxZ = 0;
     if (minZ == CGFLOAT_MAX) minZ = 0;
 
-    // 【核心修复】：增加上下极限值边界提示
     if (direction > 0 && currentZ > maxZ) {
         [self showTemporaryStatus:@"已在最上层"];
         return;
@@ -3787,6 +3878,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
     
     self.bottomToolbar.hidden = YES;
     self.highlightBorderView.hidden = YES;
+    self.hintLabel.hidden = YES;
     self.tipLabel.hidden = NO;
     
     [self showTemporaryStatus:@"图层已成功删除"];
@@ -3814,6 +3906,7 @@ static void ZoneEditorSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id valu
             [self updateHighlightFrame];
         } else {
             self.bottomToolbar.hidden = YES;
+            self.hintLabel.hidden = YES;
             self.highlightBorderView.hidden = YES;
             self.tipLabel.hidden = NO;
         }
