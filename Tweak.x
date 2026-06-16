@@ -2575,7 +2575,7 @@ static void EnsureEngineViewIsMounted() {
     [self.view addGestureRecognizer:doubleTap];
 }
 
-// 【核心修复】：为密码键盘发“免死金牌”，彻底解决打字卡顿
+// 【核心修复】：为键盘、通知中心、各交互按钮发“免死金牌”，彻底解决点击卡顿
 %new
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
@@ -2583,8 +2583,12 @@ static void EnsureEngineViewIsMounted() {
     UIView *view = touch.view;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        // 遇到密码键盘或系统键盘区域，直接放行，绝不拦截！
-        if ([className containsString:@"Passcode"] || [className containsString:@"Keyboard"]) {
+        // 遇到密码键盘、系统键盘、通知中心卡片、清除按钮(Clear)或任何系统按钮(Button)，直接放行！
+        if ([className containsString:@"Passcode"] || 
+            [className containsString:@"Keyboard"] || 
+            [className containsString:@"Notification"] || 
+            [className containsString:@"Clear"] || 
+            [className containsString:@"Button"]) {
             return NO; 
         }
         view = view.superview;
@@ -3046,7 +3050,7 @@ static void EnsureEngineViewIsMounted() {
     [self.view addGestureRecognizer:doubleTap];
 }
 
-// 【核心修复】：为密码键盘发“免死金牌”，彻底解决打字卡顿
+// 【核心修复】：为键盘、通知中心、各交互按钮发“免死金牌”，彻底解决点击卡顿
 %new
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
@@ -3054,8 +3058,12 @@ static void EnsureEngineViewIsMounted() {
     UIView *view = touch.view;
     while (view) {
         NSString *className = NSStringFromClass([view class]);
-        // 遇到密码键盘或系统键盘区域，直接放行，绝不拦截！
-        if ([className containsString:@"Passcode"] || [className containsString:@"Keyboard"]) {
+        // 遇到密码键盘、系统键盘、通知中心卡片、清除按钮(Clear)或任何系统按钮(Button)，直接放行！
+        if ([className containsString:@"Passcode"] || 
+            [className containsString:@"Keyboard"] || 
+            [className containsString:@"Notification"] || 
+            [className containsString:@"Clear"] || 
+            [className containsString:@"Button"]) {
             return NO; 
         }
         view = view.superview;
