@@ -3400,7 +3400,8 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     [CATransaction begin];
     [CATransaction setAnimationDuration:0.5];
-    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    // 【顺手优化】：换上我们刚才聊过的高阶阻尼曲线，让编辑器的预览也拥有苹果原生级的手感
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithControlPoints:0.16 :1.0 :0.3 :1.0]];
     
     void (^applyState)(ZoneEditorPackageView *, ZoneEditorCAMLParser *, NSMutableDictionary *) = ^(ZoneEditorPackageView *view, ZoneEditorCAMLParser *parser, NSMutableDictionary *map) {
         if (!view || !parser) return;
@@ -3414,8 +3415,23 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
             
             NSDictionary *vals = parser.statesData[targetId][realState];
             for (NSString *keyPath in vals) {
+                id endVal = vals[keyPath];
+                // 【关键抓取】：抓取当前屏幕上的真实物理状态(Presentation Layer)作为起点，防止半路切换闪烁
+                id startVal = [[layer presentationLayer] ?: layer valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
+                
                 [layer removeAnimationForKey:keyPath];
-                ZoneSafeSetLayerKVC(layer, keyPath, vals[keyPath]);
+                ZoneSafeSetLayerKVC(layer, keyPath, endVal);
+                
+                // 【核心修复】：针对 iOS 16/17 BSUICAPackageView 屏蔽隐式动画的终极破壁法
+                // 强行生成 CABasicAnimation 补帧
+                if (startVal && endVal) {
+                    CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:keyPath];
+                    anim.fromValue = startVal;
+                    anim.toValue = endVal;
+                    anim.duration = 0.5;
+                    anim.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.16 :1.0 :0.3 :1.0];
+                    [layer addAnimation:anim forKey:keyPath];
+                }
             }
         }
     };
