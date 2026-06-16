@@ -1146,7 +1146,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [CATransaction setDisableActions:YES];
     } else {
         [CATransaction setAnimationDuration:g_animDuration]; 
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+        // 【核心动画修复】：使用自定义的高级贝塞尔曲线，模拟丝滑的弹簧物理减速效果
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithControlPoints:0.16 :1.0 :0.3 :1.0]];
     }
     
     for (NSString *targetId in parser.statesData) {
@@ -1232,7 +1233,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [CATransaction setDisableActions:YES];
     } else {
         [CATransaction setAnimationDuration:g_animDuration];
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+        // 【核心动画修复】：使用自定义的高级贝塞尔曲线，模拟丝滑的弹簧物理减速效果
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithControlPoints:0.16 :1.0 :0.3 :1.0]];
     }
     
     if ([self.bgView respondsToSelector:@selector(setState:animated:)]) {
@@ -1834,7 +1836,8 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
         [CATransaction setDisableActions:YES];
     } else {
         [CATransaction setAnimationDuration:g_animDuration]; 
-        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+        // 【核心动画修复】：使用自定义的高级贝塞尔曲线，模拟丝滑的弹簧物理减速效果
+        [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithControlPoints:0.16 :1.0 :0.3 :1.0]];
     }
     
     for (NSString *targetId in parser.statesData) {
@@ -1905,8 +1908,10 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     double progress = (CACurrentMediaTime() - self.manualAnimStartTime) / duration;
     if (progress >= 1.0) progress = 1.0;
     
-    // 模拟苹果原生的 EaseInOut 缓动曲线
-    double easedProgress = progress * progress * (3.0 - 2.0 * progress);
+    // 【核心动画修复】：替换为高级的 Quartic Ease-Out (快出慢进) 阻尼衰减曲线
+    // 这种曲线起步极快，后段极其平滑，完美模拟苹果原生的“弹簧阻尼”跟手感
+    double inv = 1.0 - progress;
+    double easedProgress = 1.0 - (inv * inv * inv * inv);
     
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
