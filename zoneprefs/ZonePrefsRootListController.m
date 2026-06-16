@@ -3237,8 +3237,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     self.statusLabel.text = [NSString stringWithFormat:@"当前选中: %@ [%@]", self.selectedLayerName, self.selectedLevelName];
 }
 
-// ⚠️ 【精简修复】：彻底删除旧版的 scrubStateValue 毒瘤方法，不再进行全局洗地
-
 - (NSString *)updateOrAddStateValue:(NSString *)xml state:(NSString *)state targetId:(NSString *)tid keyPath:(NSString *)kp value:(CGFloat)val {
     xml = [xml stringByReplacingOccurrencesOfString:@"<elements/>" withString:@"<elements>\n</elements>"];
     
@@ -3250,7 +3248,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
 
     NSString *elements = [xml substringWithRange:[match rangeAtIndex:2]];
 
-    // 💡【核心逻辑保留】：仅清洗当前状态 (logicalState) 里的旧参数，绝对不会误伤其他状态
     NSString *escapedTid = [NSRegularExpression escapedPatternForString:tid];
     NSString *escapedKp = [NSRegularExpression escapedPatternForString:kp];
     NSString *valPattern = [NSString stringWithFormat:@"\\s*<LKStateSetValue[^>]*targetId=\"%@\"[^>]*keyPath=\"%@\"[^>]*>[\\s\\S]*?</LKStateSetValue>\\s*", escapedTid, escapedKp];
@@ -3287,13 +3284,11 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     return [xml stringByReplacingCharactersInRange:match.range withString:fullTag];
 }
 
-// ⚠️ 【核心修复】：不再调用删库跑路的 scrubStateValue 方法
 - (void)saveLayerPosition:(CGPoint)pos targetId:(NSString *)tid {
     NSString *caml = [self activeCamlString];
     if (!caml || !tid) return;
     
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
-    // 仅仅修改当前的 State。这样你挪动锁屏的图，只会影响锁屏，息屏和桌面该长啥样还是啥样！
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"position.x" value:pos.x];
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"position.y" value:pos.y];
 
@@ -3316,7 +3311,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (!caml || !tid) return;
     
     NSString *logicalState = @[@"Sleep", @"Locked", @"Unlock"][self.stateSegment.selectedSegmentIndex];
-    // 保护 rotation 参数不会从其他 state 里凭空消失
     caml = [self updateOrAddStateValue:caml state:logicalState targetId:tid keyPath:@"transform.rotation.z" value:angle];
     
     [self setActiveCamlString:caml];
@@ -3594,7 +3588,8 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     }
     CGFloat newZ = maxZ + 10.0;
     
-    NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"%.1f\" opacity=\"1\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, newZ, fileName];
+    // ⚠️【核心逻辑修改】：默认 opacity="0"，防止图片在切换状态时穿帮闪烁，完全交给状态来控制它的显隐！
+    NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"%.1f\" opacity=\"0\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, newZ, fileName];
     
     NSRange lastSublayersRange = [camlString rangeOfString:@"</sublayers>" options:NSBackwardsSearch];
     if (lastSublayersRange.location != NSNotFound) {
@@ -3605,6 +3600,9 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     NSArray *stateNames = @[@"Sleep", @"Locked", @"Unlock"];
     
+    // 💡【核心逻辑修改】：读取你当前编辑器选中的 Segment 选项卡 (决定了它属于哪个状态)
+    NSString *currentStateName = stateNames[self.stateSegment.selectedSegmentIndex];
+    
     for (NSString *state in stateNames) {
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"position.x" value:195];
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"position.y" value:422];
@@ -3612,8 +3610,9 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"bounds.size.height" value:h];
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"zPosition" value:newZ]; 
         
-        // ⚠️【核心修复】：让所有新插入的图层在所有状态 (Sleep, Locked, Unlock) 中强制保持可见！不再离奇消失！
-        camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"opacity" value:1.0];
+        // 💡【绝对隔离】：是当前插入的状态就显示 (1.0)，其他状态彻底隐藏 (0.0)
+        CGFloat targetOpacity = [state isEqualToString:currentStateName] ? 1.0 : 0.0;
+        camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"opacity" value:targetOpacity];
     }
     
     if (self.targetInsertLevel == 0) self.bgCamlString = camlString;
@@ -3922,7 +3921,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"您的所有修改已被永久保存至配置。\n系统锁屏/桌面壁纸已同步刷新。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"保存成功。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
