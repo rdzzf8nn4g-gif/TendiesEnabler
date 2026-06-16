@@ -620,6 +620,8 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             [self.layer addSublayer:self.playerLayer];
             
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:UIApplicationDidBecomeActiveNotification object:nil];
+            // 【新增】：监听系统桌面进入后台（即打开了其他 App），准备自动暂停视频
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(pauseVideoForBackground) name:UIApplicationWillResignActiveNotification object:nil];
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playVideo) name:AVPlayerItemPlaybackStalledNotification object:nil];
             
             [self.player addObserver:self forKeyPath:@"rate" options:NSKeyValueObservingOptionNew context:nil];
@@ -660,6 +662,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         [self pauseVideo];
         return;
     }
+    
+    // 【新增核心防御】：
+    // 1. 如果当前处于息屏状态，坚决拦截播放！
+    if (!g_isScreenOn) {
+        return;
+    }
+    // 2. 如果当前桌面被其他 App 遮挡（即 SpringBoard 处于后台），坚决拦截播放！
+    if ([[UIApplication sharedApplication] applicationState] != UIApplicationStateActive) {
+        return;
+    }
+
     self.isManuallyPaused = NO;
     
     // 【防定格修复1：激活静默环境底层 AudioSession 权限】
@@ -682,6 +695,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 
 - (void)pauseVideo {
     self.isManuallyPaused = YES;
+    if (self.player) {
+        [self.player pause];
+    }
+}
+
+// 【新增】：专为打开 App 被遮挡时准备的“柔性暂停”
+// 不修改 isManuallyPaused 的状态，这样当你退回桌面时，系统才能自动恢复播放
+- (void)pauseVideoForBackground {
     if (self.player) {
         [self.player pause];
     }
