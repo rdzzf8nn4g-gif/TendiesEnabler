@@ -2841,7 +2841,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.title = @"高级编辑";
     
-    // 【无损安全备份机制 .bak，防卡死全异步处理】
+    // 【无损安全异步备份机制 .bak，防卡死】
     self.originalWallpaperPath = self.wallpaperPath;
     NSString *backupPath = [self.originalWallpaperPath stringByAppendingPathExtension:@"bak"];
     self.workspacePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
@@ -2872,7 +2872,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     UIBarButtonItem *saveBtn = [[UIBarButtonItem alloc] initWithTitle:@"保存" style:UIBarButtonItemStyleDone target:self action:@selector(saveAndApply)];
     UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(actionInsertImage)];
     
-    // 【替换撤销按钮为系统原生的带有箭头的圈圈 UI】
+    // 【系统原生带箭头的撤销图标】
     UIBarButtonItem *undoBtn;
     if (@available(iOS 13.0, *)) {
         undoBtn = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.uturn.backward.circle"] style:UIBarButtonItemStylePlain target:self action:@selector(actionUndo)];
@@ -2968,7 +2968,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     [self.highlightBorderView.layer addSublayer:self.dashBorderLayer];
     
     self.tipLabel = [[UILabel alloc] init];
-    self.tipLabel.text = @"请点击上方画板中的图片进行编辑";
+    self.tipLabel.text = @"点击上方画板中的图片进行编辑";
     self.tipLabel.textColor = [UIColor secondaryLabelColor];
     self.tipLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     self.tipLabel.textAlignment = NSTextAlignmentCenter;
@@ -3044,12 +3044,15 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         [btn setTitle:titles[i] forState:UIControlStateNormal];
         [btn setTitleColor:colors[i] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+        btn.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
         
-        // 【UI 升级：圈圈包裹字体】
+        // 【UI 完美升级：圆圈药丸样式高度固定28】
         btn.layer.cornerRadius = 14;
         btn.layer.borderWidth = 1;
         btn.layer.borderColor = ((UIColor *)colors[i]).CGColor;
+        
+        btn.translatesAutoresizingMaskIntoConstraints = NO;
+        [btn.heightAnchor constraintEqualToConstant:28].active = YES;
         btn.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
         
         [btn addTarget:self action:NSSelectorFromString(actions[i]) forControlEvents:UIControlEventTouchUpInside];
@@ -3083,10 +3086,11 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
 }
 
 - (void)actionRestoreDefault {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"警告" message:@"确定要恢复到最初的壁纸状态吗？\n所有未保存或已保存的修改都将丢失。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"即将恢复到最初壁纸状态" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定恢复" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         
+        // 【异步安全恢复机制，防卡死】
         UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在恢复..." message:nil preferredStyle:UIAlertControllerStyleAlert];
         [self presentViewController:loadingAlert animated:YES completion:^{
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
@@ -3527,11 +3531,11 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
 }
 
 - (void)actionInsertImage {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"插入图片" message:@"请选择要插入的图层级" preferredStyle:UIAlertControllerStyleActionSheet];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"插入图片" message:@"选择要插入的图层级" preferredStyle:UIAlertControllerStyleActionSheet];
     
-    if (self.bgCamlPath) [alert addAction:[UIAlertAction actionWithTitle:@"插入到背景层 (Background)" style:UIAlertActionStyleDefault handler:^(id action) { self.targetInsertLevel = 0; [self showInsertPicker]; }]];
-    if (self.floatCamlPath) [alert addAction:[UIAlertAction actionWithTitle:@"插入到悬浮层 (Floating)" style:UIAlertActionStyleDefault handler:^(id action) { self.targetInsertLevel = 1; [self showInsertPicker]; }]];
-    if (self.fgCamlPath) [alert addAction:[UIAlertAction actionWithTitle:@"插入到前景层 (Foreground)" style:UIAlertActionStyleDefault handler:^(id action) { self.targetInsertLevel = 2; [self showInsertPicker]; }]];
+    if (self.bgCamlPath) [alert addAction:[UIAlertAction actionWithTitle:@"插入到背景层" style:UIAlertActionStyleDefault handler:^(id action) { self.targetInsertLevel = 0; [self showInsertPicker]; }]];
+    if (self.floatCamlPath) [alert addAction:[UIAlertAction actionWithTitle:@"插入到悬浮层" style:UIAlertActionStyleDefault handler:^(id action) { self.targetInsertLevel = 1; [self showInsertPicker]; }]];
+    if (self.fgCamlPath) [alert addAction:[UIAlertAction actionWithTitle:@"插入到前景层" style:UIAlertActionStyleDefault handler:^(id action) { self.targetInsertLevel = 2; [self showInsertPicker]; }]];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     
@@ -3599,12 +3603,13 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"%.1f\" opacity=\"0\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, newZ, fileName];
     
-    NSRegularExpression *sublayersRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*name=\"Root Layer\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
-    if ([sublayersRegex numberOfMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length)] > 0) {
-        camlString = [sublayersRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
+    // 【终极防错插入算法】：把图层精确追加到父级 sublayers 的最后一行，真正保证触控可选中！
+    NSRange lastSublayersRange = [camlString rangeOfString:@"</sublayers>" options:NSBackwardsSearch];
+    if (lastSublayersRange.location != NSNotFound) {
+        camlString = [camlString stringByReplacingCharactersInRange:lastSublayersRange withString:[NSString stringWithFormat:@"%@\n        </sublayers>", layerXml]];
     } else {
-        NSRegularExpression *fallbackRegex = [NSRegularExpression regularExpressionWithPattern:@"(<CALayer[^>]*id=\"__capRootLayer__\"[^>]*>\\s*<sublayers>)" options:0 error:nil];
-        camlString = [fallbackRegex stringByReplacingMatchesInString:camlString options:0 range:NSMakeRange(0, camlString.length) withTemplate:[NSString stringWithFormat:@"$1%@", layerXml]];
+        // 如果文件结构破损缺失 sublayers 标签，就强行打到最后面
+        camlString = [camlString stringByAppendingString:layerXml];
     }
     
     NSArray *states = @[@"Locked", @"Unlock", @"Sleep"];
@@ -3704,7 +3709,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     });
 }
 
-// 【动画提取修复】：完整的分别抓取源与目标状态及转场进行同步编辑
 - (void)extractAndEditTransitionFrom:(NSString *)from to:(NSString *)to title:(NSString *)title targetId:(NSString *)tid {
     NSString *caml = [self activeCamlString];
     
@@ -3827,6 +3831,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     if (maxZ == -CGFLOAT_MAX) maxZ = 0;
     if (minZ == CGFLOAT_MAX) minZ = 0;
 
+    // 【新增极限值拦截提示】
     if (direction > 0 && currentZ > maxZ) {
         [self showTemporaryStatus:@"已在最上层"];
         return;
@@ -3928,7 +3933,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"您的所有修改已被永久保存至配置。\n系统锁屏/桌面壁纸已同步刷新。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"保存成功" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
