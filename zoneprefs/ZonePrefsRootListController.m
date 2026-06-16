@@ -3177,7 +3177,12 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
         NSMutableDictionary *map = [NSMutableDictionary dictionary];
         CALayer *rootLayer = view.rootLayer;
         if (rootLayer) {
-            view.layer.geometryFlipped = !parser.isGeometryFlipped;
+            // 💡【核心修复】：根据 iOS 版本智能分配翻转逻辑，彻底解决 iOS 16/17 悬浮层在编辑器中上下颠倒的问题！
+            if (@available(iOS 16.0, *)) {
+                view.layer.geometryFlipped = parser.isGeometryFlipped;
+            } else {
+                view.layer.geometryFlipped = !parser.isGeometryFlipped;
+            }
             CGFloat scale = weakSelf.canvasContainer.bounds.size.width / 390.0; 
             rootLayer.transform = CATransform3DMakeScale(scale, scale, 1.0);
             rootLayer.position = CGPointMake(weakSelf.canvasContainer.bounds.size.width / 2.0, weakSelf.canvasContainer.bounds.size.height / 2.0);
@@ -3588,7 +3593,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     }
     CGFloat newZ = maxZ + 10.0;
     
-    // ⚠️【核心逻辑修改】：默认 opacity="0"，防止图片在切换状态时穿帮闪烁，完全交给状态来控制它的显隐！
     NSString *layerXml = [NSString stringWithFormat:@"\n          <CALayer id=\"%@\" name=\"%@\" bounds=\"0 0 %.1f %.1f\" position=\"195 422\" zPosition=\"%.1f\" opacity=\"0\" cornerRadius=\"0\" allowsEdgeAntialiasing=\"1\" allowsGroupOpacity=\"1\" contentsFormat=\"RGBA8\" cornerCurve=\"circular\">\n            <contents>\n              <CGImage src=\"assets/%@\"/>\n            </contents>\n          </CALayer>", newId, fileName, w, h, newZ, fileName];
     
     NSRange lastSublayersRange = [camlString rangeOfString:@"</sublayers>" options:NSBackwardsSearch];
@@ -3600,7 +3604,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     NSArray *stateNames = @[@"Sleep", @"Locked", @"Unlock"];
     
-    // 💡【核心逻辑修改】：读取你当前编辑器选中的 Segment 选项卡 (决定了它属于哪个状态)
     NSString *currentStateName = stateNames[self.stateSegment.selectedSegmentIndex];
     
     for (NSString *state in stateNames) {
@@ -3610,7 +3613,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"bounds.size.height" value:h];
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"zPosition" value:newZ]; 
         
-        // 💡【绝对隔离】：是当前插入的状态就显示 (1.0)，其他状态彻底隐藏 (0.0)
         CGFloat targetOpacity = [state isEqualToString:currentStateName] ? 1.0 : 0.0;
         camlString = [self updateOrAddStateValue:camlString state:state targetId:newId keyPath:@"opacity" value:targetOpacity];
     }
@@ -3836,7 +3838,6 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
 
     NSArray *states = @[@"Locked", @"Unlock", @"Sleep"];
     for (NSString *state in states) {
-        // Z坐标修改我们安全覆盖
         camlStr = [self updateOrAddStateValue:camlStr state:state targetId:realId keyPath:@"zPosition" value:newZ];
     }
 
@@ -3921,7 +3922,7 @@ static void ZoneSafeSetLayerKVC(CALayer *layer, NSString *keyPath, id value) {
     
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, NULL, YES);
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"保存成功。" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功" message:@"保存成功" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
