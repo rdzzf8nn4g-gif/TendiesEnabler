@@ -682,7 +682,7 @@ static NSString * GetPrefsPlistPath() {
     }
     
     if (self.isVideoMode) {
-        PSSpecifier *g1 = [PSSpecifier emptyGroupSpecifier];
+        PSSpecifier *g1 = [PSSpecifier preferenceSpecifierNamed:@"插件设置" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
         [g1 setProperty:@"开启启用插件开关应用全局，视频模式下交互壁纸将自动休眠并彻底释放内存。\n开启锁屏桌面使用同素材时需在锁屏/壁纸素材内重新选择一个。" forKey:@"footerText"];
         [_specifiers addObject:g1];
         
@@ -769,6 +769,14 @@ static NSString * GetPrefsPlistPath() {
         
     } else {
         NSArray *rootSpecs = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        
+        if (rootSpecs.count > 0) {
+            PSSpecifier *firstGroup = rootSpecs[0];
+            if (firstGroup.cellType == PSGroupCell) {
+                firstGroup.name = @"插件设置";
+                [firstGroup setProperty:@"插件设置" forKey:@"label"];
+            }
+        }
         
         NSUInteger baseInsertIndex = NSNotFound;
         for (NSUInteger i = 0; i < rootSpecs.count; i++) {
@@ -1403,9 +1411,25 @@ static NSString * GetPrefsPlistPath() {
 }
 // =======================================================================
 
-// ================= 新增：完美控制 Header 字体加深与尺寸 (支持多行不截断) =================
+// ================= 新增：辅助方法获取当前 Section 的数据模型 =================
+- (PSSpecifier *)zone_groupSpecifierForSection:(NSInteger)section {
+    NSArray *specs = [self specifiers];
+    if (!specs) return nil;
+    NSInteger currentSection = -1;
+    for (PSSpecifier *spec in specs) {
+        if (spec.cellType == PSGroupCell) {
+            currentSection++;
+            if (currentSection == section) return spec;
+        }
+    }
+    return nil;
+}
+// =======================================================================
+
+// ================= 完美控制 Header 字体加深与尺寸 (支持多行不截断) =================
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
     if (title.length == 0) return nil;
     
     UIView *headerView = [[UIView alloc] init];
@@ -1415,7 +1439,7 @@ static NSString * GetPrefsPlistPath() {
     titleLabel.text = title;
     titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; 
     titleLabel.textColor = [UIColor systemGrayColor];
-    titleLabel.numberOfLines = 0; // 核心修复：允许文字换行，杜绝出现 "..."
+    titleLabel.numberOfLines = 0; // 核心修复：允许多行
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [headerView addSubview:titleLabel];
@@ -1434,7 +1458,8 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
     if (title.length > 0) {
         CGFloat padding = 30.0;
         if (@available(iOS 13.0, *)) {
@@ -1445,15 +1470,16 @@ static NSString * GetPrefsPlistPath() {
                                           options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]}
                                           context:nil];
-        return ceil(rect.size.height) + 16.0; // 动态计算高度
+        return ceil(rect.size.height) + 16.0;
     }
     return section == 0 ? CGFLOAT_MIN : 15.0;
 }
 // =================================================================
 
-// ================= 新增：完美控制 Footer 注解小字与尺寸 (支持多行不截断) =================
+// ================= 完美控制 Footer 注解小字与尺寸 (支持多行不截断) =================
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
-    NSString *footerText = [self tableView:tableView titleForFooterInSection:section];
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *footerText = [groupSpec propertyForKey:@"footerText"];
     if (footerText.length == 0) return nil;
     
     UIView *footerView = [[UIView alloc] init];
@@ -1463,7 +1489,7 @@ static NSString * GetPrefsPlistPath() {
     footerLabel.text = footerText;
     footerLabel.font = [UIFont systemFontOfSize:12]; 
     footerLabel.textColor = [UIColor systemGrayColor];
-    footerLabel.numberOfLines = 0; // 核心修复：允许文字换行，杜绝出现 "..."
+    footerLabel.numberOfLines = 0; // 核心修复：允许多行
     footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [footerView addSubview:footerLabel];
@@ -1482,7 +1508,8 @@ static NSString * GetPrefsPlistPath() {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
-    NSString *footerText = [self tableView:tableView titleForFooterInSection:section];
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *footerText = [groupSpec propertyForKey:@"footerText"];
     if (footerText.length == 0) return CGFLOAT_MIN;
     
     CGFloat padding = 30.0;
@@ -1495,11 +1522,11 @@ static NSString * GetPrefsPlistPath() {
                                            options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                         attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
                                            context:nil];
-    return ceil(rect.size.height) + 12.0; // 动态计算高度
+    return ceil(rect.size.height) + 12.0;
 }
 // =================================================================
 
-// ================= 新增：药丸 UI 单元格展示控制 =================
+// ================= 药丸 UI 单元格展示控制 =================
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     
     // 核心兜底修复：确保 Cell 内部的长名称文字也不会被截断
