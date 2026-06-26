@@ -1398,7 +1398,7 @@ static NSString * GetPrefsPlistPath() {
     return cell;
 }
 
--- (UITableViewStyle)tableViewStyle {
+- (UITableViewStyle)tableViewStyle {
     if (@available(iOS 13.0, *)) {
         return UITableViewStyleInsetGrouped;
     }
