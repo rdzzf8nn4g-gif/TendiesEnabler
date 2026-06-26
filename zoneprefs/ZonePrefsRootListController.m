@@ -1462,7 +1462,10 @@ static NSString * GetPrefsPlistPath() {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
     if (title.length > 0) {
-        CGFloat padding = (@available(iOS 13.0, *)) ? 40.0 : 30.0;
+        CGFloat padding = 30.0;
+        if (@available(iOS 13.0, *)) {
+            padding = 40.0;
+        }
         CGFloat width = tableView.bounds.size.width - padding;
         // 核心修复：调用系统级富文本高度测量工具，精准计算出换行后的像素高度
         CGRect rect = [title boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
@@ -1514,7 +1517,10 @@ static NSString * GetPrefsPlistPath() {
     // 若没有说明文字，强制下发 20.0 撑开跟下面按钮的距离
     if (footerText.length == 0) return 20.0; 
     
-    CGFloat padding = (@available(iOS 13.0, *)) ? 40.0 : 30.0;
+    CGFloat padding = 30.0;
+    if (@available(iOS 13.0, *)) {
+        padding = 40.0;
+    }
     CGFloat width = tableView.bounds.size.width - padding;
     // 核心修复：带有 \n 换行的段落文字也能被一字不差地精准计算出来
     CGRect rect = [footerText boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
@@ -1524,6 +1530,7 @@ static NSString * GetPrefsPlistPath() {
     // 顶边距6 + 底边距6 + 算出的文字高度 + 2.0防误差补足
     return ceil(rect.size.height) + 14.0;
 }
+// =================================================================
 
 - (CGFloat)tableView:(UITableView *)tableView estimatedHeightForFooterInSection:(NSInteger)section {
     return 40.0;
