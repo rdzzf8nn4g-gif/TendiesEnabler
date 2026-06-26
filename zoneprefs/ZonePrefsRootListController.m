@@ -1397,19 +1397,25 @@ static NSString * GetPrefsPlistPath() {
     return UITableViewStyleGrouped;
 }
 
-// ================= 新增：完美控制 Header 字体加深与尺寸 =================
+// ================= 新增：强制匹配参考代码的 50.0 单元格(按钮)高度 =================
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return 50.0;
+}
+// =======================================================================
+
+// ================= 新增：完美控制 Header 字体加深与尺寸 (支持多行不截断) =================
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     NSString *title = [self tableView:tableView titleForHeaderInSection:section];
-    if (!title) return nil;
+    if (title.length == 0) return nil;
     
     UIView *headerView = [[UIView alloc] init];
     headerView.backgroundColor = [UIColor clearColor];
     
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = title;
-    // 强制使用加深中等字体 (13pt, Medium)
     titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; 
     titleLabel.textColor = [UIColor systemGrayColor];
+    titleLabel.numberOfLines = 0; // 核心修复：允许文字换行，杜绝出现 "..."
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [headerView addSubview:titleLabel];
@@ -1422,32 +1428,42 @@ static NSString * GetPrefsPlistPath() {
     [titleLabel.leadingAnchor constraintEqualToAnchor:headerView.leadingAnchor constant:padding].active = YES;
     [titleLabel.trailingAnchor constraintEqualToAnchor:headerView.trailingAnchor constant:-padding].active = YES;
     [titleLabel.bottomAnchor constraintEqualToAnchor:headerView.bottomAnchor constant:-6].active = YES;
+    [titleLabel.topAnchor constraintEqualToAnchor:headerView.topAnchor constant:10].active = YES;
     
     return headerView;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    if ([self tableView:tableView titleForHeaderInSection:section]) {
-        return 38.0;
+    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    if (title.length > 0) {
+        CGFloat padding = 30.0;
+        if (@available(iOS 13.0, *)) {
+            padding = 40.0;
+        }
+        CGFloat width = tableView.bounds.size.width - padding;
+        CGRect rect = [title boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
+                                          options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                       attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]}
+                                          context:nil];
+        return ceil(rect.size.height) + 16.0; // 动态计算高度
     }
     return section == 0 ? CGFLOAT_MIN : 15.0;
 }
 // =================================================================
 
-// ================= 新增：完美控制 Footer 注解小字与尺寸 =================
+// ================= 新增：完美控制 Footer 注解小字与尺寸 (支持多行不截断) =================
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
     NSString *footerText = [self tableView:tableView titleForFooterInSection:section];
-    if (!footerText) return nil;
+    if (footerText.length == 0) return nil;
     
     UIView *footerView = [[UIView alloc] init];
     footerView.backgroundColor = [UIColor clearColor];
     
     UILabel *footerLabel = [[UILabel alloc] init];
     footerLabel.text = footerText;
-    // 强制使用底部小字字体 (12pt)
     footerLabel.font = [UIFont systemFontOfSize:12]; 
     footerLabel.textColor = [UIColor systemGrayColor];
-    footerLabel.numberOfLines = 0;
+    footerLabel.numberOfLines = 0; // 核心修复：允许文字换行，杜绝出现 "..."
     footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [footerView addSubview:footerLabel];
@@ -1467,7 +1483,7 @@ static NSString * GetPrefsPlistPath() {
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSString *footerText = [self tableView:tableView titleForFooterInSection:section];
-    if (!footerText) return CGFLOAT_MIN;
+    if (footerText.length == 0) return CGFLOAT_MIN;
     
     CGFloat padding = 30.0;
     if (@available(iOS 13.0, *)) {
@@ -1479,13 +1495,21 @@ static NSString * GetPrefsPlistPath() {
                                            options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                         attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
                                            context:nil];
-    return ceil(rect.size.height) + 12.0;
+    return ceil(rect.size.height) + 12.0; // 动态计算高度
 }
-// =================================================================
 // =================================================================
 
 // ================= 新增：药丸 UI 单元格展示控制 =================
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    
+    // 核心兜底修复：确保 Cell 内部的长名称文字也不会被截断
+    if (cell.textLabel) {
+        cell.textLabel.numberOfLines = 0;
+    }
+    if (cell.detailTextLabel) {
+        cell.detailTextLabel.numberOfLines = 0;
+    }
+
     NSInteger numberOfRows = [tableView numberOfRowsInSection:indexPath.section];
     BOOL isFirst = (indexPath.row == 0);
     BOOL isLast = (indexPath.row == numberOfRows - 1);
@@ -1531,6 +1555,7 @@ static NSString * GetPrefsPlistPath() {
         cell.layer.cornerCurve = kCACornerCurveContinuous;
     }
 }
+// =================================================================
 // =================================================================
 
 - (void)promptClearWallpapers {
