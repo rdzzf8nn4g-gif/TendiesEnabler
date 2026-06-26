@@ -1397,6 +1397,130 @@ static NSString * GetPrefsPlistPath() {
     return UITableViewStyleGrouped;
 }
 
+// ================= 新增：完美控制 Header 字体加深与尺寸 =================
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    if (!title) return nil;
+    
+    UIView *headerView = [[UIView alloc] init];
+    headerView.backgroundColor = [UIColor clearColor];
+    
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = title;
+    // 强制使用加深中等字体 (13pt, Medium)
+    titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; 
+    titleLabel.textColor = [UIColor systemGrayColor];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    [headerView addSubview:titleLabel];
+    
+    CGFloat padding = (@available(iOS 13.0, *)) ? 20.0 : 15.0;
+    [titleLabel.leadingAnchor constraintEqualToAnchor:headerView.leadingAnchor constant:padding].active = YES;
+    [titleLabel.trailingAnchor constraintEqualToAnchor:headerView.trailingAnchor constant:-padding].active = YES;
+    [titleLabel.bottomAnchor constraintEqualToAnchor:headerView.bottomAnchor constant:-6].active = YES;
+    
+    return headerView;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if ([self tableView:tableView titleForHeaderInSection:section]) {
+        return 38.0;
+    }
+    return section == 0 ? CGFLOAT_MIN : 15.0;
+}
+// =================================================================
+
+// ================= 新增：完美控制 Footer 注解小字与尺寸 =================
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    NSString *footerText = [self tableView:tableView titleForFooterInSection:section];
+    if (!footerText) return nil;
+    
+    UIView *footerView = [[UIView alloc] init];
+    footerView.backgroundColor = [UIColor clearColor];
+    
+    UILabel *footerLabel = [[UILabel alloc] init];
+    footerLabel.text = footerText;
+    // 强制使用底部小字字体 (12pt)
+    footerLabel.font = [UIFont systemFontOfSize:12]; 
+    footerLabel.textColor = [UIColor systemGrayColor];
+    footerLabel.numberOfLines = 0;
+    footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    [footerView addSubview:footerLabel];
+    
+    CGFloat padding = (@available(iOS 13.0, *)) ? 20.0 : 15.0;
+    [footerLabel.leadingAnchor constraintEqualToAnchor:footerView.leadingAnchor constant:padding].active = YES;
+    [footerLabel.trailingAnchor constraintEqualToAnchor:footerView.trailingAnchor constant:-padding].active = YES;
+    [footerLabel.topAnchor constraintEqualToAnchor:footerView.topAnchor constant:6].active = YES;
+    [footerLabel.bottomAnchor constraintEqualToAnchor:footerView.bottomAnchor constant:-6].active = YES;
+    
+    return footerView;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    NSString *footerText = [self tableView:tableView titleForFooterInSection:section];
+    if (!footerText) return CGFLOAT_MIN;
+    
+    CGFloat padding = (@available(iOS 13.0, *)) ? 40.0 : 30.0;
+    CGFloat width = tableView.bounds.size.width - padding;
+    
+    CGRect rect = [footerText boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
+                                           options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
+                                           context:nil];
+    return ceil(rect.size.height) + 12.0;
+}
+// =================================================================
+
+// ================= 新增：药丸 UI 单元格展示控制 =================
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSInteger numberOfRows = [tableView numberOfRowsInSection:indexPath.section];
+    BOOL isFirst = (indexPath.row == 0);
+    BOOL isLast = (indexPath.row == numberOfRows - 1);
+
+    CGFloat radius = 25.0;
+    CACornerMask mask = 0;
+
+    if (isFirst && isLast) {
+        mask = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+    } else if (isFirst) {
+        mask = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+    } else if (isLast) {
+        mask = kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+    } else {
+        radius = 0; 
+        mask = 0;
+    }
+
+    cell.layer.borderWidth = 0.0;
+    cell.layer.borderColor = [UIColor clearColor].CGColor;
+    cell.layer.cornerRadius = radius;
+    cell.layer.maskedCorners = mask;
+    cell.layer.masksToBounds = YES;
+    
+    if (@available(iOS 14.0, *)) {
+        UIBackgroundConfiguration *bg = cell.backgroundConfiguration;
+        if (bg) {
+            bg.cornerRadius = radius; 
+            bg.strokeColor = [UIColor clearColor]; 
+            bg.strokeWidth = 0.0;
+            cell.backgroundConfiguration = bg;
+        }
+    } else {
+        if (cell.backgroundView) {
+            cell.backgroundView.layer.cornerRadius = radius;
+            cell.backgroundView.layer.maskedCorners = mask;
+            cell.backgroundView.layer.masksToBounds = YES;
+            cell.backgroundView.layer.borderWidth = 0.0;
+        }
+    }
+    
+    if (@available(iOS 13.0, *)) {
+        cell.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+}
+// =================================================================
+
 - (void)promptClearWallpapers {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"清空壁纸" message:@"确定要清空所有已导入的壁纸吗？此操作不可撤销。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
