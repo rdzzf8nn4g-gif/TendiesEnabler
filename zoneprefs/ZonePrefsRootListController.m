@@ -1426,7 +1426,7 @@ static NSString * GetPrefsPlistPath() {
 }
 // =======================================================================
 
-// ================= 完美控制 Header 字体尺寸 (交给系统AutoLayout自动换行) =================
+// ================= 完美控制 Header 字体尺寸 (精准计算高度防截断) =================
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
@@ -1452,7 +1452,7 @@ static NSString * GetPrefsPlistPath() {
     
     [titleLabel.leadingAnchor constraintEqualToAnchor:headerView.leadingAnchor constant:padding].active = YES;
     [titleLabel.trailingAnchor constraintEqualToAnchor:headerView.trailingAnchor constant:-padding].active = YES;
-    [titleLabel.topAnchor constraintEqualToAnchor:headerView.topAnchor constant:16].active = YES; // 增加顶部留白
+    [titleLabel.topAnchor constraintEqualToAnchor:headerView.topAnchor constant:16].active = YES;
     [titleLabel.bottomAnchor constraintEqualToAnchor:headerView.bottomAnchor constant:-6].active = YES;
     
     return headerView;
@@ -1461,16 +1461,22 @@ static NSString * GetPrefsPlistPath() {
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
-    if (title.length > 0) return UITableViewAutomaticDimension; // 完全让 AutoLayout 算高度
+    if (title.length > 0) {
+        CGFloat padding = (@available(iOS 13.0, *)) ? 40.0 : 30.0;
+        CGFloat width = tableView.bounds.size.width - padding;
+        // 核心修复：调用系统级富文本高度测量工具，精准计算出换行后的像素高度
+        CGRect rect = [title boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
+                                          options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                       attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]}
+                                          context:nil];
+        // 顶边距16 + 底边距6 + 算出的文字高度 + 2.0防误差补足
+        return ceil(rect.size.height) + 24.0;
+    }
     return section == 0 ? CGFLOAT_MIN : 15.0;
-}
-
-- (CGFloat)tableView:(UITableView *)tableView estimatedHeightForHeaderInSection:(NSInteger)section {
-    return 40.0;
 }
 // =================================================================
 
-// ================= 完美控制 Footer 注解小字 (交给系统AutoLayout自动换行) =================
+// ================= 完美控制 Footer 注解小字 (精准计算高度防截断) =================
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *footerText = [groupSpec propertyForKey:@"footerText"];
@@ -1505,9 +1511,18 @@ static NSString * GetPrefsPlistPath() {
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *footerText = [groupSpec propertyForKey:@"footerText"];
-    // 🚨 【修复分组间距太近的问题】：如果没有底部文字说明，强制分配 20.0 的下边距！
+    // 若没有说明文字，强制下发 20.0 撑开跟下面按钮的距离
     if (footerText.length == 0) return 20.0; 
-    return UITableViewAutomaticDimension; // 让 AutoLayout 算高度
+    
+    CGFloat padding = (@available(iOS 13.0, *)) ? 40.0 : 30.0;
+    CGFloat width = tableView.bounds.size.width - padding;
+    // 核心修复：带有 \n 换行的段落文字也能被一字不差地精准计算出来
+    CGRect rect = [footerText boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
+                                           options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
+                                           context:nil];
+    // 顶边距6 + 底边距6 + 算出的文字高度 + 2.0防误差补足
+    return ceil(rect.size.height) + 14.0;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView estimatedHeightForFooterInSection:(NSInteger)section {
