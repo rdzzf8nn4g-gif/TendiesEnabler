@@ -1398,20 +1398,20 @@ static NSString * GetPrefsPlistPath() {
     return cell;
 }
 
-- (UITableViewStyle)tableViewStyle {
+-- (UITableViewStyle)tableViewStyle {
     if (@available(iOS 13.0, *)) {
         return UITableViewStyleInsetGrouped;
     }
     return UITableViewStyleGrouped;
 }
 
-// ================= 新增：强制匹配参考代码的 50.0 单元格(按钮)高度 =================
+// ================= 强制匹配参考代码的 50.0 单元格(按钮)高度 =================
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     return 50.0;
 }
 // =======================================================================
 
-// ================= 新增：辅助方法获取当前 Section 的数据模型 =================
+// ================= 辅助方法获取当前 Section 的数据模型 =================
 - (PSSpecifier *)zone_groupSpecifierForSection:(NSInteger)section {
     NSArray *specs = [self specifiers];
     if (!specs) return nil;
@@ -1426,7 +1426,7 @@ static NSString * GetPrefsPlistPath() {
 }
 // =======================================================================
 
-// ================= 完美控制 Header 字体加深与尺寸 (支持多行不截断) =================
+// ================= 完美控制 Header 字体尺寸 (交给系统AutoLayout自动换行) =================
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
@@ -1439,7 +1439,8 @@ static NSString * GetPrefsPlistPath() {
     titleLabel.text = title;
     titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; 
     titleLabel.textColor = [UIColor systemGrayColor];
-    titleLabel.numberOfLines = 0; // 核心修复：允许多行
+    titleLabel.numberOfLines = 0; 
+    titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [headerView addSubview:titleLabel];
@@ -1451,8 +1452,8 @@ static NSString * GetPrefsPlistPath() {
     
     [titleLabel.leadingAnchor constraintEqualToAnchor:headerView.leadingAnchor constant:padding].active = YES;
     [titleLabel.trailingAnchor constraintEqualToAnchor:headerView.trailingAnchor constant:-padding].active = YES;
+    [titleLabel.topAnchor constraintEqualToAnchor:headerView.topAnchor constant:16].active = YES; // 增加顶部留白
     [titleLabel.bottomAnchor constraintEqualToAnchor:headerView.bottomAnchor constant:-6].active = YES;
-    [titleLabel.topAnchor constraintEqualToAnchor:headerView.topAnchor constant:10].active = YES;
     
     return headerView;
 }
@@ -1460,23 +1461,16 @@ static NSString * GetPrefsPlistPath() {
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
-    if (title.length > 0) {
-        CGFloat padding = 30.0;
-        if (@available(iOS 13.0, *)) {
-            padding = 40.0;
-        }
-        CGFloat width = tableView.bounds.size.width - padding;
-        CGRect rect = [title boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
-                                          options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                       attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]}
-                                          context:nil];
-        return ceil(rect.size.height) + 16.0;
-    }
+    if (title.length > 0) return UITableViewAutomaticDimension; // 完全让 AutoLayout 算高度
     return section == 0 ? CGFLOAT_MIN : 15.0;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView estimatedHeightForHeaderInSection:(NSInteger)section {
+    return 40.0;
 }
 // =================================================================
 
-// ================= 完美控制 Footer 注解小字与尺寸 (支持多行不截断) =================
+// ================= 完美控制 Footer 注解小字 (交给系统AutoLayout自动换行) =================
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *footerText = [groupSpec propertyForKey:@"footerText"];
@@ -1489,7 +1483,8 @@ static NSString * GetPrefsPlistPath() {
     footerLabel.text = footerText;
     footerLabel.font = [UIFont systemFontOfSize:12]; 
     footerLabel.textColor = [UIColor systemGrayColor];
-    footerLabel.numberOfLines = 0; // 核心修复：允许多行
+    footerLabel.numberOfLines = 0; 
+    footerLabel.lineBreakMode = NSLineBreakByWordWrapping;
     footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [footerView addSubview:footerLabel];
@@ -1510,32 +1505,22 @@ static NSString * GetPrefsPlistPath() {
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
     NSString *footerText = [groupSpec propertyForKey:@"footerText"];
-    if (footerText.length == 0) return CGFLOAT_MIN;
-    
-    CGFloat padding = 30.0;
-    if (@available(iOS 13.0, *)) {
-        padding = 40.0;
-    }
-    CGFloat width = tableView.bounds.size.width - padding;
-    
-    CGRect rect = [footerText boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
-                                           options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
-                                           context:nil];
-    return ceil(rect.size.height) + 12.0;
+    // 🚨 【修复分组间距太近的问题】：如果没有底部文字说明，强制分配 20.0 的下边距！
+    if (footerText.length == 0) return 20.0; 
+    return UITableViewAutomaticDimension; // 让 AutoLayout 算高度
+}
+
+- (CGFloat)tableView:(UITableView *)tableView estimatedHeightForFooterInSection:(NSInteger)section {
+    return 40.0;
 }
 // =================================================================
 
 // ================= 药丸 UI 单元格展示控制 =================
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     
-    // 核心兜底修复：确保 Cell 内部的长名称文字也不会被截断
-    if (cell.textLabel) {
-        cell.textLabel.numberOfLines = 0;
-    }
-    if (cell.detailTextLabel) {
-        cell.detailTextLabel.numberOfLines = 0;
-    }
+    // 兜底修复：确保 Cell 内部的长名称文字也不会被截断
+    if (cell.textLabel) cell.textLabel.numberOfLines = 0;
+    if (cell.detailTextLabel) cell.detailTextLabel.numberOfLines = 0;
 
     NSInteger numberOfRows = [tableView numberOfRowsInSection:indexPath.section];
     BOOL isFirst = (indexPath.row == 0);
