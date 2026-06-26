@@ -1414,7 +1414,11 @@ static NSString * GetPrefsPlistPath() {
     
     [headerView addSubview:titleLabel];
     
-    CGFloat padding = (@available(iOS 13.0, *)) ? 20.0 : 15.0;
+    CGFloat padding = 15.0;
+    if (@available(iOS 13.0, *)) {
+        padding = 20.0;
+    }
+    
     [titleLabel.leadingAnchor constraintEqualToAnchor:headerView.leadingAnchor constant:padding].active = YES;
     [titleLabel.trailingAnchor constraintEqualToAnchor:headerView.trailingAnchor constant:-padding].active = YES;
     [titleLabel.bottomAnchor constraintEqualToAnchor:headerView.bottomAnchor constant:-6].active = YES;
@@ -1448,7 +1452,11 @@ static NSString * GetPrefsPlistPath() {
     
     [footerView addSubview:footerLabel];
     
-    CGFloat padding = (@available(iOS 13.0, *)) ? 20.0 : 15.0;
+    CGFloat padding = 15.0;
+    if (@available(iOS 13.0, *)) {
+        padding = 20.0;
+    }
+    
     [footerLabel.leadingAnchor constraintEqualToAnchor:footerView.leadingAnchor constant:padding].active = YES;
     [footerLabel.trailingAnchor constraintEqualToAnchor:footerView.trailingAnchor constant:-padding].active = YES;
     [footerLabel.topAnchor constraintEqualToAnchor:footerView.topAnchor constant:6].active = YES;
@@ -1461,7 +1469,10 @@ static NSString * GetPrefsPlistPath() {
     NSString *footerText = [self tableView:tableView titleForFooterInSection:section];
     if (!footerText) return CGFLOAT_MIN;
     
-    CGFloat padding = (@available(iOS 13.0, *)) ? 40.0 : 30.0;
+    CGFloat padding = 30.0;
+    if (@available(iOS 13.0, *)) {
+        padding = 40.0;
+    }
     CGFloat width = tableView.bounds.size.width - padding;
     
     CGRect rect = [footerText boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
@@ -1470,6 +1481,7 @@ static NSString * GetPrefsPlistPath() {
                                            context:nil];
     return ceil(rect.size.height) + 12.0;
 }
+// =================================================================
 // =================================================================
 
 // ================= 新增：药丸 UI 单元格展示控制 =================
