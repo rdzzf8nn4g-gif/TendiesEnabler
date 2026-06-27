@@ -1410,6 +1410,137 @@ static NSString * GetPrefsPlistPath() {
 }
 // =======================================================================
 
+// ================= 辅助方法获取当前 Section 的数据模型 =================
+- (PSSpecifier *)zone_groupSpecifierForSection:(NSInteger)section {
+    NSArray *specs = [self specifiers];
+    if (!specs) return nil;
+    NSInteger currentSection = -1;
+    for (PSSpecifier *spec in specs) {
+        if (spec.cellType == PSGroupCell) {
+            currentSection++;
+            if (currentSection == section) return spec;
+        }
+    }
+    return nil;
+}
+// =======================================================================
+
+// ================= 完美保留：自定义 Header UI =================
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
+    if (title.length == 0) return nil;
+    
+    UIView *headerView = [[UIView alloc] init];
+    headerView.backgroundColor = [UIColor clearColor];
+    
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = title;
+    titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; 
+    titleLabel.textColor = [UIColor systemGrayColor];
+    titleLabel.numberOfLines = 0; 
+    titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    [headerView addSubview:titleLabel];
+    
+    CGFloat padding = 15.0;
+    if (@available(iOS 13.0, *)) {
+        padding = 20.0;
+    }
+    
+    [titleLabel.leadingAnchor constraintEqualToAnchor:headerView.leadingAnchor constant:padding].active = YES;
+    [titleLabel.trailingAnchor constraintEqualToAnchor:headerView.trailingAnchor constant:-padding].active = YES;
+    [titleLabel.topAnchor constraintEqualToAnchor:headerView.topAnchor constant:16].active = YES;
+    [titleLabel.bottomAnchor constraintEqualToAnchor:headerView.bottomAnchor constant:-6].active = YES;
+    
+    return headerView;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *title = [groupSpec propertyForKey:@"label"] ?: groupSpec.name;
+    if (title.length > 0) {
+        CGFloat padding = 30.0;
+        if (@available(iOS 13.0, *)) {
+            padding = 40.0;
+        }
+        CGFloat width = tableView.bounds.size.width - padding;
+        
+        // 💯 核心修复：用真实的 UILabel 来模拟测量，彻底告别高度算错！
+        UILabel *dummyLabel = [[UILabel alloc] init];
+        dummyLabel.numberOfLines = 0;
+        dummyLabel.lineBreakMode = NSLineBreakByWordWrapping;
+        dummyLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        dummyLabel.text = title;
+        
+        CGSize size = [dummyLabel sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)];
+        return ceil(size.height) + 24.0; // 顶边距16 + 底边距6 + 2.0防误差补足
+    }
+    return section == 0 ? CGFLOAT_MIN : 15.0;
+}
+// =================================================================
+
+// ================= 完美保留：自定义 Footer UI =================
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *footerText = [groupSpec propertyForKey:@"footerText"];
+    if (footerText.length == 0) return nil;
+    
+    UIView *footerView = [[UIView alloc] init];
+    footerView.backgroundColor = [UIColor clearColor];
+    
+    UILabel *footerLabel = [[UILabel alloc] init];
+    footerLabel.text = footerText;
+    footerLabel.font = [UIFont systemFontOfSize:12]; 
+    footerLabel.textColor = [UIColor systemGrayColor];
+    footerLabel.numberOfLines = 0; 
+    footerLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    [footerView addSubview:footerLabel];
+    
+    CGFloat padding = 15.0;
+    if (@available(iOS 13.0, *)) {
+        padding = 20.0;
+    }
+    
+    [footerLabel.leadingAnchor constraintEqualToAnchor:footerView.leadingAnchor constant:padding].active = YES;
+    [footerLabel.trailingAnchor constraintEqualToAnchor:footerView.trailingAnchor constant:-padding].active = YES;
+    [footerLabel.topAnchor constraintEqualToAnchor:footerView.topAnchor constant:6].active = YES;
+    [footerLabel.bottomAnchor constraintEqualToAnchor:footerView.bottomAnchor constant:-6].active = YES;
+    
+    return footerView;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    PSSpecifier *groupSpec = [self zone_groupSpecifierForSection:section];
+    NSString *footerText = [groupSpec propertyForKey:@"footerText"];
+    if (footerText.length == 0) return 20.0; 
+    
+    CGFloat padding = 30.0;
+    if (@available(iOS 13.0, *)) {
+        padding = 40.0;
+    }
+    CGFloat width = tableView.bounds.size.width - padding;
+    
+    // 💯 核心修复：用真实的 UILabel 来模拟测量，彻底告别高度算错！
+    UILabel *dummyLabel = [[UILabel alloc] init];
+    dummyLabel.numberOfLines = 0;
+    dummyLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    dummyLabel.font = [UIFont systemFontOfSize:12];
+    dummyLabel.text = footerText;
+    
+    CGSize size = [dummyLabel sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)];
+    return ceil(size.height) + 16.0; // 顶边距6 + 底边距6 + 4.0防误差补足
+}
+// =================================================================
+
+- (CGFloat)tableView:(UITableView *)tableView estimatedHeightForFooterInSection:(NSInteger)section {
+    return 40.0;
+}
+// =================================================================
+
 // ================= 药丸 UI 单元格展示控制 =================
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     
