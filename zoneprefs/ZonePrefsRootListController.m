@@ -815,8 +815,8 @@ static NSString * GetPrefsPlistPath() {
 
         [_specifiers addObjectsFromArray:rootSpecs];
         
-        PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸\n(设置壁纸不正常右上角尝试注销)" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [group setProperty:@"点击切换壁纸，向左滑动可删除不需要的壁纸以及重命名。\n点击对应壁纸旁边的按钮可设置每帧重绘降采样的程度\n(原画/70%/50%/25%)，以节约电量以及降低占用。" forKey:@"footerText"];
+        PSSpecifier *group = [PSSpecifier preferenceSpecifierNamed:@"已导入的壁纸\n设置壁纸不正常右上角尝试注销" target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
+        [group setProperty:@"点击切换壁纸，向左滑动可删除不需要的壁纸以及重命名。\n点击对应壁纸旁边的按钮可设置每帧重绘降采样的程度，以节约电量以及降低占用。" forKey:@"footerText"];
         [_specifiers addObject:group];
         
         NSFileManager *fm = [NSFileManager defaultManager];
