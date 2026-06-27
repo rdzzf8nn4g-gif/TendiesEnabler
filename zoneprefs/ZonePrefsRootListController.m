@@ -1439,7 +1439,8 @@ static NSString * GetPrefsPlistPath() {
     titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; 
     titleLabel.textColor = [UIColor systemGrayColor];
     titleLabel.numberOfLines = 0; 
-    titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    // 🔪 核心改动：允许字符强制换行，防超长符号捣乱
+    titleLabel.lineBreakMode = NSLineBreakByCharWrapping;
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [headerView addSubview:titleLabel];
@@ -1467,15 +1468,16 @@ static NSString * GetPrefsPlistPath() {
         }
         CGFloat width = tableView.bounds.size.width - padding;
         
-        // 💯 核心修复：用真实的 UILabel 来模拟测量，彻底告别高度算错！
         UILabel *dummyLabel = [[UILabel alloc] init];
         dummyLabel.numberOfLines = 0;
-        dummyLabel.lineBreakMode = NSLineBreakByWordWrapping;
+        // 🔪 核心改动：测算高度时也必须保持换行逻辑一致
+        dummyLabel.lineBreakMode = NSLineBreakByCharWrapping;
         dummyLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
         dummyLabel.text = title;
         
         CGSize size = [dummyLabel sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)];
-        return ceil(size.height) + 24.0; // 顶边距16 + 底边距6 + 2.0防误差补足
+        // 🛡️ 稍微调大缓冲空间，确保万无一失
+        return ceil(size.height) + 26.0; 
     }
     return section == 0 ? CGFLOAT_MIN : 15.0;
 }
@@ -1495,7 +1497,8 @@ static NSString * GetPrefsPlistPath() {
     footerLabel.font = [UIFont systemFontOfSize:12]; 
     footerLabel.textColor = [UIColor systemGrayColor];
     footerLabel.numberOfLines = 0; 
-    footerLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    // 🔪 核心改动：允许字符强制换行
+    footerLabel.lineBreakMode = NSLineBreakByCharWrapping;
     footerLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [footerView addSubview:footerLabel];
@@ -1524,21 +1527,23 @@ static NSString * GetPrefsPlistPath() {
     }
     CGFloat width = tableView.bounds.size.width - padding;
     
-    // 💯 核心修复：用真实的 UILabel 来模拟测量，彻底告别高度算错！
     UILabel *dummyLabel = [[UILabel alloc] init];
     dummyLabel.numberOfLines = 0;
-    dummyLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    // 🔪 核心改动：测算高度时也必须保持换行逻辑一致
+    dummyLabel.lineBreakMode = NSLineBreakByCharWrapping;
     dummyLabel.font = [UIFont systemFontOfSize:12];
     dummyLabel.text = footerText;
     
     CGSize size = [dummyLabel sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)];
-    return ceil(size.height) + 16.0; // 顶边距6 + 底边距6 + 4.0防误差补足
+    // 🛡️ 稍微调大缓冲空间，确保存入各种设备分辨率都不截断
+    return ceil(size.height) + 24.0; 
 }
 // =================================================================
 
 - (CGFloat)tableView:(UITableView *)tableView estimatedHeightForFooterInSection:(NSInteger)section {
     return 40.0;
 }
+// =================================================================
 // =================================================================
 
 // ================= 药丸 UI 单元格展示控制 =================
