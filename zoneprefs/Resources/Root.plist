@@ -32,19 +32,6 @@
             <key>PostNotification</key> <string>com.iosdump.zoneprefs/ReloadPrefs</string>
         </dict>
         <dict>
-            <key>cell</key> <string>PSSwitchCell</string>
-            <key>default</key> <false/>
-            <key>defaults</key> <string>com.iosdump.zoneprefs</string>
-            <key>key</key> <string>BindPosterEnabled</string>
-            <key>label</key> <string>仅当前海报生效</string>
-            <key>PostNotification</key> <string>com.iosdump.zoneprefs/ReloadPrefs</string>
-        </dict>
-        <dict>
-            <key>cell</key> <string>PSButtonCell</string>
-            <key>label</key> <string>绑定当前锁屏海报</string>
-            <key>action</key> <string>bindCurrentPosterAction:</string>
-        </dict>
-        <dict>
             <key>cell</key> <string>PSButtonCell</string>
             <key>label</key> <string>导入壁纸</string>
             <key>action</key> <string>importZone:</string>
