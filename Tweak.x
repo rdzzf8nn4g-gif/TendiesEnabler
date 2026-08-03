@@ -90,6 +90,45 @@ typedef struct {
 @end
 
 // =========================================================================
+// 独立手势代理类 (彻底修复干扰系统 iOS 16 长按海报板的问题)
+// =========================================================================
+@interface ZoneGestureDelegate : NSObject <UIGestureRecognizerDelegate>
++ (instancetype)sharedInstance;
+@end
+
+@implementation ZoneGestureDelegate
++ (instancetype)sharedInstance {
+    static id shared = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        shared = [[self alloc] init];
+    });
+    return shared;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (!g_enabled || !g_doubleTapLock) return NO; 
+    
+    if ([touch.view isKindOfClass:[UIControl class]]) {
+        return NO;
+    }
+    
+    UIView *view = touch.view;
+    while (view) {
+        NSString *className = NSStringFromClass([view class]);
+        if ([className containsString:@"Passcode"] || 
+            [className containsString:@"Keyboard"] || 
+            [className containsString:@"NCNotificationShortLookView"] || 
+            [className containsString:@"ClearButton"]) {
+            return NO; 
+        }
+        view = view.superview;
+    }
+    return YES; 
+}
+@end
+
+// =========================================================================
 // 核心修复：纯血 CoreAnimation 底层解析器 (拯救 iOS14/15 崩溃)
 // =========================================================================
 @interface CAStateController : NSObject
@@ -2600,36 +2639,8 @@ static void EnsureEngineViewIsMounted() {
     doubleTap.numberOfTapsRequired = 2;
     doubleTap.cancelsTouchesInView = NO; 
     doubleTap.delaysTouchesBegan = NO;
-    doubleTap.delegate = self; // 【绑定代理】
+    doubleTap.delegate = [ZoneGestureDelegate sharedInstance]; // 【绑定代理】
     [self.view addGestureRecognizer:doubleTap];
-}
-
-// 【终极修复】：精准区分空白区域与交互元素，既不卡顿按钮，又能完美双击息屏
-%new
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
-    
-    // 1. 系统级精准拦截：只要点中的是标准交互控件（各类按钮X号、手电筒、相机、音乐播放暂停、滑块等），直接放行！
-    if ([touch.view isKindOfClass:[UIControl class]]) {
-        return NO;
-    }
-    
-    UIView *view = touch.view;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        
-        // 2. 字符串精确制导：仅拦截“密码键盘”、“原生键盘”、“通知气泡卡片本身”和“特殊的清除按钮”
-        if ([className containsString:@"Passcode"] || 
-            [className containsString:@"Keyboard"] || 
-            [className containsString:@"NCNotificationShortLookView"] || 
-            [className containsString:@"ClearButton"]) {
-            return NO; 
-        }
-        
-        // 【关键】：这里绝对不能再写宽泛的 @"Notification" 或 @"Button"，否则会误伤锁屏滑动底板
-        view = view.superview;
-    }
-    return YES; // 点在真正的空白处，允许双击息屏！
 }
 
 %new
@@ -3082,36 +3093,8 @@ static void EnsureEngineViewIsMounted() {
     doubleTap.numberOfTapsRequired = 2;
     doubleTap.cancelsTouchesInView = NO; 
     doubleTap.delaysTouchesBegan = NO;
-    doubleTap.delegate = self; // 【绑定代理】
+    doubleTap.delegate = [ZoneGestureDelegate sharedInstance]; // 【绑定代理】
     [self.view addGestureRecognizer:doubleTap];
-}
-
-// 【终极修复】：精准区分空白区域与交互元素，既不卡顿按钮，又能完美双击息屏
-%new
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    if (!g_enabled || !g_doubleTapLock) return NO; // 没开功能直接休眠手势
-    
-    // 1. 系统级精准拦截：只要点中的是标准交互控件（各类按钮X号、手电筒、相机、音乐播放暂停、滑块等），直接放行！
-    if ([touch.view isKindOfClass:[UIControl class]]) {
-        return NO;
-    }
-    
-    UIView *view = touch.view;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        
-        // 2. 字符串精确制导：仅拦截“密码键盘”、“原生键盘”、“通知气泡卡片本身”和“特殊的清除按钮”
-        if ([className containsString:@"Passcode"] || 
-            [className containsString:@"Keyboard"] || 
-            [className containsString:@"NCNotificationShortLookView"] || 
-            [className containsString:@"ClearButton"]) {
-            return NO; 
-        }
-        
-        // 【关键】：这里绝对不能再写宽泛的 @"Notification" 或 @"Button"，否则会误伤锁屏滑动底板
-        view = view.superview;
-    }
-    return YES; // 点在真正的空白处，允许双击息屏！
 }
 
 %new
