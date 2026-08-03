@@ -90,45 +90,6 @@ typedef struct {
 @end
 
 // =========================================================================
-// 独立手势代理类 (彻底修复干扰系统 iOS 16 长按海报板的问题)
-// =========================================================================
-@interface ZoneGestureDelegate : NSObject <UIGestureRecognizerDelegate>
-+ (instancetype)sharedInstance;
-@end
-
-@implementation ZoneGestureDelegate
-+ (instancetype)sharedInstance {
-    static id shared = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        shared = [[self alloc] init];
-    });
-    return shared;
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    if (!g_enabled || !g_doubleTapLock) return NO; 
-    
-    if ([touch.view isKindOfClass:[UIControl class]]) {
-        return NO;
-    }
-    
-    UIView *view = touch.view;
-    while (view) {
-        NSString *className = NSStringFromClass([view class]);
-        if ([className containsString:@"Passcode"] || 
-            [className containsString:@"Keyboard"] || 
-            [className containsString:@"NCNotificationShortLookView"] || 
-            [className containsString:@"ClearButton"]) {
-            return NO; 
-        }
-        view = view.superview;
-    }
-    return YES; 
-}
-@end
-
-// =========================================================================
 // 核心修复：纯血 CoreAnimation 底层解析器 (拯救 iOS14/15 崩溃)
 // =========================================================================
 @interface CAStateController : NSObject
@@ -2456,6 +2417,45 @@ static void EnsureEngineViewIsMounted() {
             });
         }
     }
+}
+@end
+
+// =========================================================================
+// 独立手势代理类 (彻底修复干扰系统 iOS 16 长按海报板的问题)
+// =========================================================================
+@interface ZoneGestureDelegate : NSObject <UIGestureRecognizerDelegate>
++ (instancetype)sharedInstance;
+@end
+
+@implementation ZoneGestureDelegate
++ (instancetype)sharedInstance {
+    static id shared = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        shared = [[self alloc] init];
+    });
+    return shared;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (!g_enabled || !g_doubleTapLock) return NO; 
+    
+    if ([touch.view isKindOfClass:[UIControl class]]) {
+        return NO;
+    }
+    
+    UIView *view = touch.view;
+    while (view) {
+        NSString *className = NSStringFromClass([view class]);
+        if ([className containsString:@"Passcode"] || 
+            [className containsString:@"Keyboard"] || 
+            [className containsString:@"NCNotificationShortLookView"] || 
+            [className containsString:@"ClearButton"]) {
+            return NO; 
+        }
+        view = view.superview;
+    }
+    return YES; 
 }
 @end
 
