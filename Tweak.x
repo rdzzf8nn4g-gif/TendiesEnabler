@@ -273,6 +273,8 @@ static BOOL g_enhanced_engine = NO;
 static BOOL g_hideTextShadow = NO;
 static BOOL g_lowPowerPause = NO; 
 static BOOL g_doubleTapLock = NO;
+static BOOL g_lockVideoLoop = YES;
+static BOOL g_homeVideoLoop = YES;
 static NSString *g_zonePath = nil;
 
 // 视觉状态标识
@@ -487,6 +489,14 @@ g_doubleTapLock = CFPreferencesGetAppBooleanValue(CFSTR("DoubleTapLock"), appID,
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
     g_enableAnimSpeed = CFPreferencesGetAppBooleanValue(CFSTR("EnableAnimSpeed"), appID, &valid) ? valid : YES;
     
+    Boolean validLockLoop;
+    BOOL lockLoop = CFPreferencesGetAppBooleanValue(CFSTR("LockVideoLoop"), appID, &validLockLoop);
+    g_lockVideoLoop = validLockLoop ? lockLoop : YES;
+
+    Boolean validHomeLoop;
+    BOOL homeLoop = CFPreferencesGetAppBooleanValue(CFSTR("HomeVideoLoop"), appID, &validHomeLoop);
+    g_homeVideoLoop = validHomeLoop ? homeLoop : YES;
+    
     CFPropertyListRef lockVidRef = CFPreferencesCopyAppValue(CFSTR("LockVideoPath"), appID);
     if (lockVidRef && CFGetTypeID(lockVidRef) == CFStringGetTypeID()) {
         g_lockVideoPath = [(__bridge NSString *)lockVidRef copy];
@@ -572,15 +582,17 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
 @property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, assign) BOOL isManuallyPaused; 
-- (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path;
+@property (nonatomic, assign) BOOL shouldLoop;
+- (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path shouldLoop:(BOOL)shouldLoop;
 - (void)playVideo;
 - (void)pauseVideo;
 - (void)cleanUpEngineSafely;
 @end
 
 @implementation ZoneVideoPlayerView
-- (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path {
+- (instancetype)initWithFrame:(CGRect)frame videoPath:(NSString *)path shouldLoop:(BOOL)shouldLoop {
     if (self = [super initWithFrame:frame]) {
+        self.shouldLoop = shouldLoop;
         self.backgroundColor = [UIColor clearColor];
         self.userInteractionEnabled = NO;
         self.clipsToBounds = YES;
@@ -606,13 +618,18 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
             self.player.muted = YES;
             self.player.allowsExternalPlayback = NO; 
             self.player.automaticallyWaitsToMinimizeStalling = NO; 
-            self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
             
             if (@available(iOS 12.0, *)) {
                 self.player.preventsDisplaySleepDuringVideoPlayback = NO;
             }
             
-            self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
+            if (self.shouldLoop) {
+                self.player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
+                self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
+            } else {
+                self.player.actionAtItemEnd = AVPlayerActionAtItemEndPause;
+                [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(playerItemDidReachEnd:) name:AVPlayerItemDidPlayToEndTimeNotification object:item];
+            }
             
             self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
             self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
@@ -628,6 +645,13 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         }
     }
     return self;
+}
+
+- (void)playerItemDidReachEnd:(NSNotification *)notification {
+    if (!self.shouldLoop && !self.isManuallyPaused) {
+        [self.player seekToTime:kCMTimeZero];
+        [self pauseVideo];
+    }
 }
 
 - (void)layoutSubviews {
@@ -831,7 +855,7 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
     self.backgroundColor = [UIColor clearColor];
     
     if (IsSingleVideoMode()) {
-        self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
+        self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath shouldLoop:g_homeVideoLoop];
         if (self.homeVideoView) {
             self.homeVideoView.alpha = 1.0;
             [self addSubview:self.homeVideoView];
@@ -839,14 +863,14 @@ static void prefsChangedCallback(CFNotificationCenterRef center, void *observer,
         if (g_isScreenOn) [self onWakeUp];
     } else {
         if (hasLock) {
-            self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath];
+            self.lockVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_lockVideoPath shouldLoop:g_lockVideoLoop];
             if (self.lockVideoView) {
                 self.lockVideoView.alpha = 0.0;
                 [self addSubview:self.lockVideoView];
             }
         }
         if (hasHome) {
-            self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath];
+            self.homeVideoView = [[ZoneVideoPlayerView alloc] initWithFrame:self.bounds videoPath:g_homeVideoPath shouldLoop:g_homeVideoLoop];
             if (self.homeVideoView) {
                 self.homeVideoView.alpha = 1.0;
                 [self addSubview:self.homeVideoView];
