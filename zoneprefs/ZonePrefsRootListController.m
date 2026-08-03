@@ -704,6 +704,20 @@ static NSString * GetPrefsPlistPath() {
         [lowPowerSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
         lowPowerSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:lowPowerSpec];
+
+        PSSpecifier *lockVideoLoopSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏循环播放" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        [lockVideoLoopSpec setProperty:@"LockVideoLoop" forKey:@"key"];
+        [lockVideoLoopSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+        [lockVideoLoopSpec setProperty:@YES forKey:@"default"];
+        lockVideoLoopSpec->action = @selector(setPreferenceValue:specifier:);
+        [_specifiers addObject:lockVideoLoopSpec];
+
+        PSSpecifier *homeVideoLoopSpec = [PSSpecifier preferenceSpecifierNamed:@"桌面循环播放" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        [homeVideoLoopSpec setProperty:@"HomeVideoLoop" forKey:@"key"];
+        [homeVideoLoopSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+        [homeVideoLoopSpec setProperty:@YES forKey:@"default"];
+        homeVideoLoopSpec->action = @selector(setPreferenceValue:specifier:);
+        [_specifiers addObject:homeVideoLoopSpec];
         
         PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面使用同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [sameMatSpec setProperty:@"SameVideoMaterial" forKey:@"key"];
@@ -2115,7 +2129,7 @@ static NSString * GetPrefsPlistPath() {
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     
     NSString *key = [specifier propertyForKey:@"key"];
-    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"] || [key isEqualToString:@"EnableAnimSpeed"] || [key isEqualToString:@"DoubleTapLock"] || [key isEqualToString:@"EnableReplaceImage"]) {
+    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"LockVideoLoop"] || [key isEqualToString:@"HomeVideoLoop"] || [key isEqualToString:@"SameVideoMaterial"] || [key isEqualToString:@"EnableAnimSpeed"] || [key isEqualToString:@"DoubleTapLock"] || [key isEqualToString:@"EnableReplaceImage"]) {
         CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, appID);
         CFPreferencesAppSynchronize(appID);
         
