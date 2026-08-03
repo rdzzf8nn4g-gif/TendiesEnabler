@@ -704,6 +704,17 @@ static NSString * GetPrefsPlistPath() {
         [lowPowerSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
         lowPowerSpec->action = @selector(setPreferenceValue:specifier:);
         [_specifiers addObject:lowPowerSpec];
+
+        PSSpecifier *bindPosterSpec = [PSSpecifier preferenceSpecifierNamed:@"仅当前海报生效" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+        [bindPosterSpec setProperty:@"BindPosterEnabled" forKey:@"key"];
+        [bindPosterSpec setProperty:@"com.iosdump.zoneprefs" forKey:@"defaults"];
+        [bindPosterSpec setProperty:@NO forKey:@"default"];
+        bindPosterSpec->action = @selector(setPreferenceValue:specifier:);
+        [_specifiers addObject:bindPosterSpec];
+
+        PSSpecifier *btnBindPoster = [PSSpecifier preferenceSpecifierNamed:@"绑定当前锁屏海报" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+        btnBindPoster->action = @selector(bindCurrentPosterAction:);
+        [_specifiers addObject:btnBindPoster];
         
         PSSpecifier *sameMatSpec = [PSSpecifier preferenceSpecifierNamed:@"锁屏桌面使用同素材" target:self set:@selector(setSameMaterialValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
         [sameMatSpec setProperty:@"SameVideoMaterial" forKey:@"key"];
@@ -1073,6 +1084,14 @@ static NSString * GetPrefsPlistPath() {
 
 - (void)showReplaceImageInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"开启编辑图片可在每个素材右边按钮点击编辑按钮编辑壁纸图片。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)bindCurrentPosterAction:(PSSpecifier *)spec {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.iosdump.zoneprefs/BindCurrentPoster"), NULL, NULL, YES);
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"绑定指令已发送" message:@"已锁定当前锁屏海报！长按切换至其他原生海报板时，Zone 插件将自动放行并显示系统壁纸。" preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -2115,7 +2134,7 @@ static NSString * GetPrefsPlistPath() {
     CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
     
     NSString *key = [specifier propertyForKey:@"key"];
-    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"] || [key isEqualToString:@"EnableAnimSpeed"] || [key isEqualToString:@"DoubleTapLock"] || [key isEqualToString:@"EnableReplaceImage"]) {
+    if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"LowPowerPause"] || [key isEqualToString:@"SameVideoMaterial"] || [key isEqualToString:@"EnableAnimSpeed"] || [key isEqualToString:@"DoubleTapLock"] || [key isEqualToString:@"EnableReplaceImage"] || [key isEqualToString:@"BindPosterEnabled"]) {
         CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, appID);
         CFPreferencesAppSynchronize(appID);
         
