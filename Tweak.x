@@ -275,45 +275,6 @@ static BOOL g_lowPowerPause = NO;
 static BOOL g_doubleTapLock = NO;
 static NSString *g_zonePath = nil;
 
-static BOOL g_bindPosterEnabled = NO;
-static NSString *g_targetPosterUUID = nil;
-
-// [动态获取 iOS 16+ 当前激活的锁屏海报 UUID]
-static NSString *ZoneGetCurrentPosterUUID() {
-    if (@available(iOS 16.0, *)) {
-        Class wcClass = NSClassFromString(@"SBWallpaperController");
-        if ([wcClass respondsToSelector:@selector(sharedInstance)]) {
-            id wc = [wcClass sharedInstance];
-            id wpvc = [wc respondsToSelector:@selector(wallpaperViewController)] ? [wc performSelector:@selector(wallpaperViewController)] : wc;
-            if (wpvc) {
-                id config = [wpvc respondsToSelector:@selector(activePosterConfiguration)] ? [wpvc performSelector:@selector(activePosterConfiguration)] : ([wpvc respondsToSelector:@selector(activePosterConfigurationForVariant:)] ? [wpvc performSelector:@selector(activePosterConfigurationForVariant:) withObject:@(0)] : nil);
-                if (config) {
-                    id identity = [config respondsToSelector:@selector(serverIdentity)] ? [config performSelector:@selector(serverIdentity)] : nil;
-                    if (identity && [identity respondsToSelector:@selector(posterUUID)]) {
-                        id uuid = [identity performSelector:@selector(posterUUID)];
-                        return [uuid isKindOfClass:[NSUUID class]] ? [(NSUUID *)uuid UUIDString] : ([uuid isKindOfClass:[NSString class]] ? (NSString *)uuid : nil);
-                    }
-                    id descId = [config respondsToSelector:@selector(descriptorIdentifier)] ? [config performSelector:@selector(descriptorIdentifier)] : nil;
-                    if ([descId isKindOfClass:[NSString class]]) return (NSString *)descId;
-                }
-            }
-        }
-    }
-    return nil;
-}
-
-// [核心状态调度器：替代之前的死板判定]
-static inline BOOL ZoneIsActive() {
-    if (!g_enabled) return NO;
-    if (@available(iOS 16.0, *)) {
-        if (g_bindPosterEnabled && g_targetPosterUUID.length > 0) {
-            NSString *currentUUID = ZoneGetCurrentPosterUUID();
-            if (currentUUID && ![currentUUID isEqualToString:g_targetPosterUUID]) return NO; // 核心：UUID不匹配，直接挂起并放行系统海报
-        }
-    }
-    return YES;
-}
-
 // 视觉状态标识
 static BOOL g_isUnlocked = NO; 
 static BOOL g_isScreenOn = YES;
@@ -522,18 +483,9 @@ static void reloadPrefs() {
     g_enhanced_engine = CFPreferencesGetAppBooleanValue(CFSTR("EnhancedEngine"), appID, &valid) ? valid : NO;
     g_hideTextShadow = CFPreferencesGetAppBooleanValue(CFSTR("HideTextShadow"), appID, &valid) ? valid : NO;
     g_lowPowerPause = CFPreferencesGetAppBooleanValue(CFSTR("LowPowerPause"), appID, &valid) ? valid : NO;
-    g_doubleTapLock = CFPreferencesGetAppBooleanValue(CFSTR("DoubleTapLock"), appID, &valid) ? valid : NO;
+g_doubleTapLock = CFPreferencesGetAppBooleanValue(CFSTR("DoubleTapLock"), appID, &valid) ? valid : NO;
     g_isVideoMode = CFPreferencesGetAppBooleanValue(CFSTR("VideoModeEnabled"), appID, &valid) ? valid : NO;
     g_enableAnimSpeed = CFPreferencesGetAppBooleanValue(CFSTR("EnableAnimSpeed"), appID, &valid) ? valid : YES;
-    g_bindPosterEnabled = CFPreferencesGetAppBooleanValue(CFSTR("BindPosterEnabled"), appID, &valid) ? valid : NO;
-    
-    CFPropertyListRef posterRef = CFPreferencesCopyAppValue(CFSTR("TargetPosterUUID"), appID);
-    if (posterRef && CFGetTypeID(posterRef) == CFStringGetTypeID()) {
-        g_targetPosterUUID = [(__bridge NSString *)posterRef copy];
-    } else {
-        g_targetPosterUUID = nil;
-    }
-    if (posterRef) CFRelease(posterRef);
     
     CFPropertyListRef lockVidRef = CFPreferencesCopyAppValue(CFSTR("LockVideoPath"), appID);
     if (lockVidRef && CFGetTypeID(lockVidRef) == CFStringGetTypeID()) {
@@ -588,25 +540,6 @@ static void reloadPrefs() {
         g_animDuration = 0.85;
     }
     if (pathRef) CFRelease(pathRef);
-}
-
-static void bindPosterCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    if (@available(iOS 16.0, *)) {
-        NSString *currentUUID = ZoneGetCurrentPosterUUID();
-        if (currentUUID && currentUUID.length > 0) {
-            CFStringRef appID = CFSTR("com.iosdump.zoneprefs");
-            CFPreferencesSetAppValue(CFSTR("TargetPosterUUID"), (__bridge CFStringRef)currentUUID, appID);
-            CFPreferencesAppSynchronize(appID);
-            reloadPrefs();
-            dispatch_async(dispatch_get_main_queue(), ^{
-                Class wcClass = NSClassFromString(@"SBWallpaperController");
-                if ([wcClass respondsToSelector:@selector(sharedInstance)] && [wcClass sharedInstance]) {
-                    EnsureEngineViewIsMounted();
-                }
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
-            });
-        }
-    }
 }
 
 static void prefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -2363,7 +2296,7 @@ static void EnsureEngineViewIsMounted() {
     
     UIView *existingEngine = objc_getAssociatedObject(wallpaperController, "GlobalZoneEngine");
 
-    if (!ZoneIsActive()) {
+    if (!g_enabled) {
         if (existingEngine) {
             if ([existingEngine respondsToSelector:@selector(clearCurrentViewsSafely)]) {
                 [existingEngine performSelector:@selector(clearCurrentViewsSafely)];
@@ -2510,7 +2443,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)layoutSubviews {
     %orig;
-    if (!ZoneIsActive()) {
+    if (!g_enabled) {
         self.hidden = NO;
         self.alpha = 1.0;
         self.layer.opacity = 1.0;
@@ -2548,7 +2481,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setAlpha:(double)alpha {
-    if (ZoneIsActive() && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
+    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
         if (!g_isVideoMode) { %orig(0.0); self.layer.opacity = 0.0; return; }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
@@ -2565,7 +2498,7 @@ static void EnsureEngineViewIsMounted() {
 }
 
 - (void)setHidden:(BOOL)hidden {
-    if (ZoneIsActive() && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
+    if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
         if (!g_isVideoMode) { %orig(YES); self.layer.opacity = 0.0; return; }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
@@ -2595,7 +2528,7 @@ static void EnsureEngineViewIsMounted() {
 - (void)viewWillLayoutSubviews {
     %orig;
     
-    if (!ZoneIsActive()) {
+    if (!g_enabled) {
         if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
             UIView *homeView = [self homescreenWallpaperView];
             if (homeView) homeView.alpha = 1.0;
@@ -2620,15 +2553,15 @@ static void EnsureEngineViewIsMounted() {
     }
 }
 - (id)_newWallpaperEffectViewForVariant:(long long)variant transitionState:(PBUIWallpaperTransitionState)state {
-    if (ZoneIsActive() && !g_isVideoMode) return nil;
-    if (ZoneIsActive() && g_isVideoMode && IsSingleVideoMode()) return %orig;
-    if (ZoneIsActive() && g_isVideoMode) return nil;
+    if (g_enabled && !g_isVideoMode) return nil;
+    if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
+    if (g_enabled && g_isVideoMode) return nil;
     return %orig;
 }
 - (BOOL)_updateEffectViewForVariant:(long long)variant oldState:(void *)oldState newState:(void *)newState oldEffectView:(id *)oldView newEffectView:(id *)newView {
-    if (ZoneIsActive() && !g_isVideoMode) return NO;
-    if (ZoneIsActive() && g_isVideoMode && IsSingleVideoMode()) return %orig;
-    if (ZoneIsActive() && g_isVideoMode) return NO;
+    if (g_enabled && !g_isVideoMode) return NO;
+    if (g_enabled && g_isVideoMode && IsSingleVideoMode()) return %orig;
+    if (g_enabled && g_isVideoMode) return NO;
     return %orig;
 }
 %end
@@ -2691,7 +2624,7 @@ static void EnsureEngineViewIsMounted() {
     %orig;
     _UIPortalView *portalView = objc_getAssociatedObject(self, "CoverSheetZonePortal");
 
-    if (!ZoneIsActive()) {
+    if (!g_enabled) {
         if (portalView) portalView.hidden = YES;
         UIViewController *bgVC = safelyGetIvarAsViewController(self, "_backgroundContentViewController");
         if (bgVC && bgVC.view) {
@@ -2841,12 +2774,9 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)_cleanupPosterSwitcherPresentationForCompleted:(BOOL)completed withActivatingTouches:(id)touches {
     %orig;
-    if (g_enabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            EnsureEngineViewIsMounted();
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZoneForceLayout" object:nil];
-            if (g_portalView && ZoneIsActive()) g_portalView.hidden = NO;
-        });
+    if (g_enabled && g_portalView) {
+        g_portalView.hidden = NO;
+        [self viewWillLayoutSubviews];
     }
 }
 
@@ -2908,7 +2838,7 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)updateWallpaperAnimationWithProgress:(double)progress {
     %orig;
-    if (!ZoneIsActive()) return;
+    if (!g_enabled) return;
 
     // 【核心修复 3】: 无论是否在 AOD 状态，必须第一时间先更新 portalView 的透明度！
     // 这样在桌面触发息屏时，引擎画面才能瞬间接管锁屏，防止出现黑屏断层空窗期！
@@ -3737,7 +3667,6 @@ static inline NSString* ZoneGetTargetWakeState_iOS14() {
 
     reloadPrefs();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, prefsChangedCallback, CFSTR("com.iosdump.zoneprefs/ReloadPrefs"), NULL, CFNotificationSuspensionBehaviorCoalesce);
-    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, bindPosterCallback, CFSTR("com.iosdump.zoneprefs/BindCurrentPoster"), NULL, CFNotificationSuspensionBehaviorCoalesce);
     
     if (NSClassFromString(@"PBUIWallpaperViewController") != Nil) {
         %init(iOS16Plus);
