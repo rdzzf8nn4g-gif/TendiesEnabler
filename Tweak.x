@@ -2537,15 +2537,20 @@ static void EnsureEngineViewIsMounted() {
         self.alpha = hide ? 0.0 : 1.0;
         self.layer.opacity = hide ? 0.0 : 1.0; // 【核心修复 4】：暴力绑定底层图层不透明度
     } else {
-        self.hidden = YES;
-        self.alpha = 0.0;
-        self.layer.opacity = 0.0;
+        BOOL hasInteractive = (g_zonePath && [[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]);
+        self.hidden = !hasInteractive;
+        self.alpha = hasInteractive ? 0.0 : 1.0;
+        self.layer.opacity = hasInteractive ? 0.0 : 1.0;
     }
 }
 
 - (void)setAlpha:(double)alpha {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(0.0); self.layer.opacity = 0.0; return; }
+        if (!g_isVideoMode) { 
+            BOOL hasInteractive = (g_zonePath && [[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]);
+            if (hasInteractive) { %orig(0.0); self.layer.opacity = 0.0; return; }
+            else { %orig; return; }
+        }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
@@ -2562,7 +2567,11 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(YES); self.layer.opacity = 0.0; return; }
+        if (!g_isVideoMode) { 
+            BOOL hasInteractive = (g_zonePath && [[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]);
+            if (hasInteractive) { %orig(YES); self.layer.opacity = 0.0; return; }
+            else { %orig; return; }
+        }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
@@ -2603,8 +2612,17 @@ static void EnsureEngineViewIsMounted() {
         return;
     }
     
-    BOOL hideHome = !g_isVideoMode || (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
-    BOOL hideLock = !g_isVideoMode || (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+    BOOL hasInteractive = (g_zonePath && [[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]);
+    BOOL hideHome = NO;
+    BOOL hideLock = NO;
+    
+    if (g_isVideoMode) {
+        hideHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
+        hideLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
+    } else {
+        hideHome = hasInteractive;
+        hideLock = hasInteractive;
+    }
 
     if ([self respondsToSelector:@selector(homescreenWallpaperView)]) {
         UIView *homeView = [self homescreenWallpaperView];
@@ -3035,14 +3053,19 @@ static void EnsureEngineViewIsMounted() {
         self.hidden = hide;
         self.alpha = hide ? 0.0 : 1.0;
     } else {
-        self.hidden = YES;
-        self.alpha = 0.0;
+        BOOL hasInteractive = (g_zonePath && [[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]);
+        self.hidden = !hasInteractive;
+        self.alpha = hasInteractive ? 0.0 : 1.0;
     }
 }
 
 - (void)setAlpha:(double)alpha {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(0.0); return; }
+        if (!g_isVideoMode) { 
+            BOOL hasInteractive = (g_zonePath && [[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]);
+            if (hasInteractive) { %orig(0.0); return; }
+            else { %orig; return; }
+        }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
@@ -3059,7 +3082,11 @@ static void EnsureEngineViewIsMounted() {
 
 - (void)setHidden:(BOOL)hidden {
     if (g_enabled && [self respondsToSelector:@selector(zone_isMainWallpaperContainer)] && [self zone_isMainWallpaperContainer]) {
-        if (!g_isVideoMode) { %orig(YES); return; }
+        if (!g_isVideoMode) { 
+            BOOL hasInteractive = (g_zonePath && [[NSFileManager defaultManager] fileExistsAtPath:g_zonePath]);
+            if (hasInteractive) { %orig(YES); return; }
+            else { %orig; return; }
+        }
         
         BOOL hasLock = (g_lockVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_lockVideoPath]);
         BOOL hasHome = (g_homeVideoPath && [[NSFileManager defaultManager] fileExistsAtPath:g_homeVideoPath]);
